@@ -15,7 +15,7 @@
 - We provide a `systemd` unit file that users can install that manages the `daemon` process
 - The cli tool supports the following commands:
     - `attach {session}`: attach to the pty process
-    - `detach {session}`: detach from the pty process without killing it
+    - `detach`: detach from the pty process without killing it
     - `kill {session}`: kill the pty process
     - `list`: show all sessions and what clients are currently attached
     - `daemon`: the background process that manages all sessions
@@ -25,6 +25,7 @@
 
 ## usage
 
+- `zmx daemon` - start the background process that all other commands communicate with
 - `zmx attach <session_name>` - create or attach to a session
 - `zmx detach` (or Ctrl+b + d) - detach from session while keeping pty alive
 - `zmx list` - list sessions
