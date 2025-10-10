@@ -1,0 +1,10 @@
+.DS_Store
+*.log
+.zig-cache/
+zig-cache/
+zig-out/
+Session*.*vim
+commit_msg
+*.sw?
+libxev_src/
+zig_std_src/
