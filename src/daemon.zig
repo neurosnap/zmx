@@ -40,6 +40,12 @@ const PtyReadContext = struct {
     server_ctx: *ServerContext,
 };
 
+// Context for PTY write callbacks
+const PtyWriteContext = struct {
+    allocator: std.mem.Allocator,
+    message: []u8,
+};
+
 // A PTY session that manages a persistent shell process
 // Stores the PTY master file descriptor, shell process PID, scrollback buffer,
 // and a read buffer for async I/O with libxev
@@ -894,14 +900,35 @@ fn readPtyCallback(
             response_buf.appendSlice(session.allocator, "\"}}\n") catch return .disarm;
             const response = response_buf.items;
 
-            // Send to all attached clients
+            // Send to all attached clients using async write
             var it = session.attached_clients.keyIterator();
             while (it.next()) |client_fd| {
                 const attached_client = ctx.clients.get(client_fd.*) orelse continue;
-                std.debug.print("Sending response to client fd={d}\n", .{client_fd.*});
-                _ = posix.write(attached_client.fd, response) catch |err| {
-                    std.debug.print("Error writing to fd={d}: {s}\n", .{ client_fd.*, @errorName(err) });
+                const owned_response = session.allocator.dupe(u8, response) catch continue;
+
+                const write_ctx = session.allocator.create(PtyWriteContext) catch {
+                    session.allocator.free(owned_response);
+                    continue;
                 };
+                write_ctx.* = .{
+                    .allocator = session.allocator,
+                    .message = owned_response,
+                };
+
+                const write_completion = session.allocator.create(xev.Completion) catch {
+                    session.allocator.free(owned_response);
+                    session.allocator.destroy(write_ctx);
+                    continue;
+                };
+
+                attached_client.stream.write(
+                    loop,
+                    write_completion,
+                    .{ .slice = owned_response },
+                    PtyWriteContext,
+                    write_ctx,
+                    ptyWriteCallback,
+                );
             }
         }
 
@@ -933,6 +960,29 @@ fn readPtyCallback(
         return .disarm;
     }
     unreachable;
+}
+
+fn ptyWriteCallback(
+    write_ctx_opt: ?*PtyWriteContext,
+    _: *xev.Loop,
+    completion: *xev.Completion,
+    _: xev.Stream,
+    _: xev.WriteBuffer,
+    write_result: xev.WriteError!usize,
+) xev.CallbackAction {
+    const write_ctx = write_ctx_opt.?;
+    const allocator = write_ctx.allocator;
+
+    if (write_result) |_| {
+        // Successfully sent PTY output to client
+    } else |_| {
+        // Silently ignore write errors to prevent log spam
+    }
+
+    allocator.free(write_ctx.message);
+    allocator.destroy(write_ctx);
+    allocator.destroy(completion);
+    return .disarm;
 }
 
 fn execShellWithPrompt(allocator: std.mem.Allocator, session_name: []const u8, shell: [*:0]const u8) noreturn {
