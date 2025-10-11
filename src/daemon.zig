@@ -80,6 +80,7 @@ const Client = struct {
     allocator: std.mem.Allocator,
     attached_session: ?[]const u8,
     server_ctx: *ServerContext,
+    message_buffer: std.ArrayList(u8),
 };
 
 // Main daemon server state that manages the event loop, Unix socket server,
@@ -175,6 +176,7 @@ fn acceptCallback(
             };
 
             const client = ctx.allocator.create(Client) catch @panic("failed to create client");
+            const message_buffer = std.ArrayList(u8).initCapacity(ctx.allocator, 512) catch @panic("failed to create message buffer");
             client.* = .{
                 .fd = client_fd,
                 .stream = xev.Stream.initFd(client_fd),
@@ -182,6 +184,7 @@ fn acceptCallback(
                 .allocator = ctx.allocator,
                 .attached_session = null,
                 .server_ctx = ctx,
+                .message_buffer = message_buffer,
             };
 
             ctx.clients.put(client_fd, client) catch @panic("failed to add client");
@@ -213,10 +216,32 @@ fn readCallback(
             return closeClient(client, completion);
         }
         const data = read_buffer.slice[0..len];
-        handleMessage(client, data) catch |err| {
-            std.debug.print("handleMessage failed: {s}\n", .{@errorName(err)});
+
+        // Append to message buffer
+        client.message_buffer.appendSlice(client.allocator, data) catch {
             return closeClient(client, completion);
         };
+
+        // Process complete messages (delimited by newline)
+        while (std.mem.indexOf(u8, client.message_buffer.items, "\n")) |newline_pos| {
+            const message = client.message_buffer.items[0..newline_pos];
+            handleMessage(client, message) catch |err| {
+                std.debug.print("handleMessage failed: {s}\n", .{@errorName(err)});
+                return closeClient(client, completion);
+            };
+
+            // Remove processed message from buffer (including newline)
+            const remaining = client.message_buffer.items[newline_pos + 1 ..];
+            const remaining_copy = client.allocator.dupe(u8, remaining) catch {
+                return closeClient(client, completion);
+            };
+            client.message_buffer.clearRetainingCapacity();
+            client.message_buffer.appendSlice(client.allocator, remaining_copy) catch {
+                client.allocator.free(remaining_copy);
+                return closeClient(client, completion);
+            };
+            client.allocator.free(remaining_copy);
+        }
 
         return .rearm;
     } else |err| {
@@ -1038,6 +1063,7 @@ fn closeCallback(
         std.debug.print("close failed: {s}\n", .{@errorName(err)});
     }
     std.debug.print("client disconnected fd={d}\n", .{client.fd});
+    client.message_buffer.deinit(client.allocator);
     client.allocator.destroy(completion);
     client.allocator.destroy(client);
     return .disarm;
