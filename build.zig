@@ -15,7 +15,10 @@ pub fn build(b: *std.Build) void {
 
     // You'll want to use a lazy dependency here so that ghostty is only
     // downloaded if you actually need it.
-    if (b.lazyDependency("ghostty", .{})) |dep| {
+    if (b.lazyDependency("ghostty", .{
+        .target = target,
+        .optimize = optimize,
+    })) |dep| {
         exe_mod.addImport(
             "ghostty-vt",
             dep.module("ghostty-vt"),

@@ -18,6 +18,23 @@ The goal of this project is to create a way to attach and detach terminal sessio
 - **Test filter (Zig)**: `zig build test -Dtest-filter=<test name>`
 - **Formatting (Zig)**: `zig fmt .`
 
+## finding library source code
+
+Before trying anything else, run the `zigdoc` command to find an API with documentation:
+
+```
+zigdoc {symbol}
+# examples
+zigdoc ghostty-vt
+zigdoc clap
+zigdoc libxev
+zigdoc std.ArrayList
+zigdoc std.mem.Allocator
+zigdoc std.http.Server
+```
+
+Only if that doesn't work should you grep the project dir.
+
 ## finding libxev source code
 
 To inspect the source code for libxev, look inside the `libxev_src` folder.

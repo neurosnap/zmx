@@ -18,7 +18,11 @@ pub fn main() !void {
     var res = try cli.parse(allocator, &iter);
     defer res.deinit();
 
-    const command = res.positionals[0] orelse return cli.help();
+    const command = res.positionals[0] orelse {
+        try cli.help();
+        return;
+    };
+
     switch (command) {
         .help => try cli.help(),
         .daemon => try daemon.main(),
@@ -27,8 +31,4 @@ pub fn main() !void {
         .detach => try detach.main(),
         .kill => try kill.main(),
     }
-}
-
-test "simple test" {
-    try std.testing.expectEqual(42, 42);
 }

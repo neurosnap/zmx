@@ -1,5 +1,6 @@
 const std = @import("std");
 const clap = @import("clap");
+const posix = std.posix;
 
 const SubCommands = enum {
     help,
@@ -27,10 +28,27 @@ const main_params = clap.parseParamsComptime(
 const MainArgs = clap.ResultEx(clap.Help, &main_params, main_parsers);
 
 pub fn help() !void {
+    const help_text =
+        \\Usage: zmx <command>
+        \\
+        \\Commands:
+        \\  help       Show this help message
+        \\  daemon     Start the zmx daemon
+        \\  attach     Attach to a session
+        \\  detach     Detach from a session
+        \\  kill       Kill a session
+        \\  list       List all sessions
+        \\
+        \\Options:
+        \\
+    ;
+    _ = try posix.write(posix.STDOUT_FILENO, help_text);
+
     var buf: [1024]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&buf);
-    const writer: *std.Io.Writer = &stderr_writer.interface;
-    try clap.help(writer, clap.Help, &main_params, .{});
+    var stdout_file = std.fs.File{ .handle = posix.STDOUT_FILENO };
+    var writer = stdout_file.writer(&buf);
+    try clap.help(&writer.interface, clap.Help, &main_params, .{});
+    try writer.interface.flush();
 }
 
 pub fn parse(gpa: std.mem.Allocator, iter: *std.process.ArgIterator) !MainArgs {
