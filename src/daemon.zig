@@ -361,7 +361,7 @@ fn handleDetachSession(client: *Client, session_name: []const u8, target_client_
 
         client.attached_session = null;
         _ = session.attached_clients.remove(client.fd);
-        
+
         const response = "{\"type\":\"detach_session_response\",\"payload\":{\"status\":\"ok\"}}\n";
         std.debug.print("Sending detach response to client fd={d}: {s}", .{ client.fd, response });
 
@@ -515,40 +515,6 @@ fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []con
     client.attached_session = session.name;
     try session.attached_clients.put(client.fd, {});
 
-    // If reattaching, send the current terminal state
-    if (is_reattach and session.attached_clients.count() > 1) {
-        const snapshot = try renderTerminalSnapshot(session, ctx.allocator);
-        defer ctx.allocator.free(snapshot);
-
-        // Build JSON response with escaped snapshot
-        var response_buf = try std.ArrayList(u8).initCapacity(ctx.allocator, 4096);
-        defer response_buf.deinit(ctx.allocator);
-
-        try response_buf.appendSlice(ctx.allocator, "{\"type\":\"pty_out\",\"payload\":{\"text\":\"");
-
-        // Escape the snapshot for JSON
-        for (snapshot) |byte| {
-            switch (byte) {
-                '"' => try response_buf.appendSlice(ctx.allocator, "\\\""),
-                '\\' => try response_buf.appendSlice(ctx.allocator, "\\\\"),
-                '\n' => try response_buf.appendSlice(ctx.allocator, "\\n"),
-                '\r' => try response_buf.appendSlice(ctx.allocator, "\\r"),
-                '\t' => try response_buf.appendSlice(ctx.allocator, "\\t"),
-                0x08 => try response_buf.appendSlice(ctx.allocator, "\\b"),
-                0x0C => try response_buf.appendSlice(ctx.allocator, "\\f"),
-                0x00...0x07, 0x0B, 0x0E...0x1F, 0x7F...0xFF => {
-                    const escaped = try std.fmt.allocPrint(ctx.allocator, "\\u{x:0>4}", .{byte});
-                    defer ctx.allocator.free(escaped);
-                    try response_buf.appendSlice(ctx.allocator, escaped);
-                },
-                else => try response_buf.append(ctx.allocator, byte),
-            }
-        }
-
-        try response_buf.appendSlice(ctx.allocator, "\"}}\n");
-        _ = try posix.write(client.fd, response_buf.items);
-    }
-
     // Start reading from PTY if not already started (first client)
     if (session.attached_clients.count() == 1) {
         try readFromPty(ctx, client, session);
@@ -559,6 +525,32 @@ fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []con
             "{{\"type\":\"attach_session_response\",\"payload\":{{\"status\":\"ok\",\"client_fd\":{d}}}}}\n",
             .{client.fd},
         );
+        defer ctx.allocator.free(response);
+        _ = try posix.write(client.fd, response);
+    }
+
+    // If reattaching, send the current terminal state after attach response
+    if (is_reattach) {
+        const snapshot = try renderTerminalSnapshot(session, ctx.allocator);
+        defer ctx.allocator.free(snapshot);
+
+        // Use Zig's JSON formatting to properly escape the snapshot
+        var out: std.io.Writer.Allocating = .init(ctx.allocator);
+        defer out.deinit();
+
+        var json_writer: std.json.Stringify = .{ .writer = &out.writer };
+
+        try json_writer.beginObject();
+        try json_writer.objectField("type");
+        try json_writer.write("pty_out");
+        try json_writer.objectField("payload");
+        try json_writer.beginObject();
+        try json_writer.objectField("text");
+        try json_writer.write(snapshot);
+        try json_writer.endObject();
+        try json_writer.endObject();
+
+        const response = try std.fmt.allocPrint(ctx.allocator, "{s}\n", .{out.written()});
         defer ctx.allocator.free(response);
         _ = try posix.write(client.fd, response);
     }
@@ -663,17 +655,17 @@ fn renderTerminalSnapshot(session: *Session, allocator: std.mem.Allocator) ![]u8
     const screen = &session.vt.screen;
     const rows = screen.pages.rows;
     const cols = screen.pages.cols;
-    
+
     var row: usize = 0;
     while (row < rows) : (row += 1) {
         var col: usize = 0;
         while (col < cols) : (col += 1) {
             // Build a point.Point referring to the active (visible) page
-            const pt: ghostty.point.Point = .{ .active = .{ 
-                .x = @as(u16, @intCast(col)), 
+            const pt: ghostty.point.Point = .{ .active = .{
+                .x = @as(u16, @intCast(col)),
                 .y = @as(u16, @intCast(row)),
             } };
-            
+
             if (screen.pages.getCell(pt)) |cell_ref| {
                 const cp = cell_ref.cell.content.codepoint;
                 if (cp == 0) {
@@ -692,7 +684,7 @@ fn renderTerminalSnapshot(session: *Session, allocator: std.mem.Allocator) ![]u8
                 try output.append(allocator, ' ');
             }
         }
-        
+
         if (row < rows - 1) {
             try output.appendSlice(allocator, "\r\n");
         }
