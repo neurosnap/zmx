@@ -518,6 +518,27 @@ fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []con
     // Start reading from PTY if not already started (first client)
     if (session.attached_clients.count() == 1) {
         try readFromPty(ctx, client, session);
+
+        // For first attach to new session, clear the client's terminal
+        if (!is_reattach) {
+            var out: std.io.Writer.Allocating = .init(ctx.allocator);
+            defer out.deinit();
+            var json_writer: std.json.Stringify = .{ .writer = &out.writer };
+
+            try json_writer.beginObject();
+            try json_writer.objectField("type");
+            try json_writer.write("pty_out");
+            try json_writer.objectField("payload");
+            try json_writer.beginObject();
+            try json_writer.objectField("text");
+            try json_writer.write("\x1b[2J\x1b[H"); // Clear screen and move cursor to home
+            try json_writer.endObject();
+            try json_writer.endObject();
+
+            const response = try std.fmt.allocPrint(ctx.allocator, "{s}\n", .{out.written()});
+            defer ctx.allocator.free(response);
+            _ = try posix.write(client.fd, response);
+        }
     } else {
         // Send attach success response for additional clients
         const response = try std.fmt.allocPrint(
