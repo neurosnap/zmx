@@ -718,6 +718,17 @@ fn renderTerminalSnapshot(session: *Session, allocator: std.mem.Allocator) ![]u8
 fn notifyAttachedClientsAndCleanup(session: *Session, ctx: *ServerContext, reason: []const u8) void {
     std.debug.print("Session '{s}' ending: {s}\n", .{ session.name, reason });
 
+    // Copy the session name before cleanup since HashMap key points to session.name
+    const session_name = ctx.allocator.dupe(u8, session.name) catch {
+        // Fallback: just use the existing name and skip removal if allocation fails
+        std.debug.print("Failed to allocate session name copy\n", .{});
+        posix.close(session.pty_master_fd);
+        session.deinit();
+        ctx.allocator.destroy(session);
+        return;
+    };
+    defer ctx.allocator.free(session_name);
+
     // Notify all attached clients
     var it = session.attached_clients.keyIterator();
     while (it.next()) |client_fd| {
@@ -726,24 +737,19 @@ fn notifyAttachedClientsAndCleanup(session: *Session, ctx: *ServerContext, reaso
             client.allocator,
             client.fd,
             .kill_notification,
-            protocol.KillNotification{ .session_name = session.name },
+            protocol.KillNotification{ .session_name = session_name },
         ) catch |err| {
             std.debug.print("Failed to notify client {d}: {s}\n", .{ client_fd.*, @errorName(err) });
         };
-        // Clear client's attached session reference
-        if (client.attached_session) |attached| {
-            client.allocator.free(attached);
-            client.attached_session = null;
-        }
+        // Clear client's attached session reference (just null it, don't free - it points to session.name)
+        client.attached_session = null;
     }
 
     // Close PTY master fd
     posix.close(session.pty_master_fd);
 
-    // Remove from sessions map BEFORE cleaning up (session.deinit frees session.name)
-    const session_name_copy = ctx.allocator.dupe(u8, session.name) catch return;
-    defer ctx.allocator.free(session_name_copy);
-    _ = ctx.sessions.remove(session_name_copy);
+    // Remove from sessions map BEFORE session.deinit frees the key
+    _ = ctx.sessions.remove(session_name);
 
     // Clean up session
     session.deinit();
