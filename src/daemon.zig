@@ -57,6 +57,10 @@ const Session = struct {
     vt_handler: VTHandler,
     attached_clients: std.AutoHashMap(std.posix.fd_t, void),
 
+    // Buffer for incomplete UTF-8 sequences from previous read
+    utf8_partial: [3]u8,
+    utf8_partial_len: usize,
+
     fn deinit(self: *Session) void {
         self.allocator.free(self.name);
         self.buffer.deinit(self.allocator);
@@ -756,29 +760,68 @@ fn readPtyCallback(
             return .disarm;
         }
 
-        const data = read_buffer.slice[0..bytes_read];
-        std.debug.print("PTY output ({d} bytes)\n", .{bytes_read});
+        // Combine any partial UTF-8 from previous read with new data
+        var combined_buf: [4096 + 3]u8 = undefined;
+        const total_len = session.utf8_partial_len + bytes_read;
+
+        if (session.utf8_partial_len > 0) {
+            @memcpy(combined_buf[0..session.utf8_partial_len], session.utf8_partial[0..session.utf8_partial_len]);
+            @memcpy(combined_buf[session.utf8_partial_len..total_len], read_buffer.slice[0..bytes_read]);
+        } else {
+            @memcpy(combined_buf[0..bytes_read], read_buffer.slice[0..bytes_read]);
+        }
+
+        const data = combined_buf[0..total_len];
+        std.debug.print("PTY output ({d} bytes, {d} from partial)\n", .{ bytes_read, session.utf8_partial_len });
+
+        // Check for incomplete UTF-8 sequence at end
+        var valid_len = total_len;
+        session.utf8_partial_len = 0;
+
+        if (total_len > 0) {
+            // Scan backwards to find if we have a partial UTF-8 sequence
+            var i = total_len;
+            while (i > 0 and i > total_len - 4) {
+                i -= 1;
+                const byte = data[i];
+                // Check if this is a UTF-8 start byte
+                if (byte & 0x80 == 0) break; // ASCII, we're good
+                if (byte & 0xC0 == 0xC0) {
+                    // This is a UTF-8 start byte, check if sequence is complete
+                    const expected_len: usize = if (byte & 0xE0 == 0xC0) 2 else if (byte & 0xF0 == 0xE0) 3 else if (byte & 0xF8 == 0xF0) 4 else 1;
+                    if (i + expected_len > total_len) {
+                        // Save partial sequence for next read
+                        session.utf8_partial_len = total_len - i;
+                        @memcpy(session.utf8_partial[0..session.utf8_partial_len], data[i..total_len]);
+                        valid_len = i;
+                    }
+                    break;
+                }
+            }
+        }
+
+        const valid_data = data[0..valid_len];
 
         // Store PTY output in buffer for session restore
-        session.buffer.appendSlice(session.allocator, data) catch |err| {
+        session.buffer.appendSlice(session.allocator, valid_data) catch |err| {
             std.debug.print("Buffer append error: {s}\n", .{@errorName(err)});
         };
 
         // ALWAYS parse through libghostty-vt to maintain state
-        session.vt_stream.nextSlice(data) catch |err| {
+        session.vt_stream.nextSlice(valid_data) catch |err| {
             std.debug.print("VT parse error: {s}\n", .{@errorName(err)});
         };
 
         // Only proxy to clients if someone is attached
-        if (session.attached_clients.count() > 0) {
+        if (session.attached_clients.count() > 0 and valid_len > 0) {
             // Build JSON response with properly escaped text
             var response_buf = std.ArrayList(u8).initCapacity(session.allocator, 4096) catch return .disarm;
             defer response_buf.deinit(session.allocator);
 
             response_buf.appendSlice(session.allocator, "{\"type\":\"pty_out\",\"payload\":{\"text\":\"") catch return .disarm;
 
-            // Manually escape JSON special characters
-            for (data) |byte| {
+            // Escape JSON special characters while preserving UTF-8 sequences
+            for (valid_data) |byte| {
                 switch (byte) {
                     '"' => response_buf.appendSlice(session.allocator, "\\\"") catch return .disarm,
                     '\\' => response_buf.appendSlice(session.allocator, "\\\\") catch return .disarm,
@@ -787,7 +830,7 @@ fn readPtyCallback(
                     '\t' => response_buf.appendSlice(session.allocator, "\\t") catch return .disarm,
                     0x08 => response_buf.appendSlice(session.allocator, "\\b") catch return .disarm,
                     0x0C => response_buf.appendSlice(session.allocator, "\\f") catch return .disarm,
-                    0x00...0x07, 0x0B, 0x0E...0x1F, 0x7F...0xFF => {
+                    0x00...0x07, 0x0B, 0x0E...0x1F, 0x7F => {
                         const escaped = std.fmt.allocPrint(session.allocator, "\\u{x:0>4}", .{byte}) catch return .disarm;
                         defer session.allocator.free(escaped);
                         response_buf.appendSlice(session.allocator, escaped) catch return .disarm;
@@ -944,6 +987,8 @@ fn createSession(allocator: std.mem.Allocator, session_name: []const u8) !*Sessi
         .vt_handler = VTHandler{ .terminal = &session.vt },
         .vt_stream = undefined,
         .attached_clients = std.AutoHashMap(std.posix.fd_t, void).init(allocator),
+        .utf8_partial = undefined,
+        .utf8_partial_len = 0,
     };
 
     // Initialize the stream after session is created since handler needs terminal pointer
