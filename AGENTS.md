@@ -26,6 +26,10 @@ To inspect the source code for libxev, look inside the `libxev_src` folder.
 
 To inspect the source code for zig's standard library, look inside the `zig_std_src` folder.
 
+## finding ghostty library source code
+
+To inspect the source code for zig's standard library, look inside the `ghostty_src` folder.
+
 ### prior art - shpool
 
 The project that most closely resembles `shpool`.

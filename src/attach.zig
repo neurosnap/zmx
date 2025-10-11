@@ -235,6 +235,7 @@ fn readCallback(
     }
 
     ctx.allocator.destroy(read_ctx);
+    ctx.read_ctx = null;
     return cleanup(ctx, completion);
 }
 

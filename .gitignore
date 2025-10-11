@@ -8,3 +8,4 @@ commit_msg
 *.sw?
 libxev_src/
 zig_std_src/
+ghostty_src/

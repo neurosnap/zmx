@@ -4,10 +4,13 @@ const xevg = @import("xev");
 const xev = xevg.Dynamic;
 const socket_path = "/tmp/zmx.sock";
 
+const ghostty = @import("ghostty-vt");
+
 const c = @cImport({
     @cInclude("pty.h");
     @cInclude("utmp.h");
     @cInclude("stdlib.h");
+    @cInclude("sys/ioctl.h");
 });
 
 // Generic JSON message structure used for parsing incoming protocol messages from clients
@@ -19,6 +22,21 @@ const Message = struct {
 // Request payload for attaching to a session
 const AttachRequest = struct {
     session_name: []const u8,
+};
+
+// Handler for processing VT sequences
+const VTHandler = struct {
+    terminal: *ghostty.Terminal,
+
+    pub fn print(self: *VTHandler, cp: u21) !void {
+        try self.terminal.print(cp);
+    }
+};
+
+// Context for PTY read callbacks
+const PtyReadContext = struct {
+    session: *Session,
+    server_ctx: *ServerContext,
 };
 
 // A PTY session that manages a persistent shell process
@@ -33,9 +51,18 @@ const Session = struct {
     pty_read_buffer: [4096]u8,
     created_at: i64,
 
+    // Terminal emulator state for session restore
+    vt: ghostty.Terminal,
+    vt_stream: ghostty.Stream(*VTHandler),
+    vt_handler: VTHandler,
+    attached_clients: std.AutoHashMap(std.posix.fd_t, void),
+
     fn deinit(self: *Session) void {
         self.allocator.free(self.name);
         self.buffer.deinit(self.allocator);
+        self.vt.deinit(self.allocator);
+        self.vt_stream.deinit();
+        self.attached_clients.deinit();
     }
 };
 
@@ -232,6 +259,10 @@ fn handleMessage(client: *Client, data: []const u8) !void {
     } else if (std.mem.eql(u8, msg_type, "pty_in")) {
         const text = payload.get("text").?.string;
         try handlePtyInput(client, text);
+    } else if (std.mem.eql(u8, msg_type, "window_resize")) {
+        const rows = @as(u16, @intCast(payload.get("rows").?.integer));
+        const cols = @as(u16, @intCast(payload.get("cols").?.integer));
+        try handleWindowResize(client, rows, cols);
     } else {
         std.debug.print("Unknown message type: {s}\n", .{msg_type});
     }
@@ -241,7 +272,7 @@ fn handleDetachSession(client: *Client, session_name: []const u8, target_client_
     const ctx = client.server_ctx;
 
     // Check if the session exists
-    if (!ctx.sessions.contains(session_name)) {
+    const session = ctx.sessions.get(session_name) orelse {
         const error_response = try std.fmt.allocPrint(
             client.allocator,
             "{{\"type\":\"detach_session_response\",\"payload\":{{\"status\":\"error\",\"error_message\":\"Session not found: {s}\"}}}}\n",
@@ -254,7 +285,7 @@ fn handleDetachSession(client: *Client, session_name: []const u8, target_client_
             return err;
         };
         return;
-    }
+    };
 
     // If target_client_fd is provided, find and detach that specific client
     if (target_client_fd) |target_fd| {
@@ -263,6 +294,7 @@ fn handleDetachSession(client: *Client, session_name: []const u8, target_client_
             if (target_client.attached_session) |attached| {
                 if (std.mem.eql(u8, attached, session_name)) {
                     target_client.attached_session = null;
+                    _ = session.attached_clients.remove(target_fd_cast);
 
                     // Send notification to the target client
                     const notification = "{\"type\":\"detach_notification\",\"payload\":{\"status\":\"ok\"}}\n";
@@ -328,6 +360,8 @@ fn handleDetachSession(client: *Client, session_name: []const u8, target_client_
         }
 
         client.attached_session = null;
+        _ = session.attached_clients.remove(client.fd);
+        
         const response = "{\"type\":\"detach_session_response\",\"payload\":{\"status\":\"ok\"}}\n";
         std.debug.print("Sending detach response to client fd={d}: {s}", .{ client.fd, response });
 
@@ -465,20 +499,69 @@ fn handleListSessions(ctx: *ServerContext, client: *Client) !void {
 
 fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []const u8) !void {
     // Check if session already exists
-    if (ctx.sessions.get(session_name)) |session| {
+    const is_reattach = ctx.sessions.contains(session_name);
+    const session = if (is_reattach) blk: {
         std.debug.print("Attaching to existing session: {s}\n", .{session_name});
-        client.attached_session = session.name;
-        try readFromPty(ctx, client, session);
-        // TODO: Send scrollback buffer to client
-        return;
+        break :blk ctx.sessions.get(session_name).?;
+    } else blk: {
+        // Create new session with forkpty
+        std.debug.print("Creating new session: {s}\n", .{session_name});
+        const new_session = try createSession(ctx.allocator, session_name);
+        try ctx.sessions.put(new_session.name, new_session);
+        break :blk new_session;
+    };
+
+    // Mark client as attached
+    client.attached_session = session.name;
+    try session.attached_clients.put(client.fd, {});
+
+    // If reattaching, send the current terminal state
+    if (is_reattach and session.attached_clients.count() > 1) {
+        const snapshot = try renderTerminalSnapshot(session, ctx.allocator);
+        defer ctx.allocator.free(snapshot);
+
+        // Build JSON response with escaped snapshot
+        var response_buf = try std.ArrayList(u8).initCapacity(ctx.allocator, 4096);
+        defer response_buf.deinit(ctx.allocator);
+
+        try response_buf.appendSlice(ctx.allocator, "{\"type\":\"pty_out\",\"payload\":{\"text\":\"");
+
+        // Escape the snapshot for JSON
+        for (snapshot) |byte| {
+            switch (byte) {
+                '"' => try response_buf.appendSlice(ctx.allocator, "\\\""),
+                '\\' => try response_buf.appendSlice(ctx.allocator, "\\\\"),
+                '\n' => try response_buf.appendSlice(ctx.allocator, "\\n"),
+                '\r' => try response_buf.appendSlice(ctx.allocator, "\\r"),
+                '\t' => try response_buf.appendSlice(ctx.allocator, "\\t"),
+                0x08 => try response_buf.appendSlice(ctx.allocator, "\\b"),
+                0x0C => try response_buf.appendSlice(ctx.allocator, "\\f"),
+                0x00...0x07, 0x0B, 0x0E...0x1F, 0x7F...0xFF => {
+                    const escaped = try std.fmt.allocPrint(ctx.allocator, "\\u{x:0>4}", .{byte});
+                    defer ctx.allocator.free(escaped);
+                    try response_buf.appendSlice(ctx.allocator, escaped);
+                },
+                else => try response_buf.append(ctx.allocator, byte),
+            }
+        }
+
+        try response_buf.appendSlice(ctx.allocator, "\"}}\n");
+        _ = try posix.write(client.fd, response_buf.items);
     }
 
-    // Create new session with forkpty
-    std.debug.print("Creating new session: {s}\n", .{session_name});
-    const session = try createSession(ctx.allocator, session_name);
-    try ctx.sessions.put(session.name, session);
-    client.attached_session = session.name;
-    try readFromPty(ctx, client, session);
+    // Start reading from PTY if not already started (first client)
+    if (session.attached_clients.count() == 1) {
+        try readFromPty(ctx, client, session);
+    } else {
+        // Send attach success response for additional clients
+        const response = try std.fmt.allocPrint(
+            ctx.allocator,
+            "{{\"type\":\"attach_session_response\",\"payload\":{{\"status\":\"ok\",\"client_fd\":{d}}}}}\n",
+            .{client.fd},
+        );
+        defer ctx.allocator.free(response);
+        _ = try posix.write(client.fd, response);
+    }
 }
 
 fn handlePtyInput(client: *Client, text: []const u8) !void {
@@ -502,16 +585,49 @@ fn handlePtyInput(client: *Client, text: []const u8) !void {
     _ = written;
 }
 
+fn handleWindowResize(client: *Client, rows: u16, cols: u16) !void {
+    const session_name = client.attached_session orelse {
+        std.debug.print("Client fd={d} not attached to any session\n", .{client.fd});
+        return error.NotAttached;
+    };
+
+    const session = client.server_ctx.sessions.get(session_name) orelse {
+        std.debug.print("Session {s} not found\n", .{session_name});
+        return error.SessionNotFound;
+    };
+
+    std.debug.print("Resizing session {s} to {d}x{d}\n", .{ session_name, cols, rows });
+
+    // Update libghostty-vt terminal size
+    try session.vt.resize(session.allocator, cols, rows);
+
+    // Update PTY window size
+    var ws = c.struct_winsize{
+        .ws_row = rows,
+        .ws_col = cols,
+        .ws_xpixel = 0,
+        .ws_ypixel = 0,
+    };
+    const result = c.ioctl(session.pty_master_fd, c.TIOCSWINSZ, &ws);
+    if (result < 0) {
+        return error.IoctlFailed;
+    }
+}
+
 fn readFromPty(ctx: *ServerContext, client: *Client, session: *Session) !void {
-    _ = ctx;
     const stream = xev.Stream.initFd(session.pty_master_fd);
     const read_compl = client.allocator.create(xev.Completion) catch @panic("failed to create completion");
+    const pty_ctx = client.allocator.create(PtyReadContext) catch @panic("failed to create PTY context");
+    pty_ctx.* = .{
+        .session = session,
+        .server_ctx = ctx,
+    };
     stream.read(
-        client.server_ctx.loop,
+        ctx.loop,
         read_compl,
         .{ .slice = &session.pty_read_buffer },
-        Client,
-        client,
+        PtyReadContext,
+        pty_ctx,
         readPtyCallback,
     );
 
@@ -531,18 +647,75 @@ fn readFromPty(ctx: *ServerContext, client: *Client, session: *Session) !void {
     _ = written;
 }
 
+fn getSessionForClient(ctx: *ServerContext, client: *Client) ?*Session {
+    const session_name = client.attached_session orelse return null;
+    return ctx.sessions.get(session_name);
+}
+
+fn renderTerminalSnapshot(session: *Session, allocator: std.mem.Allocator) ![]u8 {
+    var output = try std.ArrayList(u8).initCapacity(allocator, 4096);
+    errdefer output.deinit(allocator);
+
+    // Clear screen and move to home
+    try output.appendSlice(allocator, "\x1b[2J\x1b[H");
+
+    // Get the active screen from the terminal
+    const screen = &session.vt.screen;
+    const rows = screen.pages.rows;
+    const cols = screen.pages.cols;
+    
+    var row: usize = 0;
+    while (row < rows) : (row += 1) {
+        var col: usize = 0;
+        while (col < cols) : (col += 1) {
+            // Build a point.Point referring to the active (visible) page
+            const pt: ghostty.point.Point = .{ .active = .{ 
+                .x = @as(u16, @intCast(col)), 
+                .y = @as(u16, @intCast(row)),
+            } };
+            
+            if (screen.pages.getCell(pt)) |cell_ref| {
+                const cp = cell_ref.cell.content.codepoint;
+                if (cp == 0) {
+                    try output.append(allocator, ' ');
+                } else {
+                    var buf: [4]u8 = undefined;
+                    const len = std.unicode.utf8Encode(cp, &buf) catch 0;
+                    if (len == 0) {
+                        try output.append(allocator, ' ');
+                    } else {
+                        try output.appendSlice(allocator, buf[0..len]);
+                    }
+                }
+            } else {
+                // Outside bounds or no cell => space to preserve width
+                try output.append(allocator, ' ');
+            }
+        }
+        
+        if (row < rows - 1) {
+            try output.appendSlice(allocator, "\r\n");
+        }
+    }
+
+    // Position cursor at correct location (ANSI is 1-based)
+    const cursor = screen.cursor;
+    try output.writer(allocator).print("\x1b[{d};{d}H", .{ cursor.y + 1, cursor.x + 1 });
+
+    return output.toOwnedSlice(allocator);
+}
+
 fn readPtyCallback(
-    client_opt: ?*Client,
+    pty_ctx_opt: ?*PtyReadContext,
     loop: *xev.Loop,
     completion: *xev.Completion,
     stream: xev.Stream,
     read_buffer: xev.ReadBuffer,
     read_result: xev.ReadError!usize,
 ) xev.CallbackAction {
-    _ = loop;
-    _ = completion;
-    _ = stream;
-    const client = client_opt.?;
+    const pty_ctx = pty_ctx_opt.?;
+    const session = pty_ctx.session;
+    const ctx = pty_ctx.server_ctx;
 
     if (read_result) |bytes_read| {
         if (bytes_read == 0) {
@@ -553,44 +726,62 @@ fn readPtyCallback(
         const data = read_buffer.slice[0..bytes_read];
         std.debug.print("PTY output ({d} bytes)\n", .{bytes_read});
 
-        // Build JSON response with properly escaped text
-        var response_buf = std.ArrayList(u8).initCapacity(client.allocator, 4096) catch return .disarm;
-        defer response_buf.deinit(client.allocator);
+        // ALWAYS parse through libghostty-vt to maintain state
+        session.vt_stream.nextSlice(data) catch |err| {
+            std.debug.print("VT parse error: {s}\n", .{@errorName(err)});
+        };
 
-        response_buf.appendSlice(client.allocator, "{\"type\":\"pty_out\",\"payload\":{\"text\":\"") catch return .disarm;
+        // Only proxy to clients if someone is attached
+        if (session.attached_clients.count() > 0) {
+            // Build JSON response with properly escaped text
+            var response_buf = std.ArrayList(u8).initCapacity(session.allocator, 4096) catch return .disarm;
+            defer response_buf.deinit(session.allocator);
 
-        // Manually escape JSON special characters
-        for (data) |byte| {
-            switch (byte) {
-                '"' => response_buf.appendSlice(client.allocator, "\\\"") catch return .disarm,
-                '\\' => response_buf.appendSlice(client.allocator, "\\\\") catch return .disarm,
-                '\n' => response_buf.appendSlice(client.allocator, "\\n") catch return .disarm,
-                '\r' => response_buf.appendSlice(client.allocator, "\\r") catch return .disarm,
-                '\t' => response_buf.appendSlice(client.allocator, "\\t") catch return .disarm,
-                0x08 => response_buf.appendSlice(client.allocator, "\\b") catch return .disarm,
-                0x0C => response_buf.appendSlice(client.allocator, "\\f") catch return .disarm,
-                0x00...0x07, 0x0B, 0x0E...0x1F, 0x7F...0xFF => {
-                    const escaped = std.fmt.allocPrint(client.allocator, "\\u{x:0>4}", .{byte}) catch return .disarm;
-                    defer client.allocator.free(escaped);
-                    response_buf.appendSlice(client.allocator, escaped) catch return .disarm;
-                },
-                else => response_buf.append(client.allocator, byte) catch return .disarm,
+            response_buf.appendSlice(session.allocator, "{\"type\":\"pty_out\",\"payload\":{\"text\":\"") catch return .disarm;
+
+            // Manually escape JSON special characters
+            for (data) |byte| {
+                switch (byte) {
+                    '"' => response_buf.appendSlice(session.allocator, "\\\"") catch return .disarm,
+                    '\\' => response_buf.appendSlice(session.allocator, "\\\\") catch return .disarm,
+                    '\n' => response_buf.appendSlice(session.allocator, "\\n") catch return .disarm,
+                    '\r' => response_buf.appendSlice(session.allocator, "\\r") catch return .disarm,
+                    '\t' => response_buf.appendSlice(session.allocator, "\\t") catch return .disarm,
+                    0x08 => response_buf.appendSlice(session.allocator, "\\b") catch return .disarm,
+                    0x0C => response_buf.appendSlice(session.allocator, "\\f") catch return .disarm,
+                    0x00...0x07, 0x0B, 0x0E...0x1F, 0x7F...0xFF => {
+                        const escaped = std.fmt.allocPrint(session.allocator, "\\u{x:0>4}", .{byte}) catch return .disarm;
+                        defer session.allocator.free(escaped);
+                        response_buf.appendSlice(session.allocator, escaped) catch return .disarm;
+                    },
+                    else => response_buf.append(session.allocator, byte) catch return .disarm,
+                }
+            }
+
+            response_buf.appendSlice(session.allocator, "\"}}\n") catch return .disarm;
+            const response = response_buf.items;
+
+            // Send to all attached clients
+            var it = session.attached_clients.keyIterator();
+            while (it.next()) |client_fd| {
+                const attached_client = ctx.clients.get(client_fd.*) orelse continue;
+                std.debug.print("Sending response to client fd={d}\n", .{client_fd.*});
+                _ = posix.write(attached_client.fd, response) catch |err| {
+                    std.debug.print("Error writing to fd={d}: {s}\n", .{ client_fd.*, @errorName(err) });
+                };
             }
         }
 
-        response_buf.appendSlice(client.allocator, "\"}}\n") catch return .disarm;
-
-        const response = response_buf.items;
-        std.debug.print("Sending response to client fd={d}\n", .{client.fd});
-
-        // Send synchronously for now (blocking write)
-        const written = posix.write(client.fd, response) catch |err| {
-            std.debug.print("Error writing to fd={d}: {s}", .{ client.fd, @errorName(err) });
-            return .disarm;
-        };
-        _ = written;
-
-        return .rearm;
+        // Re-arm to continue reading
+        stream.read(
+            loop,
+            completion,
+            .{ .slice = &session.pty_read_buffer },
+            PtyReadContext,
+            pty_ctx,
+            readPtyCallback,
+        );
+        return .disarm;
     } else |err| {
         std.debug.print("PTY read error: {s}\n", .{@errorName(err)});
         return .disarm;
@@ -681,6 +872,14 @@ fn createSession(allocator: std.mem.Allocator, session_name: []const u8) !*Sessi
     const flags = try posix.fcntl(master_fd, posix.F.GETFL, 0);
     _ = try posix.fcntl(master_fd, posix.F.SETFL, flags | @as(u32, 0o4000));
 
+    // Initialize terminal emulator for session restore
+    var vt = try ghostty.Terminal.init(allocator, .{
+        .cols = 80,
+        .rows = 24,
+        .max_scrollback = 10000,
+    });
+    errdefer vt.deinit(allocator);
+
     const session = try allocator.create(Session);
     session.* = .{
         .name = try allocator.dupe(u8, session_name),
@@ -690,13 +889,29 @@ fn createSession(allocator: std.mem.Allocator, session_name: []const u8) !*Sessi
         .allocator = allocator,
         .pty_read_buffer = undefined,
         .created_at = std.time.timestamp(),
+        .vt = vt,
+        .vt_handler = VTHandler{ .terminal = &session.vt },
+        .vt_stream = undefined,
+        .attached_clients = std.AutoHashMap(std.posix.fd_t, void).init(allocator),
     };
+
+    // Initialize the stream after session is created since handler needs terminal pointer
+    session.vt_stream = ghostty.Stream(*VTHandler).init(&session.vt_handler);
+    session.vt_stream.parser.osc_parser.alloc = allocator;
 
     return session;
 }
 
 fn closeClient(client: *Client, completion: *xev.Completion) xev.CallbackAction {
     std.debug.print("Closing client fd={d}\n", .{client.fd});
+
+    // Remove client from attached session if any
+    if (client.attached_session) |session_name| {
+        if (client.server_ctx.sessions.get(session_name)) |session| {
+            _ = session.attached_clients.remove(client.fd);
+            std.debug.print("Removed client fd={d} from session {s} attached_clients\n", .{ client.fd, session_name });
+        }
+    }
 
     // Remove client from the clients map
     _ = client.server_ctx.clients.remove(client.fd);
