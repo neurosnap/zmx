@@ -3,6 +3,7 @@ const posix = std.posix;
 const xevg = @import("xev");
 const xev = xevg.Dynamic;
 const clap = @import("clap");
+const config_mod = @import("config.zig");
 
 const c = @cImport({
     @cInclude("termios.h");
@@ -28,7 +29,7 @@ const params = clap.parseParamsComptime(
     \\
 );
 
-pub fn main(socket_path_default: []const u8, iter: *std.process.ArgIterator) !void {
+pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -47,7 +48,7 @@ pub fn main(socket_path_default: []const u8, iter: *std.process.ArgIterator) !vo
     };
     defer res.deinit();
 
-    const socket_path = res.args.@"socket-path" orelse socket_path_default;
+    const socket_path = res.args.@"socket-path" orelse config.socket_path;
 
     const session_name = res.positionals[0] orelse {
         std.debug.print("Usage: zmx attach <session-name>\n", .{});

@@ -1,13 +1,14 @@
 const std = @import("std");
 const posix = std.posix;
 const clap = @import("clap");
+const config_mod = @import("config.zig");
 
 const params = clap.parseParamsComptime(
     \\-s, --socket-path <str>  Path to the Unix socket file
     \\
 );
 
-pub fn main(socket_path_default: []const u8, iter: *std.process.ArgIterator) !void {
+pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -26,7 +27,7 @@ pub fn main(socket_path_default: []const u8, iter: *std.process.ArgIterator) !vo
     };
     defer res.deinit();
 
-    const socket_path = res.args.@"socket-path" orelse socket_path_default;
+    const socket_path = res.args.@"socket-path" orelse config.socket_path;
 
     // Find the client_fd file in home directory
     const home_dir = posix.getenv("HOME") orelse "/tmp";

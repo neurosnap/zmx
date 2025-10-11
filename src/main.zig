@@ -35,10 +35,10 @@ pub fn main() !void {
 
     switch (command) {
         .help => try cli.help(),
-        .daemon => try daemon.main(config.socket_path, &iter),
-        .list => try list.main(config.socket_path, &iter),
-        .attach => try attach.main(config.socket_path, &iter),
-        .detach => try detach.main(config.socket_path, &iter),
-        .kill => try kill.main(config.socket_path, &iter),
+        .daemon => try daemon.main(config, &iter),
+        .list => try list.main(config, &iter),
+        .attach => try attach.main(config, &iter),
+        .detach => try detach.main(config, &iter),
+        .kill => try kill.main(config, &iter),
     }
 }
