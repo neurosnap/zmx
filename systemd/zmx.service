@@ -1,0 +1,17 @@
+[Unit]
+Description=zmx daemon - terminal session persistence
+Documentation=https://github.com/neurosnap/zmx
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/zmx daemon
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

@@ -30,3 +30,19 @@
 - `zmx detach` (or Ctrl+b + d) - detach from session while keeping pty alive
 - `zmx list` - list sessions
 - `zmx kill <session_name>` kill pty and all clients attached to session
+
+## prior art
+
+Below is a list of projects that inspired me to build this project.
+
+### shpool
+
+The project that most closely resembles `shpool`.
+
+You can find the source code at this repo: https://github.com/shell-pool/shpool
+
+`shpool` is a service that enables session persistence by allowing the creation of named shell sessions owned by `shpool` so that the session is not lost if the connection drops.
+
+`shpool` can be thought of as a lighter weight alternative to tmux or GNU screen. While tmux and screen take over the whole terminal and provide window splitting and tiling features, `shpool` only provides persistent sessions.
+
+The biggest advantage of this approach is that `shpool` does not break native scrollback or copy-paste.

@@ -2,6 +2,8 @@
 
 The goal of this project is to create a way to attach and detach terminal sessions without killing the underlying linux process.
 
+When researching `zmx`, also read the README.md in the root of this project directory to learn more about the features, documentation, prior art, etc.
+
 ## tech stack
 
 - `zig` v0.15.1
@@ -18,7 +20,7 @@ The goal of this project is to create a way to attach and detach terminal sessio
 - **Test filter (Zig)**: `zig build test -Dtest-filter=<test name>`
 - **Formatting (Zig)**: `zig fmt .`
 
-## finding library source code
+## find any library API definitions
 
 Before trying anything else, run the `zigdoc` command to find an API with documentation:
 
@@ -27,7 +29,7 @@ zigdoc {symbol}
 # examples
 zigdoc ghostty-vt
 zigdoc clap
-zigdoc libxev
+zigdoc xev
 zigdoc std.ArrayList
 zigdoc std.mem.Allocator
 zigdoc std.http.Server
@@ -35,26 +37,14 @@ zigdoc std.http.Server
 
 Only if that doesn't work should you grep the project dir.
 
-## finding libxev source code
+## find libxev source code
 
 To inspect the source code for libxev, look inside the `libxev_src` folder.
 
-## finding zig std library source code
+## find zig std library source code
 
 To inspect the source code for zig's standard library, look inside the `zig_std_src` folder.
 
-## finding ghostty library source code
+## find ghostty library source code
 
 To inspect the source code for zig's standard library, look inside the `ghostty_src` folder.
-
-### prior art - shpool
-
-The project that most closely resembles `shpool`.
-
-You can find the source code at this repo: https://github.com/shell-pool/shpool
-
-`shpool` is a service that enables session persistence by allowing the creation of named shell sessions owned by `shpool` so that the session is not lost if the connection drops.
-
-`shpool` can be thought of as a lighter weight alternative to tmux or GNU screen. While tmux and screen take over the whole terminal and provide window splitting and tiling features, `shpool` only provides persistent sessions.
-
-The biggest advantage of this approach is that `shpool` does not break native scrollback or copy-paste.
