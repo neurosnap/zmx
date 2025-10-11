@@ -12,7 +12,13 @@ pub fn main() !void {
     const socket_fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
     defer posix.close(socket_fd);
 
-    try posix.connect(socket_fd, &unix_addr.any, unix_addr.getOsSockLen());
+    posix.connect(socket_fd, &unix_addr.any, unix_addr.getOsSockLen()) catch |err| {
+        if (err == error.ConnectionRefused) {
+            std.debug.print("Error: Unable to connect to zmx daemon at {s}\nPlease start the daemon first with: zmx daemon\n", .{socket_path});
+            std.process.exit(1);
+        }
+        return err;
+    };
 
     const request = "{\"type\":\"list_sessions_request\",\"payload\":{}}\n";
     _ = try posix.write(socket_fd, request);

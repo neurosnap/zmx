@@ -45,31 +45,40 @@ pub fn main() !void {
     var loop = try xev.Loop.init(.{ .thread_pool = &thread_pool });
     defer loop.deinit();
 
-    // Save original terminal settings and set raw mode
+    var unix_addr = try std.net.Address.initUnix(socket_path);
+    // AF.UNIX: Unix domain socket for local IPC with daemon process
+    // SOCK.STREAM: Reliable, connection-oriented communication for protocol messages
+    // SOCK.NONBLOCK: Prevents blocking to work with libxev's async event loop
+    const socket_fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.NONBLOCK, 0);
+    // Save original terminal settings first (before connecting)
     var orig_termios: c.termios = undefined;
     _ = c.tcgetattr(posix.STDIN_FILENO, &orig_termios);
+
+    posix.connect(socket_fd, &unix_addr.any, unix_addr.getOsSockLen()) catch |err| {
+        if (err == error.ConnectionRefused) {
+            std.debug.print("Error: Unable to connect to zmx daemon at {s}\nPlease start the daemon first with: zmx daemon\n", .{socket_path});
+            std.process.exit(1);
+        }
+        return err;
+    };
+
+    _ = posix.write(posix.STDERR_FILENO, "Attaching to session: ") catch {};
+    _ = posix.write(posix.STDERR_FILENO, session_name) catch {};
+    _ = posix.write(posix.STDERR_FILENO, "\n") catch {};
+
+    // Set raw mode after successful connection
     defer _ = c.tcsetattr(posix.STDIN_FILENO, c.TCSANOW, &orig_termios);
 
     var raw_termios = orig_termios;
     c.cfmakeraw(&raw_termios);
     _ = c.tcsetattr(posix.STDIN_FILENO, c.TCSANOW, &raw_termios);
 
-    var unix_addr = try std.net.Address.initUnix(socket_path);
-    // AF.UNIX: Unix domain socket for local IPC with daemon process
-    // SOCK.STREAM: Reliable, connection-oriented communication for protocol messages
-    // SOCK.NONBLOCK: Prevents blocking to work with libxev's async event loop
-    const socket_fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.NONBLOCK, 0);
-    try posix.connect(socket_fd, &unix_addr.any, unix_addr.getOsSockLen());
     const request = try std.fmt.allocPrint(
         allocator,
         "{{\"type\":\"attach_session_request\",\"payload\":{{\"session_name\":\"{s}\"}}}}\n",
         .{session_name},
     );
     defer allocator.free(request);
-
-    _ = posix.write(posix.STDERR_FILENO, "Attaching to session: ") catch {};
-    _ = posix.write(posix.STDERR_FILENO, session_name) catch {};
-    _ = posix.write(posix.STDERR_FILENO, "\n") catch {};
 
     const ctx = try allocator.create(Context);
     ctx.* = .{
