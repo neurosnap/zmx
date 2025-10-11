@@ -113,7 +113,7 @@ test "daemon lifecycle: attach, verify PTY, detach, shutdown" {
 
     // 4. Send detach command
     std.debug.print("=== Detaching from session ===\n", .{});
-    const detach_seq = [_]u8{ 0x02, 'd' }; // Ctrl+B followed by 'd'
+    const detach_seq = [_]u8{ 0x00, 'd' }; // Ctrl+Space followed by 'd'
     _ = try attach_process.stdin.?.write(&detach_seq);
     std.Thread.sleep(200 * std.time.ns_per_ms);
 

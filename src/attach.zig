@@ -22,6 +22,7 @@ const Context = struct {
     stdin_ctx: ?*StdinContext = null,
     read_completion: ?*xev.Completion = null,
     read_ctx: ?*ReadContext = null,
+    config: config_mod.Config,
 };
 
 const params = clap.parseParamsComptime(
@@ -94,6 +95,7 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
         .allocator = allocator,
         .loop = &loop,
         .session_name = session_name,
+        .config = config,
     };
 
     const request_payload = protocol.AttachSessionRequest{ .session_name = session_name };
@@ -404,14 +406,14 @@ fn stdinReadCallback(
 
         const data = read_buffer.slice[0..len];
 
-        // Detect Ctrl-b (0x02) as prefix for detach command
-        if (len == 1 and data[0] == 0x02) {
+        // Detect prefix for detach command
+        if (len == 1 and data[0] == ctx.config.detach_prefix) {
             ctx.prefix_pressed = true;
             return .rearm;
         }
 
-        // If prefix was pressed and now we got 'd', detach
-        if (ctx.prefix_pressed and len == 1 and data[0] == 'd') {
+        // If prefix was pressed and now we got the detach key, detach
+        if (ctx.prefix_pressed and len == 1 and data[0] == ctx.config.detach_key) {
             ctx.prefix_pressed = false;
             sendDetachRequest(ctx);
             return .rearm;
@@ -420,8 +422,8 @@ fn stdinReadCallback(
         // If prefix was pressed but we got something else, send the prefix and the new data
         if (ctx.prefix_pressed) {
             ctx.prefix_pressed = false;
-            // Send the Ctrl-b that was buffered
-            const prefix_data = [_]u8{0x02};
+            // Send the prefix that was buffered
+            const prefix_data = [_]u8{ctx.config.detach_prefix};
             sendPtyInput(ctx, &prefix_data);
             // Fall through to send the current data
         }

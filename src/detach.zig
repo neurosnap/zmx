@@ -71,7 +71,7 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
 
     if (session_name == null) {
         std.debug.print("Error: Not currently attached to any session\n", .{});
-        std.debug.print("Use Ctrl-b d to detach from within an attached session\n", .{});
+        std.debug.print("Use Ctrl-Space d to detach from within an attached session\n", .{});
         return error.NotAttached;
     }
     defer if (session_name) |name| allocator.free(name);

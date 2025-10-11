@@ -798,7 +798,8 @@ fn readPtyCallback(
         if (total_len > 0) {
             // Scan backwards to find if we have a partial UTF-8 sequence
             var i = total_len;
-            while (i > 0 and i > total_len - 4) {
+            const scan_start = if (total_len >= 4) total_len - 4 else 0;
+            while (i > 0 and i > scan_start) {
                 i -= 1;
                 const byte = data[i];
                 // Check if this is a UTF-8 start byte

@@ -4,6 +4,8 @@ const toml = @import("toml");
 pub const Config = struct {
     socket_path: []const u8 = "/tmp/zmx.sock",
     socket_path_allocated: bool = false,
+    detach_prefix: u8 = 0x00, // Ctrl+Space
+    detach_key: u8 = 'd',
 
     pub fn load(allocator: std.mem.Allocator) !Config {
         const config_path = getConfigPath(allocator) catch |err| {
@@ -28,6 +30,8 @@ pub const Config = struct {
         const config = Config{
             .socket_path = try allocator.dupe(u8, result.value.socket_path),
             .socket_path_allocated = true,
+            .detach_prefix = result.value.detach_prefix,
+            .detach_key = result.value.detach_key,
         };
         return config;
     }
