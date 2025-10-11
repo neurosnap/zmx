@@ -2,6 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 const clap = @import("clap");
 const config_mod = @import("config.zig");
+const protocol = @import("protocol.zig");
 
 const params = clap.parseParamsComptime(
     \\-s, --socket-path <str>  Path to the Unix socket file
@@ -87,21 +88,12 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
         return err;
     };
 
-    const request = if (client_fd) |fd|
-        try std.fmt.allocPrint(
-            allocator,
-            "{{\"type\":\"detach_session_request\",\"payload\":{{\"session_name\":\"{s}\",\"client_fd\":{d}}}}}\n",
-            .{ session_name.?, fd },
-        )
-    else
-        try std.fmt.allocPrint(
-            allocator,
-            "{{\"type\":\"detach_session_request\",\"payload\":{{\"session_name\":\"{s}\"}}}}\n",
-            .{session_name.?},
-        );
-    defer allocator.free(request);
+    const request_payload = protocol.DetachSessionRequest{
+        .session_name = session_name.?,
+        .client_fd = client_fd,
+    };
 
-    _ = try posix.write(socket_fd, request);
+    try protocol.writeJson(allocator, socket_fd, .detach_session_request, request_payload);
 
     var buffer: [4096]u8 = undefined;
     const bytes_read = try posix.read(socket_fd, &buffer);
@@ -115,22 +107,13 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
     const newline_idx = std.mem.indexOf(u8, response, "\n") orelse bytes_read;
     const msg_line = response[0..newline_idx];
 
-    const parsed = try std.json.parseFromSlice(
-        std.json.Value,
-        allocator,
-        msg_line,
-        .{},
-    );
+    const parsed = try protocol.parseMessage(protocol.DetachSessionResponse, allocator, msg_line);
     defer parsed.deinit();
 
-    const root = parsed.value.object;
-    const payload = root.get("payload").?.object;
-    const status = payload.get("status").?.string;
-
-    if (std.mem.eql(u8, status, "ok")) {
+    if (std.mem.eql(u8, parsed.value.payload.status, "ok")) {
         std.debug.print("Detached from session: {s}\n", .{session_name.?});
     } else {
-        const error_msg = payload.get("error_message").?.string;
+        const error_msg = parsed.value.payload.error_message orelse "Unknown error";
         std.debug.print("Failed to detach: {s}\n", .{error_msg});
         std.process.exit(1);
     }

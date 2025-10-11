@@ -4,6 +4,7 @@ const xevg = @import("xev");
 const xev = xevg.Dynamic;
 const clap = @import("clap");
 const config_mod = @import("config.zig");
+const protocol = @import("protocol.zig");
 
 const c = @cImport({
     @cInclude("termios.h");
@@ -85,13 +86,6 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
     c.cfmakeraw(&raw_termios);
     _ = c.tcsetattr(posix.STDIN_FILENO, c.TCSANOW, &raw_termios);
 
-    const request = try std.fmt.allocPrint(
-        allocator,
-        "{{\"type\":\"attach_session_request\",\"payload\":{{\"session_name\":\"{s}\"}}}}\n",
-        .{session_name},
-    );
-    defer allocator.free(request);
-
     const ctx = try allocator.create(Context);
     ctx.* = .{
         .stream = xev.Stream.initFd(socket_fd),
@@ -100,6 +94,22 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
         .loop = &loop,
         .session_name = session_name,
     };
+
+    const request_payload = protocol.AttachSessionRequest{ .session_name = session_name };
+    var out: std.io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+
+    const msg = protocol.Message(@TypeOf(request_payload)){
+        .type = protocol.MessageType.attach_session_request.toString(),
+        .payload = request_payload,
+    };
+
+    var stringify: std.json.Stringify = .{ .writer = &out.writer };
+    try stringify.write(msg);
+    try out.writer.writeByte('\n');
+
+    const request = try allocator.dupe(u8, out.written());
+    defer allocator.free(request);
 
     const write_completion = try allocator.create(xev.Completion);
     ctx.stream.write(&loop, write_completion, .{ .slice = request }, Context, ctx, writeCallback);
@@ -175,77 +185,99 @@ fn readCallback(
         const msg_line = data[0..newline_idx];
         // std.debug.print("Parsing message ({d} bytes): {s}\n", .{msg_line.len, msg_line});
 
-        const parsed = std.json.parseFromSlice(
-            std.json.Value,
-            ctx.allocator,
-            msg_line,
-            .{},
-        ) catch |err| {
+        const msg_type_parsed = protocol.parseMessageType(ctx.allocator, msg_line) catch |err| {
             std.debug.print("JSON parse error: {s}\n", .{@errorName(err)});
             return .rearm;
         };
-        defer parsed.deinit();
+        defer msg_type_parsed.deinit();
 
-        const root = parsed.value.object;
-        const msg_type = root.get("type").?.string;
-        const payload = root.get("payload").?.object;
+        const msg_type = protocol.MessageType.fromString(msg_type_parsed.value.type) orelse {
+            std.debug.print("Unknown message type: {s}\n", .{msg_type_parsed.value.type});
+            return .rearm;
+        };
 
-        if (std.mem.eql(u8, msg_type, "attach_session_response")) {
-            const status = payload.get("status").?.string;
-            if (std.mem.eql(u8, status, "ok")) {
-                // Get client_fd from response
-                const client_fd = payload.get("client_fd").?.integer;
-
-                // Write client_fd to a file so shell commands can read it
-                const home_dir = posix.getenv("HOME") orelse "/tmp";
-                const client_fd_path = std.fmt.allocPrint(
-                    ctx.allocator,
-                    "{s}/.zmx_client_fd_{s}",
-                    .{ home_dir, ctx.session_name },
-                ) catch |err| {
-                    std.debug.print("Failed to create client_fd path: {s}\n", .{@errorName(err)});
+        switch (msg_type) {
+            .attach_session_response => {
+                const parsed = protocol.parseMessage(protocol.AttachSessionResponse, ctx.allocator, msg_line) catch |err| {
+                    std.debug.print("Failed to parse attach response: {s}\n", .{@errorName(err)});
                     return .rearm;
                 };
-                defer ctx.allocator.free(client_fd_path);
+                defer parsed.deinit();
 
-                const file = std.fs.cwd().createFile(client_fd_path, .{ .truncate = true }) catch |err| {
-                    std.debug.print("Failed to create client_fd file: {s}\n", .{@errorName(err)});
+                if (std.mem.eql(u8, parsed.value.payload.status, "ok")) {
+                    const client_fd = parsed.value.payload.client_fd orelse {
+                        std.debug.print("Missing client_fd in response\n", .{});
+                        return .rearm;
+                    };
+
+                    // Write client_fd to a file so shell commands can read it
+                    const home_dir = posix.getenv("HOME") orelse "/tmp";
+                    const client_fd_path = std.fmt.allocPrint(
+                        ctx.allocator,
+                        "{s}/.zmx_client_fd_{s}",
+                        .{ home_dir, ctx.session_name },
+                    ) catch |err| {
+                        std.debug.print("Failed to create client_fd path: {s}\n", .{@errorName(err)});
+                        return .rearm;
+                    };
+                    defer ctx.allocator.free(client_fd_path);
+
+                    const file = std.fs.cwd().createFile(client_fd_path, .{ .truncate = true }) catch |err| {
+                        std.debug.print("Failed to create client_fd file: {s}\n", .{@errorName(err)});
+                        return .rearm;
+                    };
+                    defer file.close();
+
+                    const fd_str = std.fmt.allocPrint(ctx.allocator, "{d}", .{client_fd}) catch return .rearm;
+                    defer ctx.allocator.free(fd_str);
+
+                    file.writeAll(fd_str) catch |err| {
+                        std.debug.print("Failed to write client_fd: {s}\n", .{@errorName(err)});
+                        return .rearm;
+                    };
+
+                    startStdinReading(ctx);
+                } else {
+                    _ = posix.write(posix.STDERR_FILENO, "Attach failed: ") catch {};
+                    _ = posix.write(posix.STDERR_FILENO, parsed.value.payload.status) catch {};
+                    _ = posix.write(posix.STDERR_FILENO, "\n") catch {};
+                }
+            },
+            .detach_session_response => {
+                const parsed = protocol.parseMessage(protocol.DetachSessionResponse, ctx.allocator, msg_line) catch |err| {
+                    std.debug.print("Failed to parse detach response: {s}\n", .{@errorName(err)});
                     return .rearm;
                 };
-                defer file.close();
+                defer parsed.deinit();
 
-                const fd_str = std.fmt.allocPrint(ctx.allocator, "{d}", .{client_fd}) catch return .rearm;
-                defer ctx.allocator.free(fd_str);
-
-                file.writeAll(fd_str) catch |err| {
-                    std.debug.print("Failed to write client_fd: {s}\n", .{@errorName(err)});
-                    return .rearm;
-                };
-
-                startStdinReading(ctx);
-            } else {
-                _ = posix.write(posix.STDERR_FILENO, "Attach failed: ") catch {};
-                _ = posix.write(posix.STDERR_FILENO, status) catch {};
-                _ = posix.write(posix.STDERR_FILENO, "\n") catch {};
-            }
-        } else if (std.mem.eql(u8, msg_type, "detach_session_response")) {
-            const status = payload.get("status").?.string;
-            if (std.mem.eql(u8, status, "ok")) {
+                if (std.mem.eql(u8, parsed.value.payload.status, "ok")) {
+                    cleanupClientFdFile(ctx);
+                    _ = posix.write(posix.STDERR_FILENO, "\r\nDetached from session\r\n") catch {};
+                    return cleanup(ctx, completion);
+                }
+            },
+            .detach_notification => {
                 cleanupClientFdFile(ctx);
-                _ = posix.write(posix.STDERR_FILENO, "\r\nDetached from session\r\n") catch {};
+                _ = posix.write(posix.STDERR_FILENO, "\r\nDetached from session (external request)\r\n") catch {};
                 return cleanup(ctx, completion);
-            }
-        } else if (std.mem.eql(u8, msg_type, "detach_notification")) {
-            cleanupClientFdFile(ctx);
-            _ = posix.write(posix.STDERR_FILENO, "\r\nDetached from session (external request)\r\n") catch {};
-            return cleanup(ctx, completion);
-        } else if (std.mem.eql(u8, msg_type, "kill_notification")) {
-            cleanupClientFdFile(ctx);
-            _ = posix.write(posix.STDERR_FILENO, "\r\nSession killed\r\n") catch {};
-            return cleanup(ctx, completion);
-        } else if (std.mem.eql(u8, msg_type, "pty_out")) {
-            const text = payload.get("text").?.string;
-            _ = posix.write(posix.STDOUT_FILENO, text) catch {};
+            },
+            .kill_notification => {
+                cleanupClientFdFile(ctx);
+                _ = posix.write(posix.STDERR_FILENO, "\r\nSession killed\r\n") catch {};
+                return cleanup(ctx, completion);
+            },
+            .pty_out => {
+                const parsed = protocol.parseMessage(protocol.PtyOutput, ctx.allocator, msg_line) catch |err| {
+                    std.debug.print("Failed to parse pty output: {s}\n", .{@errorName(err)});
+                    return .rearm;
+                };
+                defer parsed.deinit();
+
+                _ = posix.write(posix.STDOUT_FILENO, parsed.value.payload.text) catch {};
+            },
+            else => {
+                std.debug.print("Unexpected message type in attach client: {s}\n", .{msg_type.toString()});
+            },
         }
 
         return .rearm;
@@ -292,17 +324,25 @@ fn cleanupClientFdFile(ctx: *Context) void {
 }
 
 fn sendDetachRequest(ctx: *Context) void {
-    const request = std.fmt.allocPrint(
-        ctx.allocator,
-        "{{\"type\":\"detach_session_request\",\"payload\":{{\"session_name\":\"{s}\"}}}}\n",
-        .{ctx.session_name},
-    ) catch return;
-    defer ctx.allocator.free(request);
+    const request_payload = protocol.DetachSessionRequest{ .session_name = ctx.session_name };
+    var out: std.io.Writer.Allocating = .init(ctx.allocator);
+    defer out.deinit();
+
+    const msg = protocol.Message(@TypeOf(request_payload)){
+        .type = protocol.MessageType.detach_session_request.toString(),
+        .payload = request_payload,
+    };
+
+    var stringify: std.json.Stringify = .{ .writer = &out.writer };
+    stringify.write(msg) catch return;
+    out.writer.writeByte('\n') catch return;
+
+    const request = ctx.allocator.dupe(u8, out.written()) catch return;
 
     const write_ctx = ctx.allocator.create(StdinWriteContext) catch return;
     write_ctx.* = .{
         .allocator = ctx.allocator,
-        .message = ctx.allocator.dupe(u8, request) catch return,
+        .message = request,
     };
 
     const write_completion = ctx.allocator.create(xev.Completion) catch return;
@@ -310,32 +350,20 @@ fn sendDetachRequest(ctx: *Context) void {
 }
 
 fn sendPtyInput(ctx: *Context, data: []const u8) void {
-    var msg_buf = std.ArrayList(u8).initCapacity(ctx.allocator, 4096) catch return;
-    defer msg_buf.deinit(ctx.allocator);
+    const request_payload = protocol.PtyInput{ .text = data };
+    var out: std.io.Writer.Allocating = .init(ctx.allocator);
+    defer out.deinit();
 
-    msg_buf.appendSlice(ctx.allocator, "{\"type\":\"pty_in\",\"payload\":{\"text\":\"") catch return;
+    const msg = protocol.Message(@TypeOf(request_payload)){
+        .type = protocol.MessageType.pty_in.toString(),
+        .payload = request_payload,
+    };
 
-    for (data) |byte| {
-        switch (byte) {
-            '"' => msg_buf.appendSlice(ctx.allocator, "\\\"") catch return,
-            '\\' => msg_buf.appendSlice(ctx.allocator, "\\\\") catch return,
-            '\n' => msg_buf.appendSlice(ctx.allocator, "\\n") catch return,
-            '\r' => msg_buf.appendSlice(ctx.allocator, "\\r") catch return,
-            '\t' => msg_buf.appendSlice(ctx.allocator, "\\t") catch return,
-            0x08 => msg_buf.appendSlice(ctx.allocator, "\\b") catch return,
-            0x0C => msg_buf.appendSlice(ctx.allocator, "\\f") catch return,
-            0x00...0x07, 0x0B, 0x0E...0x1F, 0x7F => {
-                const escaped = std.fmt.allocPrint(ctx.allocator, "\\u{x:0>4}", .{byte}) catch return;
-                defer ctx.allocator.free(escaped);
-                msg_buf.appendSlice(ctx.allocator, escaped) catch return;
-            },
-            else => msg_buf.append(ctx.allocator, byte) catch return,
-        }
-    }
+    var stringify: std.json.Stringify = .{ .writer = &out.writer };
+    stringify.write(msg) catch return;
+    out.writer.writeByte('\n') catch return;
 
-    msg_buf.appendSlice(ctx.allocator, "\"}}\n") catch return;
-
-    const owned_message = ctx.allocator.dupe(u8, msg_buf.items) catch return;
+    const owned_message = ctx.allocator.dupe(u8, out.written()) catch return;
 
     const write_ctx = ctx.allocator.create(StdinWriteContext) catch return;
     write_ctx.* = .{

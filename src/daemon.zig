@@ -4,6 +4,7 @@ const xevg = @import("xev");
 const xev = xevg.Dynamic;
 const clap = @import("clap");
 const config_mod = @import("config.zig");
+const protocol = @import("protocol.zig");
 
 const ghostty = @import("ghostty-vt");
 
@@ -13,17 +14,6 @@ const c = @cImport({
     @cInclude("stdlib.h");
     @cInclude("sys/ioctl.h");
 });
-
-// Generic JSON message structure used for parsing incoming protocol messages from clients
-const Message = struct {
-    type: []const u8,
-    payload: std.json.Value,
-};
-
-// Request payload for attaching to a session
-const AttachRequest = struct {
-    session_name: []const u8,
-};
 
 // Handler for processing VT sequences
 const VTHandler = struct {
@@ -289,44 +279,51 @@ fn readCallback(
 fn handleMessage(client: *Client, data: []const u8) !void {
     std.debug.print("Received message from client fd={d}: {s}", .{ client.fd, data });
 
-    // Parse JSON message
-    const parsed = try std.json.parseFromSlice(
-        std.json.Value,
-        client.allocator,
-        data,
-        .{},
-    );
-    defer parsed.deinit();
+    // Parse message type first for dispatching
+    const type_parsed = try protocol.parseMessageType(client.allocator, data);
+    defer type_parsed.deinit();
 
-    const root = parsed.value.object;
-    const msg_type = root.get("type").?.string;
-    const payload = root.get("payload").?.object;
+    const msg_type = protocol.MessageType.fromString(type_parsed.value.type) orelse {
+        std.debug.print("Unknown message type: {s}\n", .{type_parsed.value.type});
+        return;
+    };
 
-    if (std.mem.eql(u8, msg_type, "attach_session_request")) {
-        const session_name = payload.get("session_name").?.string;
-        std.debug.print("Handling attach request for session: {s}\n", .{session_name});
-        try handleAttachSession(client.server_ctx, client, session_name);
-    } else if (std.mem.eql(u8, msg_type, "detach_session_request")) {
-        const session_name = payload.get("session_name").?.string;
-        const target_client_fd = if (payload.get("client_fd")) |fd_value| fd_value.integer else null;
-        std.debug.print("Handling detach request for session: {s}, target_fd: {any}\n", .{ session_name, target_client_fd });
-        try handleDetachSession(client, session_name, target_client_fd);
-    } else if (std.mem.eql(u8, msg_type, "kill_session_request")) {
-        const session_name = payload.get("session_name").?.string;
-        std.debug.print("Handling kill request for session: {s}\n", .{session_name});
-        try handleKillSession(client, session_name);
-    } else if (std.mem.eql(u8, msg_type, "list_sessions_request")) {
-        std.debug.print("Handling list sessions request\n", .{});
-        try handleListSessions(client.server_ctx, client);
-    } else if (std.mem.eql(u8, msg_type, "pty_in")) {
-        const text = payload.get("text").?.string;
-        try handlePtyInput(client, text);
-    } else if (std.mem.eql(u8, msg_type, "window_resize")) {
-        const rows = @as(u16, @intCast(payload.get("rows").?.integer));
-        const cols = @as(u16, @intCast(payload.get("cols").?.integer));
-        try handleWindowResize(client, rows, cols);
-    } else {
-        std.debug.print("Unknown message type: {s}\n", .{msg_type});
+    switch (msg_type) {
+        .attach_session_request => {
+            const parsed = try protocol.parseMessage(protocol.AttachSessionRequest, client.allocator, data);
+            defer parsed.deinit();
+            std.debug.print("Handling attach request for session: {s}\n", .{parsed.value.payload.session_name});
+            try handleAttachSession(client.server_ctx, client, parsed.value.payload.session_name);
+        },
+        .detach_session_request => {
+            const parsed = try protocol.parseMessage(protocol.DetachSessionRequest, client.allocator, data);
+            defer parsed.deinit();
+            std.debug.print("Handling detach request for session: {s}, target_fd: {any}\n", .{ parsed.value.payload.session_name, parsed.value.payload.client_fd });
+            try handleDetachSession(client, parsed.value.payload.session_name, parsed.value.payload.client_fd);
+        },
+        .kill_session_request => {
+            const parsed = try protocol.parseMessage(protocol.KillSessionRequest, client.allocator, data);
+            defer parsed.deinit();
+            std.debug.print("Handling kill request for session: {s}\n", .{parsed.value.payload.session_name});
+            try handleKillSession(client, parsed.value.payload.session_name);
+        },
+        .list_sessions_request => {
+            std.debug.print("Handling list sessions request\n", .{});
+            try handleListSessions(client.server_ctx, client);
+        },
+        .pty_in => {
+            const parsed = try protocol.parseMessage(protocol.PtyInput, client.allocator, data);
+            defer parsed.deinit();
+            try handlePtyInput(client, parsed.value.payload.text);
+        },
+        .window_resize => {
+            const parsed = try protocol.parseMessage(protocol.WindowResize, client.allocator, data);
+            defer parsed.deinit();
+            try handleWindowResize(client, parsed.value.payload.rows, parsed.value.payload.cols);
+        },
+        else => {
+            std.debug.print("Unexpected message type: {s}\n", .{type_parsed.value.type});
+        },
     }
 }
 
@@ -335,17 +332,12 @@ fn handleDetachSession(client: *Client, session_name: []const u8, target_client_
 
     // Check if the session exists
     const session = ctx.sessions.get(session_name) orelse {
-        const error_response = try std.fmt.allocPrint(
-            client.allocator,
-            "{{\"type\":\"detach_session_response\",\"payload\":{{\"status\":\"error\",\"error_message\":\"Session not found: {s}\"}}}}\n",
-            .{session_name},
-        );
-        defer client.allocator.free(error_response);
-
-        _ = posix.write(client.fd, error_response) catch |err| {
-            std.debug.print("Error writing to fd={d}: {s}\n", .{ client.fd, @errorName(err) });
-            return err;
-        };
+        const error_msg = try std.fmt.allocPrint(client.allocator, "Session not found: {s}", .{session_name});
+        defer client.allocator.free(error_msg);
+        try protocol.writeJson(client.allocator, client.fd, .detach_session_response, protocol.DetachSessionResponse{
+            .status = "error",
+            .error_message = error_msg,
+        });
         return;
     };
 
@@ -359,84 +351,64 @@ fn handleDetachSession(client: *Client, session_name: []const u8, target_client_
                     _ = session.attached_clients.remove(target_fd_cast);
 
                     // Send notification to the target client
-                    const notification = "{\"type\":\"detach_notification\",\"payload\":{\"status\":\"ok\"}}\n";
-                    _ = posix.write(target_client.fd, notification) catch |err| {
+                    protocol.writeJson(target_client.allocator, target_client.fd, .detach_notification, protocol.DetachNotification{
+                        .session_name = session_name,
+                    }) catch |err| {
                         std.debug.print("Error notifying client fd={d}: {s}\n", .{ target_client.fd, @errorName(err) });
                     };
 
-                    // Send response to the requesting client
-                    const response = "{\"type\":\"detach_session_response\",\"payload\":{\"status\":\"ok\"}}\n";
                     std.debug.print("Detached client fd={d} from session: {s}\n", .{ target_fd_cast, session_name });
 
-                    _ = posix.write(client.fd, response) catch |err| {
-                        std.debug.print("Error writing to fd={d}: {s}\n", .{ client.fd, @errorName(err) });
-                        return err;
-                    };
+                    // Send response to the requesting client
+                    try protocol.writeJson(client.allocator, client.fd, .detach_session_response, protocol.DetachSessionResponse{
+                        .status = "ok",
+                    });
                     return;
                 } else {
-                    const error_response = try std.fmt.allocPrint(
-                        client.allocator,
-                        "{{\"type\":\"detach_session_response\",\"payload\":{{\"status\":\"error\",\"error_message\":\"Target client not attached to session: {s}\"}}}}\n",
-                        .{session_name},
-                    );
-                    defer client.allocator.free(error_response);
-
-                    _ = posix.write(client.fd, error_response) catch |err| {
-                        std.debug.print("Error writing to fd={d}: {s}\n", .{ client.fd, @errorName(err) });
-                        return err;
-                    };
+                    const error_msg = try std.fmt.allocPrint(client.allocator, "Target client not attached to session: {s}", .{session_name});
+                    defer client.allocator.free(error_msg);
+                    try protocol.writeJson(client.allocator, client.fd, .detach_session_response, protocol.DetachSessionResponse{
+                        .status = "error",
+                        .error_message = error_msg,
+                    });
                     return;
                 }
             }
         }
 
-        const error_response = try std.fmt.allocPrint(
-            client.allocator,
-            "{{\"type\":\"detach_session_response\",\"payload\":{{\"status\":\"error\",\"error_message\":\"Target client fd={d} not found\"}}}}\n",
-            .{target_fd},
-        );
-        defer client.allocator.free(error_response);
-
-        _ = posix.write(client.fd, error_response) catch |err| {
-            std.debug.print("Error writing to fd={d}: {s}\n", .{ client.fd, @errorName(err) });
-            return err;
-        };
+        const error_msg = try std.fmt.allocPrint(client.allocator, "Target client fd={d} not found", .{target_fd});
+        defer client.allocator.free(error_msg);
+        try protocol.writeJson(client.allocator, client.fd, .detach_session_response, protocol.DetachSessionResponse{
+            .status = "error",
+            .error_message = error_msg,
+        });
         return;
     }
 
     // No target_client_fd provided, check if requesting client is attached
     if (client.attached_session) |attached| {
         if (!std.mem.eql(u8, attached, session_name)) {
-            const error_response = try std.fmt.allocPrint(
-                client.allocator,
-                "{{\"type\":\"detach_session_response\",\"payload\":{{\"status\":\"error\",\"error_message\":\"Not attached to session: {s}\"}}}}\n",
-                .{session_name},
-            );
-            defer client.allocator.free(error_response);
-
-            _ = posix.write(client.fd, error_response) catch |err| {
-                std.debug.print("Error writing to fd={d}: {s}\n", .{ client.fd, @errorName(err) });
-                return err;
-            };
+            const error_msg = try std.fmt.allocPrint(client.allocator, "Not attached to session: {s}", .{session_name});
+            defer client.allocator.free(error_msg);
+            try protocol.writeJson(client.allocator, client.fd, .detach_session_response, protocol.DetachSessionResponse{
+                .status = "error",
+                .error_message = error_msg,
+            });
             return;
         }
 
         client.attached_session = null;
         _ = session.attached_clients.remove(client.fd);
 
-        const response = "{\"type\":\"detach_session_response\",\"payload\":{\"status\":\"ok\"}}\n";
-        std.debug.print("Sending detach response to client fd={d}: {s}", .{ client.fd, response });
-
-        _ = posix.write(client.fd, response) catch |err| {
-            std.debug.print("Error writing to fd={d}: {s}\n", .{ client.fd, @errorName(err) });
-            return err;
-        };
+        std.debug.print("Sending detach response to client fd={d}\n", .{client.fd});
+        try protocol.writeJson(client.allocator, client.fd, .detach_session_response, protocol.DetachSessionResponse{
+            .status = "ok",
+        });
     } else {
-        const error_response = "{\"type\":\"detach_session_response\",\"payload\":{\"status\":\"error\",\"error_message\":\"Not attached to any session\"}}\n";
-        _ = posix.write(client.fd, error_response) catch |err| {
-            std.debug.print("Error writing to fd={d}: {s}\n", .{ client.fd, @errorName(err) });
-            return err;
-        };
+        try protocol.writeJson(client.allocator, client.fd, .detach_session_response, protocol.DetachSessionResponse{
+            .status = "error",
+            .error_message = "Not attached to any session",
+        });
     }
 }
 
@@ -445,17 +417,12 @@ fn handleKillSession(client: *Client, session_name: []const u8) !void {
 
     // Check if the session exists
     const session = ctx.sessions.get(session_name) orelse {
-        const error_response = try std.fmt.allocPrint(
-            client.allocator,
-            "{{\"type\":\"kill_session_response\",\"payload\":{{\"status\":\"error\",\"error_message\":\"Session not found: {s}\"}}}}\n",
-            .{session_name},
-        );
-        defer client.allocator.free(error_response);
-
-        _ = posix.write(client.fd, error_response) catch |err| {
-            std.debug.print("Error writing to fd={d}: {s}\n", .{ client.fd, @errorName(err) });
-            return err;
-        };
+        const error_msg = try std.fmt.allocPrint(client.allocator, "Session not found: {s}", .{session_name});
+        defer client.allocator.free(error_msg);
+        try protocol.writeJson(client.allocator, client.fd, .kill_session_response, protocol.KillSessionResponse{
+            .status = "error",
+            .error_message = error_msg,
+        });
         return;
     };
 
@@ -468,8 +435,9 @@ fn handleKillSession(client: *Client, session_name: []const u8) !void {
                 attached_client.attached_session = null;
 
                 // Send kill notification to client
-                const notification = "{\"type\":\"kill_notification\",\"payload\":{\"status\":\"ok\"}}\n";
-                _ = posix.write(attached_client.fd, notification) catch |err| {
+                protocol.writeJson(attached_client.allocator, attached_client.fd, .kill_notification, protocol.KillNotification{
+                    .session_name = session_name,
+                }) catch |err| {
                     std.debug.print("Error notifying client fd={d}: {s}\n", .{ attached_client.fd, @errorName(err) });
                 };
             }
@@ -495,16 +463,14 @@ fn handleKillSession(client: *Client, session_name: []const u8) !void {
     ctx.allocator.destroy(session);
 
     // Send response to requesting client
-    const response = "{\"type\":\"kill_session_response\",\"payload\":{\"status\":\"ok\"}}\n";
     std.debug.print("Killed session: {s}\n", .{session_name});
-
-    _ = posix.write(client.fd, response) catch |err| {
-        std.debug.print("Error writing to fd={d}: {s}\n", .{ client.fd, @errorName(err) });
-        return err;
-    };
+    try protocol.writeJson(client.allocator, client.fd, .kill_session_response, protocol.KillSessionResponse{
+        .status = "ok",
+    });
 }
 
 fn handleListSessions(ctx: *ServerContext, client: *Client) !void {
+    // TODO: Refactor to use protocol.writeJson() once we have a better approach for dynamic arrays
     var response = try std.ArrayList(u8).initCapacity(client.allocator, 1024);
     defer response.deinit(client.allocator);
 
@@ -583,33 +549,16 @@ fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []con
 
         // For first attach to new session, clear the client's terminal
         if (!is_reattach) {
-            var out: std.io.Writer.Allocating = .init(ctx.allocator);
-            defer out.deinit();
-            var json_writer: std.json.Stringify = .{ .writer = &out.writer };
-
-            try json_writer.beginObject();
-            try json_writer.objectField("type");
-            try json_writer.write("pty_out");
-            try json_writer.objectField("payload");
-            try json_writer.beginObject();
-            try json_writer.objectField("text");
-            try json_writer.write("\x1b[2J\x1b[H"); // Clear screen and move cursor to home
-            try json_writer.endObject();
-            try json_writer.endObject();
-
-            const response = try std.fmt.allocPrint(ctx.allocator, "{s}\n", .{out.written()});
-            defer ctx.allocator.free(response);
-            _ = try posix.write(client.fd, response);
+            try protocol.writeJson(ctx.allocator, client.fd, .pty_out, protocol.PtyOutput{
+                .text = "\x1b[2J\x1b[H", // Clear screen and move cursor to home
+            });
         }
     } else {
         // Send attach success response for additional clients
-        const response = try std.fmt.allocPrint(
-            ctx.allocator,
-            "{{\"type\":\"attach_session_response\",\"payload\":{{\"status\":\"ok\",\"client_fd\":{d}}}}}\n",
-            .{client.fd},
-        );
-        defer ctx.allocator.free(response);
-        _ = try posix.write(client.fd, response);
+        try protocol.writeJson(ctx.allocator, client.fd, .attach_session_response, protocol.AttachSessionResponse{
+            .status = "ok",
+            .client_fd = client.fd,
+        });
     }
 
     // If reattaching, send the scrollback buffer (raw PTY output with colors)
@@ -626,35 +575,9 @@ fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []con
 
         std.debug.print("Sending slice: {d} bytes (from offset {d})\n", .{ buffer_slice.len, buffer_start });
 
-        // Use Zig's JSON formatting to properly escape the buffer
-        var out: std.io.Writer.Allocating = .init(ctx.allocator);
-        defer out.deinit();
-
-        var json_writer: std.json.Stringify = .{ .writer = &out.writer };
-
-        json_writer.beginObject() catch |err| {
-            std.debug.print("JSON beginObject error: {s}\n", .{@errorName(err)});
-            return;
-        };
-        json_writer.objectField("type") catch return;
-        json_writer.write("pty_out") catch return;
-        json_writer.objectField("payload") catch return;
-        json_writer.beginObject() catch return;
-        json_writer.objectField("text") catch return;
-        json_writer.write(buffer_slice) catch |err| {
-            std.debug.print("JSON write buffer error: {s}\n", .{@errorName(err)});
-            return;
-        };
-        json_writer.endObject() catch return;
-        json_writer.endObject() catch return;
-
-        const json_output = out.written();
-        std.debug.print("JSON output length: {d} bytes\n", .{json_output.len});
-        std.debug.print("JSON first 100 bytes: {s}\n", .{json_output[0..@min(100, json_output.len)]});
-
-        const response = try std.fmt.allocPrint(ctx.allocator, "{s}\n", .{json_output});
-        defer ctx.allocator.free(response);
-        _ = try posix.write(client.fd, response);
+        try protocol.writeJson(ctx.allocator, client.fd, .pty_out, protocol.PtyOutput{
+            .text = buffer_slice,
+        });
         std.debug.print("Sent scrollback buffer to client fd={d}\n", .{client.fd});
     }
 }
@@ -726,20 +649,12 @@ fn readFromPty(ctx: *ServerContext, client: *Client, session: *Session) !void {
         readPtyCallback,
     );
 
-    const response = try std.fmt.allocPrint(
-        client.allocator,
-        "{{\"type\":\"attach_session_response\",\"payload\":{{\"status\":\"ok\",\"client_fd\":{d}}}}}\n",
-        .{client.fd},
-    );
-    defer client.allocator.free(response);
+    std.debug.print("Sending attach response to client fd={d}\n", .{client.fd});
 
-    std.debug.print("Sending response to client fd={d}: {s}", .{ client.fd, response });
-
-    const written = posix.write(client.fd, response) catch |err| {
-        std.debug.print("Error writing to fd={d}: {s}\n", .{ client.fd, @errorName(err) });
-        return err;
-    };
-    _ = written;
+    try protocol.writeJson(client.allocator, client.fd, .attach_session_response, protocol.AttachSessionResponse{
+        .status = "ok",
+        .client_fd = client.fd,
+    });
 }
 
 fn getSessionForClient(ctx: *ServerContext, client: *Client) ?*Session {

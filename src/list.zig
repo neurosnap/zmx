@@ -2,6 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 const clap = @import("clap");
 const config_mod = @import("config.zig");
+const protocol = @import("protocol.zig");
 
 const params = clap.parseParamsComptime(
     \\-s, --socket-path <str>  Path to the Unix socket file
@@ -41,8 +42,7 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
         return err;
     };
 
-    const request = "{\"type\":\"list_sessions_request\",\"payload\":{}}\n";
-    _ = try posix.write(socket_fd, request);
+    try protocol.writeJson(allocator, socket_fd, .list_sessions_request, protocol.ListSessionsRequest{});
 
     var buffer: [8192]u8 = undefined;
     const bytes_read = try posix.read(socket_fd, &buffer);
@@ -56,27 +56,18 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
     const newline_idx = std.mem.indexOf(u8, response, "\n") orelse bytes_read;
     const msg_line = response[0..newline_idx];
 
-    const parsed = try std.json.parseFromSlice(
-        std.json.Value,
-        allocator,
-        msg_line,
-        .{},
-    );
+    const parsed = try protocol.parseMessage(protocol.ListSessionsResponse, allocator, msg_line);
     defer parsed.deinit();
 
-    const root = parsed.value.object;
-    const payload = root.get("payload").?.object;
-    const status = payload.get("status").?.string;
+    const payload = parsed.value.payload;
 
-    if (!std.mem.eql(u8, status, "ok")) {
-        const error_msg = payload.get("error_message").?.string;
+    if (!std.mem.eql(u8, payload.status, "ok")) {
+        const error_msg = payload.error_message orelse "Unknown error";
         std.debug.print("Error: {s}\n", .{error_msg});
         return;
     }
 
-    const sessions = payload.get("sessions").?.array;
-
-    if (sessions.items.len == 0) {
+    if (payload.sessions.len == 0) {
         std.debug.print("No active sessions\n", .{});
         return;
     }
@@ -85,13 +76,7 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
     std.debug.print("{s:<20} {s:<12} {s:<8} {s}\n", .{ "NAME", "STATUS", "CLIENTS", "CREATED" });
     std.debug.print("{s}\n", .{"-" ** 60});
 
-    for (sessions.items) |session_value| {
-        const session = session_value.object;
-        const name = session.get("name").?.string;
-        const session_status = session.get("status").?.string;
-        const clients = session.get("clients").?.integer;
-        const created_at = session.get("created_at").?.string;
-
-        std.debug.print("{s:<20} {s:<12} {d:<8} {s}\n", .{ name, session_status, clients, created_at });
+    for (payload.sessions) |session| {
+        std.debug.print("{s:<20} {s:<12} {d:<8} {s}\n", .{ session.name, session.status, session.clients, session.created_at });
     }
 }

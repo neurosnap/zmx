@@ -2,6 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 const clap = @import("clap");
 const config_mod = @import("config.zig");
+const protocol = @import("protocol.zig");
 
 const params = clap.parseParamsComptime(
     \\-s, --socket-path <str>  Path to the Unix socket file
@@ -47,14 +48,12 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
         return err;
     };
 
-    const request = try std.fmt.allocPrint(
+    try protocol.writeJson(
         allocator,
-        "{{\"type\":\"kill_session_request\",\"payload\":{{\"session_name\":\"{s}\"}}}}\n",
-        .{session_name},
+        socket_fd,
+        .kill_session_request,
+        protocol.KillSessionRequest{ .session_name = session_name },
     );
-    defer allocator.free(request);
-
-    _ = try posix.write(socket_fd, request);
 
     var buffer: [4096]u8 = undefined;
     const bytes_read = try posix.read(socket_fd, &buffer);
@@ -68,22 +67,13 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
     const newline_idx = std.mem.indexOf(u8, response, "\n") orelse bytes_read;
     const msg_line = response[0..newline_idx];
 
-    const parsed = try std.json.parseFromSlice(
-        std.json.Value,
-        allocator,
-        msg_line,
-        .{},
-    );
+    const parsed = try protocol.parseMessage(protocol.KillSessionResponse, allocator, msg_line);
     defer parsed.deinit();
 
-    const root = parsed.value.object;
-    const payload = root.get("payload").?.object;
-    const status = payload.get("status").?.string;
-
-    if (std.mem.eql(u8, status, "ok")) {
+    if (std.mem.eql(u8, parsed.value.payload.status, "ok")) {
         std.debug.print("Killed session: {s}\n", .{session_name});
     } else {
-        const error_msg = payload.get("error_message").?.string;
+        const error_msg = parsed.value.payload.error_message orelse "Unknown error";
         std.debug.print("Failed to kill session: {s}\n", .{error_msg});
         std.process.exit(1);
     }

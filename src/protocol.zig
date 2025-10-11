@@ -145,7 +145,8 @@ pub fn writeJson(allocator: std.mem.Allocator, fd: posix.fd_t, msg_type: Message
         .payload = payload,
     };
 
-    try std.json.stringify(msg, .{}, &out.writer);
+    var stringify: std.json.Stringify = .{ .writer = &out.writer };
+    try stringify.write(msg);
     try out.writer.writeByte('\n');
 
     _ = try posix.write(fd, out.written());
@@ -167,9 +168,10 @@ pub fn parseMessage(comptime T: type, allocator: std.mem.Allocator, line: []cons
 }
 
 // Helper to parse just the message type from a line (for dispatching)
-pub fn parseMessageType(allocator: std.mem.Allocator, line: []const u8) !std.json.Parsed(struct { type: []const u8 }) {
+const MessageTypeOnly = struct { type: []const u8 };
+pub fn parseMessageType(allocator: std.mem.Allocator, line: []const u8) !std.json.Parsed(MessageTypeOnly) {
     return try std.json.parseFromSlice(
-        struct { type: []const u8 },
+        MessageTypeOnly,
         allocator,
         line,
         .{ .ignore_unknown_fields = true },
@@ -250,7 +252,7 @@ pub fn readBinaryFrame(allocator: std.mem.Allocator, fd: posix.fd_t) !struct { f
     const read_len = try posix.read(fd, &header_bytes);
     if (read_len != @sizeOf(FrameHeader)) return error.IncompleteFrame;
 
-    const header: *const FrameHeader = @alignCast(@ptrCast(&header_bytes));
+    const header: *const FrameHeader = @ptrCast(@alignCast(&header_bytes));
     const payload = try allocator.alloc(u8, header.length);
     errdefer allocator.free(payload);
 
