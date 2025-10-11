@@ -1,5 +1,6 @@
 const std = @import("std");
 const cli = @import("cli.zig");
+const config_mod = @import("config.zig");
 const daemon = @import("daemon.zig");
 const attach = @import("attach.zig");
 const detach = @import("detach.zig");
@@ -29,12 +30,15 @@ pub fn main() !void {
         return;
     };
 
+    var config = try config_mod.Config.load(allocator);
+    defer config.deinit(allocator);
+
     switch (command) {
         .help => try cli.help(),
-        .daemon => try daemon.main(),
-        .list => try list.main(),
-        .attach => try attach.main(),
-        .detach => try detach.main(),
-        .kill => try kill.main(),
+        .daemon => try daemon.main(config.socket_path, &iter),
+        .list => try list.main(config.socket_path, &iter),
+        .attach => try attach.main(config.socket_path, &iter),
+        .detach => try detach.main(config.socket_path, &iter),
+        .kill => try kill.main(config.socket_path, &iter),
     }
 }

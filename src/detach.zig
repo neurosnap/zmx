@@ -1,12 +1,32 @@
 const std = @import("std");
 const posix = std.posix;
+const clap = @import("clap");
 
-const socket_path = "/tmp/zmx.sock";
+const params = clap.parseParamsComptime(
+    \\-s, --socket-path <str>  Path to the Unix socket file
+    \\
+);
 
-pub fn main() !void {
+pub fn main(socket_path_default: []const u8, iter: *std.process.ArgIterator) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+
+    var diag = clap.Diagnostic{};
+    var res = clap.parseEx(clap.Help, &params, clap.parsers.default, iter, .{
+        .diagnostic = &diag,
+        .allocator = allocator,
+    }) catch |err| {
+        var buf: [1024]u8 = undefined;
+        var stderr_file = std.fs.File{ .handle = posix.STDERR_FILENO };
+        var writer = stderr_file.writer(&buf);
+        diag.report(&writer.interface, err) catch {};
+        writer.interface.flush() catch {};
+        return err;
+    };
+    defer res.deinit();
+
+    const socket_path = res.args.@"socket-path" orelse socket_path_default;
 
     // Find the client_fd file in home directory
     const home_dir = posix.getenv("HOME") orelse "/tmp";
@@ -21,8 +41,8 @@ pub fn main() !void {
     };
     defer dir.close();
 
-    var iter = dir.iterate();
-    while (iter.next() catch null) |entry| {
+    var dir_iter = dir.iterate();
+    while (dir_iter.next() catch null) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.startsWith(u8, entry.name, ".zmx_client_fd_")) continue;
 

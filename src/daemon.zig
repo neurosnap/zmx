@@ -2,7 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 const xevg = @import("xev");
 const xev = xevg.Dynamic;
-const socket_path = "/tmp/zmx.sock";
+const clap = @import("clap");
 
 const ghostty = @import("ghostty-vt");
 
@@ -94,10 +94,31 @@ const ServerContext = struct {
     allocator: std.mem.Allocator,
 };
 
-pub fn main() !void {
+const params = clap.parseParamsComptime(
+    \\-s, --socket-path <str>  Path to the Unix socket file
+    \\
+);
+
+pub fn main(socket_path_default: []const u8, iter: *std.process.ArgIterator) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+
+    var diag = clap.Diagnostic{};
+    var res = clap.parseEx(clap.Help, &params, clap.parsers.default, iter, .{
+        .diagnostic = &diag,
+        .allocator = allocator,
+    }) catch |err| {
+        var buf: [1024]u8 = undefined;
+        var stderr_file = std.fs.File{ .handle = posix.STDERR_FILENO };
+        var writer = stderr_file.writer(&buf);
+        diag.report(&writer.interface, err) catch {};
+        writer.interface.flush() catch {};
+        return err;
+    };
+    defer res.deinit();
+
+    const socket_path = res.args.@"socket-path" orelse socket_path_default;
 
     var thread_pool = xevg.ThreadPool.init(.{});
     defer thread_pool.deinit();
@@ -107,6 +128,8 @@ pub fn main() !void {
     defer loop.deinit();
 
     std.debug.print("zmx daemon starting...\n", .{});
+    std.debug.print("Configuration:\n", .{});
+    std.debug.print("  socket_path: {s}\n", .{socket_path});
 
     _ = std.fs.cwd().deleteFile(socket_path) catch {};
 
@@ -114,7 +137,10 @@ pub fn main() !void {
     // SOCK.STREAM: Reliable, bidirectional communication for JSON protocol messages
     // SOCK.NONBLOCK: Prevents blocking to work with libxev's async event loop
     const server_fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.NONBLOCK, 0);
-    defer posix.close(server_fd);
+    defer {
+        posix.close(server_fd);
+        std.fs.cwd().deleteFile(socket_path) catch {};
+    }
 
     var unix_addr = std.net.Address.initUnix(socket_path) catch |err| {
         std.debug.print("initUnix failed: {s}\n", .{@errorName(err)});

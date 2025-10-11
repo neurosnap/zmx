@@ -1,12 +1,32 @@
 const std = @import("std");
 const posix = std.posix;
+const clap = @import("clap");
 
-const socket_path = "/tmp/zmx.sock";
+const params = clap.parseParamsComptime(
+    \\-s, --socket-path <str>  Path to the Unix socket file
+    \\
+);
 
-pub fn main() !void {
+pub fn main(socket_path_default: []const u8, iter: *std.process.ArgIterator) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+
+    var diag = clap.Diagnostic{};
+    var res = clap.parseEx(clap.Help, &params, clap.parsers.default, iter, .{
+        .diagnostic = &diag,
+        .allocator = allocator,
+    }) catch |err| {
+        var buf: [1024]u8 = undefined;
+        var stderr_file = std.fs.File{ .handle = posix.STDERR_FILENO };
+        var writer = stderr_file.writer(&buf);
+        diag.report(&writer.interface, err) catch {};
+        writer.interface.flush() catch {};
+        return err;
+    };
+    defer res.deinit();
+
+    const socket_path = res.args.@"socket-path" orelse socket_path_default;
 
     const unix_addr = try std.net.Address.initUnix(socket_path);
     const socket_fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);

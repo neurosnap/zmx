@@ -38,6 +38,12 @@ pub fn build(b: *std.Build) void {
     });
     exe_mod.addImport("clap", clap_dep.module("clap"));
 
+    const toml_dep = b.dependency("toml", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    exe_mod.addImport("toml", toml_dep.module("toml"));
+
     // Exe
     const exe = b.addExecutable(.{
         .name = "zmx",

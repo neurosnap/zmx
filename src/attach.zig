@@ -2,7 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 const xevg = @import("xev");
 const xev = xevg.Dynamic;
-const socket_path = "/tmp/zmx.sock";
+const clap = @import("clap");
 
 const c = @cImport({
     @cInclude("termios.h");
@@ -22,21 +22,37 @@ const Context = struct {
     read_ctx: ?*ReadContext = null,
 };
 
-pub fn main() !void {
+const params = clap.parseParamsComptime(
+    \\-s, --socket-path <str>  Path to the Unix socket file
+    \\<str>
+    \\
+);
+
+pub fn main(socket_path_default: []const u8, iter: *std.process.ArgIterator) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Get session name from command-line arguments
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    var diag = clap.Diagnostic{};
+    var res = clap.parseEx(clap.Help, &params, clap.parsers.default, iter, .{
+        .diagnostic = &diag,
+        .allocator = allocator,
+    }) catch |err| {
+        var buf: [1024]u8 = undefined;
+        var stderr_file = std.fs.File{ .handle = posix.STDERR_FILENO };
+        var writer = stderr_file.writer(&buf);
+        diag.report(&writer.interface, err) catch {};
+        writer.interface.flush() catch {};
+        return err;
+    };
+    defer res.deinit();
 
-    if (args.len < 3) {
+    const socket_path = res.args.@"socket-path" orelse socket_path_default;
+
+    const session_name = res.positionals[0] orelse {
         std.debug.print("Usage: zmx attach <session-name>\n", .{});
         std.process.exit(1);
-    }
-
-    const session_name = args[2];
+    };
 
     var thread_pool = xevg.ThreadPool.init(.{});
     defer thread_pool.deinit();
@@ -57,14 +73,9 @@ pub fn main() !void {
     posix.connect(socket_fd, &unix_addr.any, unix_addr.getOsSockLen()) catch |err| {
         if (err == error.ConnectionRefused) {
             std.debug.print("Error: Unable to connect to zmx daemon at {s}\nPlease start the daemon first with: zmx daemon\n", .{socket_path});
-            std.process.exit(1);
         }
-        return err;
+        std.process.exit(1);
     };
-
-    _ = posix.write(posix.STDERR_FILENO, "Attaching to session: ") catch {};
-    _ = posix.write(posix.STDERR_FILENO, session_name) catch {};
-    _ = posix.write(posix.STDERR_FILENO, "\n") catch {};
 
     // Set raw mode after successful connection
     defer _ = c.tcsetattr(posix.STDIN_FILENO, c.TCSANOW, &orig_termios);
@@ -234,8 +245,6 @@ fn readCallback(
         } else if (std.mem.eql(u8, msg_type, "pty_out")) {
             const text = payload.get("text").?.string;
             _ = posix.write(posix.STDOUT_FILENO, text) catch {};
-        } else {
-            std.debug.print("Unknown message type: {s}\n", .{msg_type});
         }
 
         return .rearm;
