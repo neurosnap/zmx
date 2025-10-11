@@ -8,7 +8,24 @@ The communication occurs over a Unix domain socket. The path to the socket is co
 
 ## Serialization
 
-All messages are serialized using JSON. Each message is a JSON object, and messages are separated by a newline character (`\n`). This allows for simple streaming and parsing of messages.
+All messages are currently serialized using **newline-delimited JSON (NDJSON)**. Each message is a JSON object terminated by a newline character (`\n`). This allows for simple streaming and parsing of messages while maintaining human-readable logs for debugging.
+
+### Implementation
+
+The protocol implementation is centralized in `src/protocol.zig`, which provides:
+- Typed message structs for all payloads
+- `MessageType` enum for type-safe dispatching
+- Helper functions: `writeJson()`, `parseMessage()`, `parseMessageType()`
+- `LineBuffer` for efficient NDJSON line buffering
+
+### Future: Binary Frame Support
+
+The protocol module includes infrastructure for future binary framing to optimize PTY data throughput:
+- Frame format: `[4-byte length][2-byte type][payload...]`
+- Type 1: JSON control messages (current)
+- Type 2: Binary PTY data (future optimization)
+
+This hybrid approach would keep control messages in human-readable JSON while allowing raw binary PTY data when profiling shows JSON is a bottleneck.
 
 ## Message Structure
 
