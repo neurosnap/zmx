@@ -18,6 +18,12 @@ pub fn main() !void {
     var res = try cli.parse(allocator, &iter);
     defer res.deinit();
 
+    if (res.args.version != 0) {
+        const version_text = "zmx " ++ cli.version ++ "\n";
+        _ = try std.posix.write(std.posix.STDOUT_FILENO, version_text);
+        return;
+    }
+
     const command = res.positionals[0] orelse {
         try cli.help();
         return;

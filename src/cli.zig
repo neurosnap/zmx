@@ -2,6 +2,8 @@ const std = @import("std");
 const clap = @import("clap");
 const posix = std.posix;
 
+pub const version = "0.1.0";
+
 const SubCommands = enum {
     help,
     daemon,
