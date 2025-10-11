@@ -33,7 +33,7 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
 
     const session_name = res.positionals[0] orelse {
         std.debug.print("Usage: zmx kill <session-name>\n", .{});
-        std.process.exit(1);
+        return error.MissingSessionName;
     };
 
     const unix_addr = try std.net.Address.initUnix(socket_path);
@@ -43,7 +43,6 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
     posix.connect(socket_fd, &unix_addr.any, unix_addr.getOsSockLen()) catch |err| {
         if (err == error.ConnectionRefused) {
             std.debug.print("Error: Unable to connect to zmx daemon at {s}\nPlease start the daemon first with: zmx daemon\n", .{socket_path});
-            std.process.exit(1);
         }
         return err;
     };
@@ -75,6 +74,6 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
     } else {
         const error_msg = parsed.value.payload.error_message orelse "Unknown error";
         std.debug.print("Failed to kill session: {s}\n", .{error_msg});
-        std.process.exit(1);
+        return error.KillFailed;
     }
 }

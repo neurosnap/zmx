@@ -39,7 +39,7 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
     // Look for .zmx_client_fd_* files
     var dir = std.fs.cwd().openDir(home_dir, .{ .iterate = true }) catch {
         std.debug.print("Error: Cannot access home directory\n", .{});
-        std.process.exit(1);
+        return error.CannotAccessHomeDirectory;
     };
     defer dir.close();
 
@@ -72,7 +72,7 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
     if (session_name == null) {
         std.debug.print("Error: Not currently attached to any session\n", .{});
         std.debug.print("Use Ctrl-b d to detach from within an attached session\n", .{});
-        std.process.exit(1);
+        return error.NotAttached;
     }
     defer if (session_name) |name| allocator.free(name);
 
@@ -83,7 +83,6 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
     posix.connect(socket_fd, &unix_addr.any, unix_addr.getOsSockLen()) catch |err| {
         if (err == error.ConnectionRefused) {
             std.debug.print("Error: Unable to connect to zmx daemon at {s}\nPlease start the daemon first with: zmx daemon\n", .{socket_path});
-            std.process.exit(1);
         }
         return err;
     };
@@ -115,6 +114,6 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
     } else {
         const error_msg = parsed.value.payload.error_message orelse "Unknown error";
         std.debug.print("Failed to detach: {s}\n", .{error_msg});
-        std.process.exit(1);
+        return error.DetachFailed;
     }
 }

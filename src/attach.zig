@@ -53,7 +53,7 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
 
     const session_name = res.positionals[0] orelse {
         std.debug.print("Usage: zmx attach <session-name>\n", .{});
-        std.process.exit(1);
+        return error.MissingSessionName;
     };
 
     var thread_pool = xevg.ThreadPool.init(.{});
@@ -75,8 +75,9 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
     posix.connect(socket_fd, &unix_addr.any, unix_addr.getOsSockLen()) catch |err| {
         if (err == error.ConnectionRefused) {
             std.debug.print("Error: Unable to connect to zmx daemon at {s}\nPlease start the daemon first with: zmx daemon\n", .{socket_path});
+            return err;
         }
-        std.process.exit(1);
+        return err;
     };
 
     // Set raw mode after successful connection

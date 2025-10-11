@@ -3,6 +3,7 @@ const toml = @import("toml");
 
 pub const Config = struct {
     socket_path: []const u8 = "/tmp/zmx.sock",
+    socket_path_allocated: bool = false,
 
     pub fn load(allocator: std.mem.Allocator) !Config {
         const config_path = getConfigPath(allocator) catch |err| {
@@ -26,12 +27,13 @@ pub const Config = struct {
 
         const config = Config{
             .socket_path = try allocator.dupe(u8, result.value.socket_path),
+            .socket_path_allocated = true,
         };
         return config;
     }
 
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
-        if (!std.mem.eql(u8, self.socket_path, "/tmp/zmx.sock")) {
+        if (self.socket_path_allocated) {
             allocator.free(self.socket_path);
         }
     }

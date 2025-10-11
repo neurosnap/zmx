@@ -715,6 +715,41 @@ fn renderTerminalSnapshot(session: *Session, allocator: std.mem.Allocator) ![]u8
     return output.toOwnedSlice(allocator);
 }
 
+fn notifyAttachedClientsAndCleanup(session: *Session, ctx: *ServerContext, reason: []const u8) void {
+    std.debug.print("Session '{s}' ending: {s}\n", .{ session.name, reason });
+
+    // Notify all attached clients
+    var it = session.attached_clients.keyIterator();
+    while (it.next()) |client_fd| {
+        const client = ctx.clients.get(client_fd.*) orelse continue;
+        protocol.writeJson(
+            client.allocator,
+            client.fd,
+            .kill_notification,
+            protocol.KillNotification{ .session_name = session.name },
+        ) catch |err| {
+            std.debug.print("Failed to notify client {d}: {s}\n", .{ client_fd.*, @errorName(err) });
+        };
+        // Clear client's attached session reference
+        if (client.attached_session) |attached| {
+            client.allocator.free(attached);
+            client.attached_session = null;
+        }
+    }
+
+    // Close PTY master fd
+    posix.close(session.pty_master_fd);
+
+    // Remove from sessions map BEFORE cleaning up (session.deinit frees session.name)
+    const session_name_copy = ctx.allocator.dupe(u8, session.name) catch return;
+    defer ctx.allocator.free(session_name_copy);
+    _ = ctx.sessions.remove(session_name_copy);
+
+    // Clean up session
+    session.deinit();
+    ctx.allocator.destroy(session);
+}
+
 fn readPtyCallback(
     pty_ctx_opt: ?*PtyReadContext,
     loop: *xev.Loop,
@@ -729,7 +764,10 @@ fn readPtyCallback(
 
     if (read_result) |bytes_read| {
         if (bytes_read == 0) {
-            std.debug.print("pty closed\n", .{});
+            std.debug.print("PTY closed (EOF)\n", .{});
+            notifyAttachedClientsAndCleanup(session, ctx, "PTY closed");
+            ctx.allocator.destroy(pty_ctx);
+            ctx.allocator.destroy(completion);
             return .disarm;
         }
 
@@ -871,7 +909,18 @@ fn readPtyCallback(
             return .disarm;
         }
 
+        // Fatal error - notify clients and clean up
         std.debug.print("PTY read error: {s}\n", .{@errorName(err)});
+        const error_msg = std.fmt.allocPrint(
+            ctx.allocator,
+            "PTY read error: {s}",
+            .{@errorName(err)},
+        ) catch "PTY read error";
+        defer if (!std.mem.eql(u8, error_msg, "PTY read error")) ctx.allocator.free(error_msg);
+
+        notifyAttachedClientsAndCleanup(session, ctx, error_msg);
+        ctx.allocator.destroy(pty_ctx);
+        ctx.allocator.destroy(completion);
         return .disarm;
     }
     unreachable;

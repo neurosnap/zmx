@@ -37,7 +37,6 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
     posix.connect(socket_fd, &unix_addr.any, unix_addr.getOsSockLen()) catch |err| {
         if (err == error.ConnectionRefused) {
             std.debug.print("Error: Unable to connect to zmx daemon at {s}\nPlease start the daemon first with: zmx daemon\n", .{socket_path});
-            std.process.exit(1);
         }
         return err;
     };
