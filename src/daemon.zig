@@ -529,30 +529,50 @@ fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []con
         _ = try posix.write(client.fd, response);
     }
 
-    // If reattaching, send the current terminal state after attach response
-    if (is_reattach) {
-        const snapshot = try renderTerminalSnapshot(session, ctx.allocator);
-        defer ctx.allocator.free(snapshot);
+    // If reattaching, send the scrollback buffer (raw PTY output with colors)
+    // Limit to last 64KB to avoid huge JSON messages
+    if (is_reattach and session.buffer.items.len > 0) {
+        std.debug.print("Sending scrollback buffer: {d} bytes total\n", .{session.buffer.items.len});
 
-        // Use Zig's JSON formatting to properly escape the snapshot
+        const max_buffer_size = 64 * 1024;
+        const buffer_start = if (session.buffer.items.len > max_buffer_size)
+            session.buffer.items.len - max_buffer_size
+        else
+            0;
+        const buffer_slice = session.buffer.items[buffer_start..];
+
+        std.debug.print("Sending slice: {d} bytes (from offset {d})\n", .{ buffer_slice.len, buffer_start });
+
+        // Use Zig's JSON formatting to properly escape the buffer
         var out: std.io.Writer.Allocating = .init(ctx.allocator);
         defer out.deinit();
 
         var json_writer: std.json.Stringify = .{ .writer = &out.writer };
 
-        try json_writer.beginObject();
-        try json_writer.objectField("type");
-        try json_writer.write("pty_out");
-        try json_writer.objectField("payload");
-        try json_writer.beginObject();
-        try json_writer.objectField("text");
-        try json_writer.write(snapshot);
-        try json_writer.endObject();
-        try json_writer.endObject();
+        json_writer.beginObject() catch |err| {
+            std.debug.print("JSON beginObject error: {s}\n", .{@errorName(err)});
+            return;
+        };
+        json_writer.objectField("type") catch return;
+        json_writer.write("pty_out") catch return;
+        json_writer.objectField("payload") catch return;
+        json_writer.beginObject() catch return;
+        json_writer.objectField("text") catch return;
+        json_writer.write(buffer_slice) catch |err| {
+            std.debug.print("JSON write buffer error: {s}\n", .{@errorName(err)});
+            return;
+        };
+        json_writer.endObject() catch return;
+        json_writer.endObject() catch return;
 
-        const response = try std.fmt.allocPrint(ctx.allocator, "{s}\n", .{out.written()});
+        const json_output = out.written();
+        std.debug.print("JSON output length: {d} bytes\n", .{json_output.len});
+        std.debug.print("JSON first 100 bytes: {s}\n", .{json_output[0..@min(100, json_output.len)]});
+
+        const response = try std.fmt.allocPrint(ctx.allocator, "{s}\n", .{json_output});
         defer ctx.allocator.free(response);
         _ = try posix.write(client.fd, response);
+        std.debug.print("Sent scrollback buffer to client fd={d}\n", .{client.fd});
     }
 }
 
@@ -718,6 +738,11 @@ fn readPtyCallback(
         const data = read_buffer.slice[0..bytes_read];
         std.debug.print("PTY output ({d} bytes)\n", .{bytes_read});
 
+        // Store PTY output in buffer for session restore
+        session.buffer.appendSlice(session.allocator, data) catch |err| {
+            std.debug.print("Buffer append error: {s}\n", .{@errorName(err)});
+        };
+
         // ALWAYS parse through libghostty-vt to maintain state
         session.vt_stream.nextSlice(data) catch |err| {
             std.debug.print("VT parse error: {s}\n", .{@errorName(err)});
@@ -775,6 +800,19 @@ fn readPtyCallback(
         );
         return .disarm;
     } else |err| {
+        // WouldBlock is expected for non-blocking I/O
+        if (err == error.WouldBlock) {
+            stream.read(
+                loop,
+                completion,
+                .{ .slice = &session.pty_read_buffer },
+                PtyReadContext,
+                pty_ctx,
+                readPtyCallback,
+            );
+            return .disarm;
+        }
+
         std.debug.print("PTY read error: {s}\n", .{@errorName(err)});
         return .disarm;
     }

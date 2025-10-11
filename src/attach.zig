@@ -123,7 +123,7 @@ fn writeCallback(
 
 const ReadContext = struct {
     ctx: *Context,
-    buffer: [4096]u8,
+    buffer: [128 * 1024]u8, // 128KB to handle large scrollback messages
 };
 
 fn readCallback(
