@@ -5,15 +5,27 @@ const xev = xevg.Dynamic;
 const clap = @import("clap");
 const config_mod = @import("config.zig");
 const protocol = @import("protocol.zig");
+const builtin = @import("builtin");
 
 const ghostty = @import("ghostty-vt");
 
-const c = @cImport({
-    @cInclude("pty.h");
-    @cInclude("utmp.h");
-    @cInclude("stdlib.h");
-    @cInclude("sys/ioctl.h");
-});
+const c = switch (builtin.os.tag) {
+    .macos => @cImport({
+        @cInclude("sys/ioctl.h"); // ioctl and constants
+        @cInclude("util.h"); // openpty()
+        @cInclude("stdlib.h");
+    }),
+    .freebsd => @cImport({
+        @cInclude("termios.h"); // ioctl and constants
+        @cInclude("libutil.h"); // openpty()
+        @cInclude("stdlib.h");
+    }),
+    else => @cImport({
+        @cInclude("sys/ioctl.h"); // ioctl and constants
+        @cInclude("pty.h");
+        @cInclude("stdlib.h");
+    }),
+};
 
 // Handler for processing VT sequences
 const VTHandler = struct {
