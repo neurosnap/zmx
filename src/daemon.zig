@@ -30,9 +30,30 @@ const c = switch (builtin.os.tag) {
 // Handler for processing VT sequences
 const VTHandler = struct {
     terminal: *ghostty.Terminal,
+    pty_master_fd: std.posix.fd_t,
 
     pub fn print(self: *VTHandler, cp: u21) !void {
         try self.terminal.print(cp);
+    }
+
+    pub fn deviceAttributes(
+        self: *VTHandler,
+        req: ghostty.DeviceAttributeReq,
+        da_params: []const u16,
+    ) !void {
+        _ = da_params;
+
+        const response = switch (req) {
+            .primary => "\x1b[?1;2c", // VT100 with AVO (matches screen/tmux)
+            .secondary => "\x1b[>0;0;0c", // Conservative secondary DA
+            .tertiary => return, // Ignore tertiary DA
+        };
+
+        _ = posix.write(self.pty_master_fd, response) catch |err| {
+            std.debug.print("Error writing DA response to PTY: {s}\n", .{@errorName(err)});
+        };
+
+        std.debug.print("Responded to DA query ({s}) with {s}\n", .{ @tagName(req), response });
     }
 };
 
@@ -1076,7 +1097,10 @@ fn createSession(allocator: std.mem.Allocator, session_name: []const u8) !*Sessi
         .pty_read_buffer = undefined,
         .created_at = std.time.timestamp(),
         .vt = vt,
-        .vt_handler = VTHandler{ .terminal = &session.vt },
+        .vt_handler = VTHandler{
+            .terminal = &session.vt,
+            .pty_master_fd = @intCast(master_fd),
+        },
         .vt_stream = undefined,
         .attached_clients = std.AutoHashMap(std.posix.fd_t, void).init(allocator),
         .utf8_partial = undefined,
