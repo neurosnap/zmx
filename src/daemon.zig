@@ -86,10 +86,6 @@ const Session = struct {
     vt_handler: VTHandler,
     attached_clients: std.AutoHashMap(std.posix.fd_t, void),
 
-    // Buffer for incomplete UTF-8 sequences from previous read
-    utf8_partial: [3]u8,
-    utf8_partial_len: usize,
-
     fn deinit(self: *Session) void {
         self.allocator.free(self.name);
         self.vt.deinit(self.allocator);
@@ -308,7 +304,7 @@ fn readCallback(
 }
 
 fn handleMessage(client: *Client, data: []const u8) !void {
-    std.debug.print("Received message from client fd={d}: {s}", .{ client.fd, data });
+    std.debug.print("Received message from client fd={d}: {s}\n", .{ client.fd, data });
 
     // Parse message type first for dispatching
     const type_parsed = try protocol.parseMessageType(client.allocator, data);
@@ -547,7 +543,7 @@ fn handleListSessions(ctx: *ServerContext, client: *Client) !void {
 
     try response.appendSlice(client.allocator, "]}}\n");
 
-    std.debug.print("Sending list response to client fd={d}: {s}", .{ client.fd, response.items });
+    std.debug.print("Sending list response to client fd={d}: {s}\n", .{ client.fd, response.items });
 
     const written = posix.write(client.fd, response.items) catch |err| {
         std.debug.print("Error writing to fd={d}: {s}\n", .{ client.fd, @errorName(err) });
@@ -814,57 +810,18 @@ fn readPtyCallback(
             return .disarm;
         }
 
-        // Combine any partial UTF-8 from previous read with new data
-        var combined_buf: [4096 + 3]u8 = undefined;
-        const total_len = session.utf8_partial_len + bytes_read;
-
-        if (session.utf8_partial_len > 0) {
-            @memcpy(combined_buf[0..session.utf8_partial_len], session.utf8_partial[0..session.utf8_partial_len]);
-            @memcpy(combined_buf[session.utf8_partial_len..total_len], read_buffer.slice[0..bytes_read]);
-        } else {
-            @memcpy(combined_buf[0..bytes_read], read_buffer.slice[0..bytes_read]);
-        }
-
-        const data = combined_buf[0..total_len];
-        std.debug.print("PTY output ({d} bytes, {d} from partial)\n", .{ bytes_read, session.utf8_partial_len });
-
-        // Check for incomplete UTF-8 sequence at end
-        var valid_len = total_len;
-        session.utf8_partial_len = 0;
-
-        if (total_len > 0) {
-            // Scan backwards to find if we have a partial UTF-8 sequence
-            var i = total_len;
-            const scan_start = if (total_len >= 4) total_len - 4 else 0;
-            while (i > 0 and i > scan_start) {
-                i -= 1;
-                const byte = data[i];
-                // Check if this is a UTF-8 start byte
-                if (byte & 0x80 == 0) break; // ASCII, we're good
-                if (byte & 0xC0 == 0xC0) {
-                    // This is a UTF-8 start byte, check if sequence is complete
-                    const expected_len: usize = if (byte & 0xE0 == 0xC0) 2 else if (byte & 0xF0 == 0xE0) 3 else if (byte & 0xF8 == 0xF0) 4 else 1;
-                    if (i + expected_len > total_len) {
-                        // Save partial sequence for next read
-                        session.utf8_partial_len = total_len - i;
-                        @memcpy(session.utf8_partial[0..session.utf8_partial_len], data[i..total_len]);
-                        valid_len = i;
-                    }
-                    break;
-                }
-            }
-        }
-
-        const valid_data = data[0..valid_len];
+        const total_len = bytes_read;
+        const data = read_buffer.slice[0..bytes_read];
+        std.debug.print("PTY output ({d} bytes)\n", .{bytes_read});
 
         // Build a sanitized buffer that only includes bytes we can safely send
-        var sanitized_buf = std.ArrayList(u8).initCapacity(session.allocator, valid_len) catch return .disarm;
+        var sanitized_buf = std.ArrayList(u8).initCapacity(session.allocator, total_len) catch return .disarm;
         defer sanitized_buf.deinit(session.allocator);
 
         // Parse through libghostty-vt byte-by-byte to handle invalid data
         // This is necessary because binary data (like /dev/urandom) can cause
         // panics in @enumFromInt when high bytes appear during escape sequences
-        for (valid_data) |byte| {
+        for (data) |byte| {
             // Skip high bytes when parser is not in ground state to avoid
             // @enumFromInt panic in execute() which expects u7 (0-127)
             if (session.vt_stream.parser.state != .ground and byte > 127) {
@@ -1103,8 +1060,6 @@ fn createSession(allocator: std.mem.Allocator, session_name: []const u8) !*Sessi
         },
         .vt_stream = undefined,
         .attached_clients = std.AutoHashMap(std.posix.fd_t, void).init(allocator),
-        .utf8_partial = undefined,
-        .utf8_partial_len = 0,
     };
 
     // Initialize the stream after session is created since handler needs terminal pointer
