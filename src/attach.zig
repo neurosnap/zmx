@@ -151,7 +151,7 @@ fn writeCallback(
     if (write_result) |_| {
         // Request sent successfully
     } else |err| {
-        std.debug.print("write failed: {s}\n", .{@errorName(err)});
+        std.debug.print("write failed: {s}\r\n", .{@errorName(err)});
         return cleanup(ctx, completion);
     }
 
@@ -194,7 +194,7 @@ fn readCallback(
 
     if (read_result) |len| {
         if (len == 0) {
-            std.debug.print("Server closed connection\n", .{});
+            std.debug.print("Server closed connection\r\n", .{});
             return cleanup(ctx, completion);
         }
 
@@ -248,27 +248,27 @@ fn readCallback(
         const msg_line = data[0..newline_idx];
 
         const msg_type_parsed = protocol.parseMessageType(ctx.allocator, msg_line) catch |err| {
-            std.debug.print("JSON parse error: {s}\n", .{@errorName(err)});
+            std.debug.print("JSON parse error: {s}\r\n", .{@errorName(err)});
             return .rearm;
         };
         defer msg_type_parsed.deinit();
 
         const msg_type = protocol.MessageType.fromString(msg_type_parsed.value.type) orelse {
-            std.debug.print("Unknown message type: {s}\n", .{msg_type_parsed.value.type});
+            std.debug.print("Unknown message type: {s}\r\n", .{msg_type_parsed.value.type});
             return .rearm;
         };
 
         switch (msg_type) {
             .attach_session_response => {
                 const parsed = protocol.parseMessage(protocol.AttachSessionResponse, ctx.allocator, msg_line) catch |err| {
-                    std.debug.print("Failed to parse attach response: {s}\n", .{@errorName(err)});
+                    std.debug.print("Failed to parse attach response: {s}\r\n", .{@errorName(err)});
                     return .rearm;
                 };
                 defer parsed.deinit();
 
                 if (std.mem.eql(u8, parsed.value.payload.status, "ok")) {
                     const client_fd = parsed.value.payload.client_fd orelse {
-                        std.debug.print("Missing client_fd in response\n", .{});
+                        std.debug.print("Missing client_fd in response\r\n", .{});
                         return .rearm;
                     };
 
@@ -279,13 +279,13 @@ fn readCallback(
                         "{s}/.zmx_client_fd_{s}",
                         .{ home_dir, ctx.session_name },
                     ) catch |err| {
-                        std.debug.print("Failed to create client_fd path: {s}\n", .{@errorName(err)});
+                        std.debug.print("Failed to create client_fd path: {s}\r\n", .{@errorName(err)});
                         return .rearm;
                     };
                     defer ctx.allocator.free(client_fd_path);
 
                     const file = std.fs.cwd().createFile(client_fd_path, .{ .truncate = true }) catch |err| {
-                        std.debug.print("Failed to create client_fd file: {s}\n", .{@errorName(err)});
+                        std.debug.print("Failed to create client_fd file: {s}\r\n", .{@errorName(err)});
                         return .rearm;
                     };
                     defer file.close();
@@ -294,7 +294,7 @@ fn readCallback(
                     defer ctx.allocator.free(fd_str);
 
                     file.writeAll(fd_str) catch |err| {
-                        std.debug.print("Failed to write client_fd: {s}\n", .{@errorName(err)});
+                        std.debug.print("Failed to write client_fd: {s}\r\n", .{@errorName(err)});
                         return .rearm;
                     };
 
@@ -307,7 +307,7 @@ fn readCallback(
             },
             .detach_session_response => {
                 const parsed = protocol.parseMessage(protocol.DetachSessionResponse, ctx.allocator, msg_line) catch |err| {
-                    std.debug.print("Failed to parse detach response: {s}\n", .{@errorName(err)});
+                    std.debug.print("Failed to parse detach response: {s}\r\n", .{@errorName(err)});
                     return .rearm;
                 };
                 defer parsed.deinit();
@@ -330,7 +330,7 @@ fn readCallback(
             },
             .pty_out => {
                 const parsed = protocol.parseMessage(protocol.PtyOutput, ctx.allocator, msg_line) catch |err| {
-                    std.debug.print("Failed to parse pty_out: {s}\n", .{@errorName(err)});
+                    std.debug.print("Failed to parse pty_out: {s}\r\n", .{@errorName(err)});
                     return .rearm;
                 };
                 defer parsed.deinit();
@@ -338,13 +338,13 @@ fn readCallback(
                 writeToStdout(ctx, parsed.value.payload.text);
             },
             else => {
-                std.debug.print("Unexpected message type in attach client: {s}\n", .{msg_type.toString()});
+                std.debug.print("Unexpected message type in attach client: {s}\r\n", .{msg_type.toString()});
             },
         }
 
         return .rearm;
     } else |err| {
-        std.debug.print("read failed: {s}\n", .{@errorName(err)});
+        std.debug.print("read failed: {s}\r\n", .{@errorName(err)});
     }
 
     ctx.allocator.destroy(read_ctx);
@@ -546,7 +546,7 @@ fn stdinReadCallback(
 
         return .rearm;
     } else |err| {
-        std.debug.print("stdin read failed: {s}\n", .{@errorName(err)});
+        std.debug.print("stdin read failed: {s}\r\n", .{@errorName(err)});
         ctx.stdin_completion = null;
         ctx.stdin_ctx = null;
         ctx.allocator.destroy(stdin_ctx);
@@ -629,9 +629,9 @@ fn closeCallback(
 ) xev.CallbackAction {
     const ctx = ctx_opt.?;
     if (close_result) |_| {
-        std.debug.print("Connection closed\n", .{});
+        std.debug.print("Connection closed\r\n", .{});
     } else |err| {
-        std.debug.print("close failed: {s}\n", .{@errorName(err)});
+        std.debug.print("close failed: {s}\r\n", .{@errorName(err)});
     }
     const allocator = ctx.allocator;
     ctx.frame_buffer.deinit(allocator);
