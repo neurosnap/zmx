@@ -8,6 +8,10 @@ const kill = @import("kill.zig");
 const list = @import("list.zig");
 const clap = @import("clap");
 
+pub const std_options: std.Options = .{
+    .log_level = .err,
+};
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
