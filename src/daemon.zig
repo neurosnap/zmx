@@ -621,25 +621,6 @@ fn handlePtyInput(client: *Client, text: []const u8) !void {
     _ = written;
 }
 
-fn respondToDeviceAttributes(session: *Session, data: []const u8) bool {
-    // Primary Device Attributes: CSI c or ESC [ c
-    if (std.mem.indexOf(u8, data, "\x1b[c")) |_| {
-        // VT220 with color and clipboard support
-        const response = "\x1b[?62;22;52c";
-        _ = posix.write(session.pty_master_fd, response) catch return false;
-        std.debug.print("Responded to Primary DA query\n", .{});
-        return true;
-    }
-    // Secondary Device Attributes: CSI > c or ESC [ > c
-    if (std.mem.indexOf(u8, data, "\x1b[>c")) |_| {
-        const response = "\x1b[>1;10;0c";
-        _ = posix.write(session.pty_master_fd, response) catch return false;
-        std.debug.print("Responded to Secondary DA query\n", .{});
-        return true;
-    }
-    return false;
-}
-
 fn handleWindowResize(client: *Client, rows: u16, cols: u16) !void {
     const session_name = client.attached_session orelse {
         std.debug.print("Client fd={d} not attached to any session\n", .{client.fd});
@@ -857,20 +838,6 @@ fn readPtyCallback(
 
         const valid_data = data[0..valid_len];
 
-        // Intercept Device Attribute queries from shell and respond
-        if (respondToDeviceAttributes(session, valid_data)) {
-            // Query was handled, don't forward to clients or store in buffer
-            stream.read(
-                loop,
-                completion,
-                .{ .slice = &session.pty_read_buffer },
-                PtyReadContext,
-                pty_ctx,
-                readPtyCallback,
-            );
-            return .disarm;
-        }
-
         // Store PTY output in buffer for session restore
         session.buffer.appendSlice(session.allocator, valid_data) catch |err| {
             std.debug.print("Buffer append error: {s}\n", .{@errorName(err)});
@@ -1081,6 +1048,14 @@ fn createSession(allocator: std.mem.Allocator, session_name: []const u8) !*Sessi
             std.posix.exit(1);
         };
         _ = c.putenv(@ptrCast(zmx_session_var.ptr));
+
+        // Forward TERM from host machine
+        if (std.posix.getenv("TERM")) |term| {
+            const term_var = std.fmt.allocPrint(allocator, "TERM={s}\x00", .{term}) catch {
+                std.posix.exit(1);
+            };
+            _ = c.putenv(@ptrCast(term_var.ptr));
+        }
 
         const shell = std.posix.getenv("SHELL") orelse "/bin/sh";
         execShellWithPrompt(allocator, session_name, shell);
