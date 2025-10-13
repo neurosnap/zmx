@@ -613,25 +613,6 @@ fn handlePtyInput(client: *Client, text: []const u8) !void {
 
     std.debug.print("Writing {d} bytes to PTY fd={d}\n", .{ text.len, session.pty_master_fd });
 
-    // Intercept Device Attribute queries and respond directly
-    if (respondToDeviceAttributes(client, text)) |response| {
-        // Send response back to client instead of PTY
-        const header = protocol.FrameHeader{
-            .length = @intCast(response.len),
-            .frame_type = @intFromEnum(protocol.FrameType.pty_binary),
-        };
-
-        var frame_buf = std.ArrayList(u8).initCapacity(session.allocator, @sizeOf(protocol.FrameHeader) + response.len) catch return;
-        defer frame_buf.deinit(session.allocator);
-
-        const header_bytes = std.mem.asBytes(&header);
-        frame_buf.appendSlice(session.allocator, header_bytes) catch return;
-        frame_buf.appendSlice(session.allocator, response) catch return;
-
-        _ = posix.write(client.fd, frame_buf.items) catch {};
-        return; // Don't forward to PTY
-    }
-
     // Write input to PTY master fd
     const written = posix.write(session.pty_master_fd, text) catch |err| {
         std.debug.print("Error writing to PTY: {s}\n", .{@errorName(err)});
@@ -640,17 +621,23 @@ fn handlePtyInput(client: *Client, text: []const u8) !void {
     _ = written;
 }
 
-fn respondToDeviceAttributes(_: *Client, text: []const u8) ?[]const u8 {
+fn respondToDeviceAttributes(session: *Session, data: []const u8) bool {
     // Primary Device Attributes: CSI c or ESC [ c
-    if (std.mem.eql(u8, text, "\x1b[c")) {
+    if (std.mem.indexOf(u8, data, "\x1b[c")) |_| {
         // VT220 with color and clipboard support
-        return "\x1b[?62;22;52c";
+        const response = "\x1b[?62;22;52c";
+        _ = posix.write(session.pty_master_fd, response) catch return false;
+        std.debug.print("Responded to Primary DA query\n", .{});
+        return true;
     }
     // Secondary Device Attributes: CSI > c or ESC [ > c
-    if (std.mem.eql(u8, text, "\x1b[>c")) {
-        return "\x1b[>1;10;0c";
+    if (std.mem.indexOf(u8, data, "\x1b[>c")) |_| {
+        const response = "\x1b[>1;10;0c";
+        _ = posix.write(session.pty_master_fd, response) catch return false;
+        std.debug.print("Responded to Secondary DA query\n", .{});
+        return true;
     }
-    return null;
+    return false;
 }
 
 fn handleWindowResize(client: *Client, rows: u16, cols: u16) !void {
@@ -869,6 +856,20 @@ fn readPtyCallback(
         }
 
         const valid_data = data[0..valid_len];
+
+        // Intercept Device Attribute queries from shell and respond
+        if (respondToDeviceAttributes(session, valid_data)) {
+            // Query was handled, don't forward to clients or store in buffer
+            stream.read(
+                loop,
+                completion,
+                .{ .slice = &session.pty_read_buffer },
+                PtyReadContext,
+                pty_ctx,
+                readPtyCallback,
+            );
+            return .disarm;
+        }
 
         // Store PTY output in buffer for session restore
         session.buffer.appendSlice(session.allocator, valid_data) catch |err| {
