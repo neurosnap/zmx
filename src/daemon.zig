@@ -810,51 +810,29 @@ fn readPtyCallback(
             return .disarm;
         }
 
-        const total_len = bytes_read;
         const data = read_buffer.slice[0..bytes_read];
         std.debug.print("PTY output ({d} bytes)\n", .{bytes_read});
 
-        // Build a sanitized buffer that only includes bytes we can safely send
-        var sanitized_buf = std.ArrayList(u8).initCapacity(session.allocator, total_len) catch return .disarm;
-        defer sanitized_buf.deinit(session.allocator);
-
-        // Parse through libghostty-vt byte-by-byte to handle invalid data
-        // This is necessary because binary data (like /dev/urandom) can cause
-        // panics in @enumFromInt when high bytes appear during escape sequences
-        for (data) |byte| {
-            // Skip high bytes when parser is not in ground state to avoid
-            // @enumFromInt panic in execute() which expects u7 (0-127)
-            if (session.vt_stream.parser.state != .ground and byte > 127) {
-                // Reset to ground state and skip this byte
-                session.vt_stream.parser.state = .ground;
-                continue;
-            }
-            session.vt_stream.next(byte) catch |err| {
-                std.debug.print("VT parse error at byte 0x{x}: {s}\n", .{ byte, @errorName(err) });
-                // Reset to ground state on any error
-                session.vt_stream.parser.state = .ground;
-                continue;
-            };
-            // Only add to sanitized buffer if we successfully parsed it
-            sanitized_buf.append(session.allocator, byte) catch {};
-        }
+        session.vt_stream.nextSlice(data) catch |err| {
+            std.debug.print("VT parse error: {s}\n", .{@errorName(err)});
+        };
 
         // Only proxy to clients if someone is attached
-        if (session.attached_clients.count() > 0 and sanitized_buf.items.len > 0) {
+        if (session.attached_clients.count() > 0 and data.len > 0) {
             // Send PTY output as binary frame to avoid JSON escaping issues
             // Frame format: [4-byte length][2-byte type][payload]
             const header = protocol.FrameHeader{
-                .length = @intCast(sanitized_buf.items.len),
+                .length = @intCast(data.len),
                 .frame_type = @intFromEnum(protocol.FrameType.pty_binary),
             };
 
             // Build complete frame with header + payload
-            var frame_buf = std.ArrayList(u8).initCapacity(session.allocator, @sizeOf(protocol.FrameHeader) + sanitized_buf.items.len) catch return .disarm;
+            var frame_buf = std.ArrayList(u8).initCapacity(session.allocator, @sizeOf(protocol.FrameHeader) + data.len) catch return .disarm;
             defer frame_buf.deinit(session.allocator);
 
             const header_bytes = std.mem.asBytes(&header);
             frame_buf.appendSlice(session.allocator, header_bytes) catch return .disarm;
-            frame_buf.appendSlice(session.allocator, sanitized_buf.items) catch return .disarm;
+            frame_buf.appendSlice(session.allocator, data) catch return .disarm;
 
             // Send to all attached clients using async write
             var it = session.attached_clients.keyIterator();
