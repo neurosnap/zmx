@@ -54,7 +54,6 @@ const PtyWriteContext = struct {
 const Session = struct {
     name: []const u8,
     pty_master_fd: std.posix.fd_t,
-    buffer: std.ArrayList(u8),
     child_pid: std.posix.pid_t,
     allocator: std.mem.Allocator,
     pty_read_buffer: [4096]u8,
@@ -72,7 +71,6 @@ const Session = struct {
 
     fn deinit(self: *Session) void {
         self.allocator.free(self.name);
-        self.buffer.deinit(self.allocator);
         self.vt.deinit(self.allocator);
         self.vt_stream.deinit();
         self.attached_clients.deinit();
@@ -591,7 +589,7 @@ fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []con
     }
 
     // If reattaching, send the scrollback buffer as binary frame
-    if (is_reattach and session.buffer.items.len > 0) {
+    if (is_reattach) {
         const buffer_slice = try session.vt.plainStringUnwrapped(client.allocator);
         defer client.allocator.free(buffer_slice);
 
@@ -838,11 +836,6 @@ fn readPtyCallback(
 
         const valid_data = data[0..valid_len];
 
-        // Store PTY output in buffer for session restore
-        session.buffer.appendSlice(session.allocator, valid_data) catch |err| {
-            std.debug.print("Buffer append error: {s}\n", .{@errorName(err)});
-        };
-
         // Build a sanitized buffer that only includes bytes we can safely send
         var sanitized_buf = std.ArrayList(u8).initCapacity(session.allocator, valid_len) catch return .disarm;
         defer sanitized_buf.deinit(session.allocator);
@@ -1078,7 +1071,6 @@ fn createSession(allocator: std.mem.Allocator, session_name: []const u8) !*Sessi
     session.* = .{
         .name = try allocator.dupe(u8, session_name),
         .pty_master_fd = @intCast(master_fd),
-        .buffer = try std.ArrayList(u8).initCapacity(allocator, 0),
         .child_pid = pid,
         .allocator = allocator,
         .pty_read_buffer = undefined,
