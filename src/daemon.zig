@@ -304,7 +304,7 @@ fn handleMessage(client: *Client, data: []const u8) !void {
         .attach_session_request => {
             const parsed = try protocol.parseMessage(protocol.AttachSessionRequest, client.allocator, data);
             defer parsed.deinit();
-            std.debug.print("Handling attach request for session: {s}\n", .{parsed.value.payload.session_name});
+            std.debug.print("Handling attach request for session: {s} ({}x{})\n", .{ parsed.value.payload.session_name, parsed.value.payload.cols, parsed.value.payload.rows });
             try handleAttachSession(client.server_ctx, client, parsed.value.payload.session_name, parsed.value.payload.rows, parsed.value.payload.cols);
         },
         .detach_session_request => {
@@ -551,19 +551,21 @@ fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []con
         break :blk new_session;
     };
 
-    // Update libghostty-vt terminal size
-    try session.vt.resize(session.allocator, cols, rows);
+    // Update libghostty-vt terminal size and PTY window size
+    // Only resize if we have valid dimensions
+    if (rows > 0 and cols > 0) {
+        try session.vt.resize(session.allocator, cols, rows);
 
-    // Update PTY window size
-    var ws = c.struct_winsize{
-        .ws_row = rows,
-        .ws_col = cols,
-        .ws_xpixel = 0,
-        .ws_ypixel = 0,
-    };
-    const result = c.ioctl(session.pty_master_fd, c.TIOCSWINSZ, &ws);
-    if (result < 0) {
-        return error.IoctlFailed;
+        var ws = c.struct_winsize{
+            .ws_row = rows,
+            .ws_col = cols,
+            .ws_xpixel = 0,
+            .ws_ypixel = 0,
+        };
+        const result = c.ioctl(session.pty_master_fd, c.TIOCSWINSZ, &ws);
+        if (result < 0) {
+            return error.IoctlFailed;
+        }
     }
 
     // Mark client as attached
@@ -591,21 +593,28 @@ fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []con
     // If reattaching, send the scrollback buffer (raw PTY output with colors)
     // Limit to last 64KB to avoid huge JSON messages
     if (is_reattach and session.buffer.items.len > 0) {
-        std.debug.print("Sending scrollback buffer: {d} bytes total\n", .{session.buffer.items.len});
-
-        const max_buffer_size = 64 * 1024;
-        const buffer_start = if (session.buffer.items.len > max_buffer_size)
-            session.buffer.items.len - max_buffer_size
-        else
-            0;
-        const buffer_slice = session.buffer.items[buffer_start..];
-
-        std.debug.print("Sending slice: {d} bytes (from offset {d})\n", .{ buffer_slice.len, buffer_start });
-
+        const buffer_slice = try session.vt.plainStringUnwrapped(client.allocator);
         try protocol.writeJson(ctx.allocator, client.fd, .pty_out, protocol.PtyOutput{
             .text = buffer_slice,
         });
         std.debug.print("Sent scrollback buffer to client fd={d}\n", .{client.fd});
+        defer client.allocator.free(buffer_slice);
+        //
+        // std.debug.print("Sending scrollback buffer: {d} bytes total\n", .{session.buffer.items.len});
+        //
+        // const max_buffer_size = 64 * 1024;
+        // const buffer_start = if (session.buffer.items.len > max_buffer_size)
+        //     session.buffer.items.len - max_buffer_size
+        // else
+        //     0;
+        // const buffer_slice = session.buffer.items[buffer_start..];
+        //
+        // std.debug.print("Sending slice: {d} bytes (from offset {d})\n", .{ buffer_slice.len, buffer_start });
+        //
+        // try protocol.writeJson(ctx.allocator, client.fd, .pty_out, protocol.PtyOutput{
+        //     .text = buffer_slice,
+        // });
+        // std.debug.print("Sent scrollback buffer to client fd={d}\n", .{client.fd});
     }
 }
 
@@ -852,10 +861,23 @@ fn readPtyCallback(
             std.debug.print("Buffer append error: {s}\n", .{@errorName(err)});
         };
 
-        // ALWAYS parse through libghostty-vt to maintain state
-        session.vt_stream.nextSlice(valid_data) catch |err| {
-            std.debug.print("VT parse error: {s}\n", .{@errorName(err)});
-        };
+        // Parse through libghostty-vt byte-by-byte to handle invalid data
+        // This is necessary because binary data (like /dev/urandom) can cause
+        // panics in @enumFromInt when high bytes appear during escape sequences
+        for (valid_data) |byte| {
+            // Skip high bytes when parser is not in ground state to avoid
+            // @enumFromInt panic in execute() which expects u7 (0-127)
+            if (session.vt_stream.parser.state != .ground and byte > 127) {
+                // Reset to ground state and skip this byte
+                session.vt_stream.parser.state = .ground;
+                continue;
+            }
+            session.vt_stream.next(byte) catch |err| {
+                std.debug.print("VT parse error at byte 0x{x}: {s}\n", .{ byte, @errorName(err) });
+                // Reset to ground state on any error
+                session.vt_stream.parser.state = .ground;
+            };
+        }
 
         // Only proxy to clients if someone is attached
         if (session.attached_clients.count() > 0 and valid_len > 0) {
