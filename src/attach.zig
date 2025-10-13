@@ -330,6 +330,15 @@ fn readCallback(
                 _ = posix.write(posix.STDERR_FILENO, "\r\nSession killed\r\n") catch {};
                 return cleanup(ctx, completion);
             },
+            .pty_out => {
+                const parsed = protocol.parseMessage(protocol.PtyOutput, ctx.allocator, msg_line) catch |err| {
+                    std.debug.print("Failed to parse pty_out: {s}\n", .{@errorName(err)});
+                    return .rearm;
+                };
+                defer parsed.deinit();
+
+                writeToStdout(ctx, parsed.value.payload.text);
+            },
             else => {
                 std.debug.print("Unexpected message type in attach client: {s}\n", .{msg_type.toString()});
             },
