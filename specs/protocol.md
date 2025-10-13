@@ -18,14 +18,23 @@ The protocol implementation is centralized in `src/protocol.zig`, which provides
 - Helper functions: `writeJson()`, `parseMessage()`, `parseMessageType()`
 - `LineBuffer` for efficient NDJSON line buffering
 
-### Future: Binary Frame Support
+### Binary Frame Support
 
-The protocol module includes infrastructure for future binary framing to optimize PTY data throughput:
-- Frame format: `[4-byte length][2-byte type][payload...]`
-- Type 1: JSON control messages (current)
-- Type 2: Binary PTY data (future optimization)
+The protocol uses a hybrid approach: JSON for control messages and binary frames for PTY output to avoid encoding overhead and improve throughput.
 
-This hybrid approach would keep control messages in human-readable JSON while allowing raw binary PTY data when profiling shows JSON is a bottleneck.
+**Frame Format:**
+```
+[4-byte length (little-endian)][2-byte type (little-endian)][payload...]
+```
+
+**Frame Types:**
+- Type 1 (`json_control`): JSON control messages (not currently used in framing)
+- Type 2 (`pty_binary`): Raw PTY output bytes
+
+**Current Usage:**
+- Control messages (attach, detach, kill, etc.): NDJSON format
+- PTY output from daemon to client: Binary frames (type 2)
+- PTY input from client to daemon: JSON `pty_in` messages (may be optimized to binary frames in future)
 
 ## Message Structure
 
@@ -104,22 +113,30 @@ Responses are sent from the daemon to the client in response to a request. Every
     - `status`: `ok` or `error`
     - `error_message`: string (if status is `error`)
 
-### `pty_input`
+### `pty_in`
 
 - **Direction**: Client -> Daemon
-- **Request Type**: `pty_input`
-- **Request Payload**:
-    - `session_name`: string
-    - `data`: string (base64 encoded)
+- **Message Type**: `pty_in`
+- **Format**: NDJSON
+- **Payload**:
+    - `text`: string (raw UTF-8 text from terminal input)
 
-This message does not have a direct response. It is a fire-and-forget message from the client.
+This message is sent when a client wants to send user input to the PTY. It is a fire-and-forget message with no direct response. The input is forwarded to the shell running in the session's PTY.
 
-### `pty_output`
+### `pty_out`
 
 - **Direction**: Daemon -> Client
-- **Request Type**: `pty_output`
-- **Request Payload**:
-    - `session_name`: string
-    - `data`: string (base64 encoded)
+- **Message Type**: `pty_out`
+- **Format**: NDJSON (used only for control sequences like screen clear)
+- **Payload**:
+    - `text`: string (escape sequences or control output)
 
-This message is sent from the daemon to an attached client whenever there is output from the PTY.
+This JSON message is sent for special control output like initial screen clearing. Regular PTY output uses binary frames (see below).
+
+### PTY Binary Output
+
+- **Direction**: Daemon -> Client
+- **Format**: Binary frame (type 2: `pty_binary`)
+- **Payload**: Raw bytes from PTY output
+
+The majority of PTY output is sent using binary frames to avoid JSON encoding overhead. The frame consists of a 6-byte header (4-byte length + 2-byte type) followed by raw PTY bytes. This allows efficient streaming of terminal output without escaping or encoding.
