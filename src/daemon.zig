@@ -613,12 +613,44 @@ fn handlePtyInput(client: *Client, text: []const u8) !void {
 
     std.debug.print("Writing {d} bytes to PTY fd={d}\n", .{ text.len, session.pty_master_fd });
 
+    // Intercept Device Attribute queries and respond directly
+    if (respondToDeviceAttributes(client, text)) |response| {
+        // Send response back to client instead of PTY
+        const header = protocol.FrameHeader{
+            .length = @intCast(response.len),
+            .frame_type = @intFromEnum(protocol.FrameType.pty_binary),
+        };
+
+        var frame_buf = std.ArrayList(u8).initCapacity(session.allocator, @sizeOf(protocol.FrameHeader) + response.len) catch return;
+        defer frame_buf.deinit(session.allocator);
+
+        const header_bytes = std.mem.asBytes(&header);
+        frame_buf.appendSlice(session.allocator, header_bytes) catch return;
+        frame_buf.appendSlice(session.allocator, response) catch return;
+
+        _ = posix.write(client.fd, frame_buf.items) catch {};
+        return; // Don't forward to PTY
+    }
+
     // Write input to PTY master fd
     const written = posix.write(session.pty_master_fd, text) catch |err| {
         std.debug.print("Error writing to PTY: {s}\n", .{@errorName(err)});
         return err;
     };
     _ = written;
+}
+
+fn respondToDeviceAttributes(_: *Client, text: []const u8) ?[]const u8 {
+    // Primary Device Attributes: CSI c or ESC [ c
+    if (std.mem.eql(u8, text, "\x1b[c")) {
+        // VT220 with color and clipboard support
+        return "\x1b[?62;22;52c";
+    }
+    // Secondary Device Attributes: CSI > c or ESC [ > c
+    if (std.mem.eql(u8, text, "\x1b[>c")) {
+        return "\x1b[>1;10;0c";
+    }
+    return null;
 }
 
 fn handleWindowResize(client: *Client, rows: u16, cols: u16) !void {
