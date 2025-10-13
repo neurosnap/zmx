@@ -11,9 +11,13 @@ const c = @cImport({
     @cInclude("sys/ioctl.h");
 });
 
+// Main context for the attach client that manages connection to daemon and terminal I/O.
+// Handles async streams for daemon socket, stdin, and stdout using libxev's event loop.
+// Tracks detach key sequence state and buffers partial binary frames from PTY output.
 const Context = struct {
     stream: xev.Stream,
     stdin_stream: xev.Stream,
+    stdout_stream: xev.Stream,
     allocator: std.mem.Allocator,
     loop: *xev.Loop,
     session_name: []const u8,
@@ -95,6 +99,7 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
     ctx.* = .{
         .stream = xev.Stream.initFd(socket_fd),
         .stdin_stream = xev.Stream.initFd(posix.STDIN_FILENO),
+        .stdout_stream = xev.Stream.initFd(posix.STDOUT_FILENO),
         .allocator = allocator,
         .loop = &loop,
         .session_name = session_name,
@@ -171,6 +176,8 @@ fn writeCallback(
     return .disarm;
 }
 
+// Context for async socket read operations from daemon.
+// Uses large buffer (128KB) to handle initial session scrollback and binary PTY frames.
 const ReadContext = struct {
     ctx: *Context,
     buffer: [128 * 1024]u8, // 128KB to handle large scrollback messages
@@ -206,7 +213,7 @@ fn readCallback(
                 if (data.len >= expected_total) {
                     // We have the complete frame
                     const payload = data[@sizeOf(protocol.FrameHeader)..expected_total];
-                    _ = posix.write(posix.STDOUT_FILENO, payload) catch {};
+                    writeToStdout(ctx, payload);
                     return .rearm;
                 } else {
                     // Partial frame, buffer it
@@ -227,7 +234,7 @@ fn readCallback(
                 if (ctx.frame_buffer.items.len >= expected_total) {
                     // Complete frame received
                     const payload = ctx.frame_buffer.items[@sizeOf(protocol.FrameHeader)..expected_total];
-                    _ = posix.write(posix.STDOUT_FILENO, payload) catch {};
+                    writeToStdout(ctx, payload);
                     ctx.frame_buffer.clearRetainingCapacity();
                     ctx.frame_expecting_bytes = 0;
                 }
@@ -354,6 +361,8 @@ fn startStdinReading(ctx: *Context) void {
     ctx.stdin_stream.read(ctx.loop, stdin_completion, .{ .slice = &stdin_ctx.buffer }, StdinContext, stdin_ctx, stdinReadCallback);
 }
 
+// Context for async stdin read operations.
+// Captures user terminal input to forward to PTY via daemon.
 const StdinContext = struct {
     ctx: *Context,
     buffer: [4096]u8,
@@ -423,10 +432,63 @@ fn sendPtyInput(ctx: *Context, data: []const u8) void {
     ctx.stream.write(ctx.loop, write_completion, .{ .slice = owned_message }, StdinWriteContext, write_ctx, stdinWriteCallback);
 }
 
+// Context for async write operations to daemon socket.
+// Owns message buffer that gets freed after write completes.
 const StdinWriteContext = struct {
     allocator: std.mem.Allocator,
     message: []u8,
 };
+
+// Context for async write operations to stdout.
+// Owns PTY output data buffer that gets freed after write completes.
+const StdoutWriteContext = struct {
+    allocator: std.mem.Allocator,
+    data: []u8,
+};
+
+fn writeToStdout(ctx: *Context, data: []const u8) void {
+    const owned_data = ctx.allocator.dupe(u8, data) catch return;
+
+    const write_ctx = ctx.allocator.create(StdoutWriteContext) catch {
+        ctx.allocator.free(owned_data);
+        return;
+    };
+    write_ctx.* = .{
+        .allocator = ctx.allocator,
+        .data = owned_data,
+    };
+
+    const write_completion = ctx.allocator.create(xev.Completion) catch {
+        ctx.allocator.free(owned_data);
+        ctx.allocator.destroy(write_ctx);
+        return;
+    };
+
+    ctx.stdout_stream.write(ctx.loop, write_completion, .{ .slice = owned_data }, StdoutWriteContext, write_ctx, stdoutWriteCallback);
+}
+
+fn stdoutWriteCallback(
+    write_ctx_opt: ?*StdoutWriteContext,
+    _: *xev.Loop,
+    completion: *xev.Completion,
+    _: xev.Stream,
+    _: xev.WriteBuffer,
+    write_result: xev.WriteError!usize,
+) xev.CallbackAction {
+    const write_ctx = write_ctx_opt.?;
+    const allocator = write_ctx.allocator;
+
+    if (write_result) |_| {
+        // Successfully wrote to stdout
+    } else |_| {
+        // Silently ignore stdout write errors
+    }
+
+    allocator.free(write_ctx.data);
+    allocator.destroy(write_ctx);
+    allocator.destroy(completion);
+    return .disarm;
+}
 
 fn stdinReadCallback(
     stdin_ctx_opt: ?*StdinContext,
