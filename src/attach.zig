@@ -104,10 +104,8 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
         .loop = &loop,
         .session_name = session_name,
         .config = config,
-        .frame_buffer = std.ArrayList(u8){},
+        .frame_buffer = std.ArrayList(u8).initCapacity(allocator, 4096) catch unreachable,
     };
-    ctx.frame_buffer = std.ArrayList(u8).initCapacity(allocator, 4096) catch unreachable;
-    defer ctx.frame_buffer.deinit(allocator);
 
     // Get terminal size
     var ws: c.struct_winsize = undefined;
@@ -635,8 +633,10 @@ fn closeCallback(
     } else |err| {
         std.debug.print("close failed: {s}\n", .{@errorName(err)});
     }
-    ctx.allocator.destroy(completion);
-    ctx.allocator.destroy(ctx);
+    const allocator = ctx.allocator;
+    ctx.frame_buffer.deinit(allocator);
+    allocator.destroy(completion);
+    allocator.destroy(ctx);
     loop.stop();
     return .disarm;
 }
