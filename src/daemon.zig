@@ -590,31 +590,13 @@ fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []con
         });
     }
 
-    // If reattaching, send the scrollback buffer (raw PTY output with colors)
-    // Limit to last 64KB to avoid huge JSON messages
+    // If reattaching, send the scrollback buffer as binary frame
     if (is_reattach and session.buffer.items.len > 0) {
         const buffer_slice = try session.vt.plainStringUnwrapped(client.allocator);
-        try protocol.writeJson(ctx.allocator, client.fd, .pty_out, protocol.PtyOutput{
-            .text = buffer_slice,
-        });
-        std.debug.print("Sent scrollback buffer to client fd={d}\n", .{client.fd});
         defer client.allocator.free(buffer_slice);
-        //
-        // std.debug.print("Sending scrollback buffer: {d} bytes total\n", .{session.buffer.items.len});
-        //
-        // const max_buffer_size = 64 * 1024;
-        // const buffer_start = if (session.buffer.items.len > max_buffer_size)
-        //     session.buffer.items.len - max_buffer_size
-        // else
-        //     0;
-        // const buffer_slice = session.buffer.items[buffer_start..];
-        //
-        // std.debug.print("Sending slice: {d} bytes (from offset {d})\n", .{ buffer_slice.len, buffer_start });
-        //
-        // try protocol.writeJson(ctx.allocator, client.fd, .pty_out, protocol.PtyOutput{
-        //     .text = buffer_slice,
-        // });
-        // std.debug.print("Sent scrollback buffer to client fd={d}\n", .{client.fd});
+
+        try protocol.writeBinaryFrame(client.fd, .pty_binary, buffer_slice);
+        std.debug.print("Sent scrollback buffer to client fd={d} ({d} bytes)\n", .{ client.fd, buffer_slice.len });
     }
 }
 
@@ -861,6 +843,10 @@ fn readPtyCallback(
             std.debug.print("Buffer append error: {s}\n", .{@errorName(err)});
         };
 
+        // Build a sanitized buffer that only includes bytes we can safely send
+        var sanitized_buf = std.ArrayList(u8).initCapacity(session.allocator, valid_len) catch return .disarm;
+        defer sanitized_buf.deinit(session.allocator);
+
         // Parse through libghostty-vt byte-by-byte to handle invalid data
         // This is necessary because binary data (like /dev/urandom) can cause
         // panics in @enumFromInt when high bytes appear during escape sequences
@@ -876,56 +862,46 @@ fn readPtyCallback(
                 std.debug.print("VT parse error at byte 0x{x}: {s}\n", .{ byte, @errorName(err) });
                 // Reset to ground state on any error
                 session.vt_stream.parser.state = .ground;
+                continue;
             };
+            // Only add to sanitized buffer if we successfully parsed it
+            sanitized_buf.append(session.allocator, byte) catch {};
         }
 
         // Only proxy to clients if someone is attached
-        if (session.attached_clients.count() > 0 and valid_len > 0) {
-            // Build JSON response with properly escaped text
-            var response_buf = std.ArrayList(u8).initCapacity(session.allocator, 4096) catch return .disarm;
-            defer response_buf.deinit(session.allocator);
+        if (session.attached_clients.count() > 0 and sanitized_buf.items.len > 0) {
+            // Send PTY output as binary frame to avoid JSON escaping issues
+            // Frame format: [4-byte length][2-byte type][payload]
+            const header = protocol.FrameHeader{
+                .length = @intCast(sanitized_buf.items.len),
+                .frame_type = @intFromEnum(protocol.FrameType.pty_binary),
+            };
 
-            response_buf.appendSlice(session.allocator, "{\"type\":\"pty_out\",\"payload\":{\"text\":\"") catch return .disarm;
+            // Build complete frame with header + payload
+            var frame_buf = std.ArrayList(u8).initCapacity(session.allocator, @sizeOf(protocol.FrameHeader) + sanitized_buf.items.len) catch return .disarm;
+            defer frame_buf.deinit(session.allocator);
 
-            // Escape JSON special characters while preserving UTF-8 sequences
-            for (valid_data) |byte| {
-                switch (byte) {
-                    '"' => response_buf.appendSlice(session.allocator, "\\\"") catch return .disarm,
-                    '\\' => response_buf.appendSlice(session.allocator, "\\\\") catch return .disarm,
-                    '\n' => response_buf.appendSlice(session.allocator, "\\n") catch return .disarm,
-                    '\r' => response_buf.appendSlice(session.allocator, "\\r") catch return .disarm,
-                    '\t' => response_buf.appendSlice(session.allocator, "\\t") catch return .disarm,
-                    0x08 => response_buf.appendSlice(session.allocator, "\\b") catch return .disarm,
-                    0x0C => response_buf.appendSlice(session.allocator, "\\f") catch return .disarm,
-                    0x00...0x07, 0x0B, 0x0E...0x1F, 0x7F => {
-                        const escaped = std.fmt.allocPrint(session.allocator, "\\u{x:0>4}", .{byte}) catch return .disarm;
-                        defer session.allocator.free(escaped);
-                        response_buf.appendSlice(session.allocator, escaped) catch return .disarm;
-                    },
-                    else => response_buf.append(session.allocator, byte) catch return .disarm,
-                }
-            }
-
-            response_buf.appendSlice(session.allocator, "\"}}\n") catch return .disarm;
-            const response = response_buf.items;
+            const header_bytes = std.mem.asBytes(&header);
+            frame_buf.appendSlice(session.allocator, header_bytes) catch return .disarm;
+            frame_buf.appendSlice(session.allocator, sanitized_buf.items) catch return .disarm;
 
             // Send to all attached clients using async write
             var it = session.attached_clients.keyIterator();
             while (it.next()) |client_fd| {
                 const attached_client = ctx.clients.get(client_fd.*) orelse continue;
-                const owned_response = session.allocator.dupe(u8, response) catch continue;
+                const owned_frame = session.allocator.dupe(u8, frame_buf.items) catch continue;
 
                 const write_ctx = session.allocator.create(PtyWriteContext) catch {
-                    session.allocator.free(owned_response);
+                    session.allocator.free(owned_frame);
                     continue;
                 };
                 write_ctx.* = .{
                     .allocator = session.allocator,
-                    .message = owned_response,
+                    .message = owned_frame,
                 };
 
                 const write_completion = session.allocator.create(xev.Completion) catch {
-                    session.allocator.free(owned_response);
+                    session.allocator.free(owned_frame);
                     session.allocator.destroy(write_ctx);
                     continue;
                 };
@@ -933,7 +909,7 @@ fn readPtyCallback(
                 attached_client.stream.write(
                     loop,
                     write_completion,
-                    .{ .slice = owned_response },
+                    .{ .slice = owned_frame },
                     PtyWriteContext,
                     write_ctx,
                     ptyWriteCallback,

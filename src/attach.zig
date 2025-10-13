@@ -24,6 +24,8 @@ const Context = struct {
     read_completion: ?*xev.Completion = null,
     read_ctx: ?*ReadContext = null,
     config: config_mod.Config,
+    frame_buffer: std.ArrayList(u8),
+    frame_expecting_bytes: usize = 0,
 };
 
 const params = clap.parseParamsComptime(
@@ -97,7 +99,10 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
         .loop = &loop,
         .session_name = session_name,
         .config = config,
+        .frame_buffer = std.ArrayList(u8){},
     };
+    ctx.frame_buffer = std.ArrayList(u8).initCapacity(allocator, 4096) catch unreachable;
+    defer ctx.frame_buffer.deinit(allocator);
 
     // Get terminal size
     var ws: c.struct_winsize = undefined;
@@ -190,14 +195,52 @@ fn readCallback(
 
         const data = read_buffer.slice[0..len];
 
-        // Find newline to get complete message
+        // Check if this is a binary frame (starts with FrameHeader)
+        if (data.len >= @sizeOf(protocol.FrameHeader)) {
+            const potential_header = data[0..@sizeOf(protocol.FrameHeader)];
+            const header: *const protocol.FrameHeader = @ptrCast(@alignCast(potential_header));
+
+            if (header.frame_type == @intFromEnum(protocol.FrameType.pty_binary)) {
+                // This is a binary PTY frame
+                const expected_total = @sizeOf(protocol.FrameHeader) + header.length;
+                if (data.len >= expected_total) {
+                    // We have the complete frame
+                    const payload = data[@sizeOf(protocol.FrameHeader)..expected_total];
+                    _ = posix.write(posix.STDOUT_FILENO, payload) catch {};
+                    return .rearm;
+                } else {
+                    // Partial frame, buffer it
+                    ctx.frame_buffer.appendSlice(ctx.allocator, data) catch {};
+                    ctx.frame_expecting_bytes = expected_total - data.len;
+                    return .rearm;
+                }
+            }
+        }
+
+        // If we're expecting more frame bytes, accumulate them
+        if (ctx.frame_expecting_bytes > 0) {
+            ctx.frame_buffer.appendSlice(ctx.allocator, data) catch {};
+            if (ctx.frame_buffer.items.len >= @sizeOf(protocol.FrameHeader)) {
+                const header: *const protocol.FrameHeader = @ptrCast(@alignCast(ctx.frame_buffer.items[0..@sizeOf(protocol.FrameHeader)]));
+                const expected_total = @sizeOf(protocol.FrameHeader) + header.length;
+
+                if (ctx.frame_buffer.items.len >= expected_total) {
+                    // Complete frame received
+                    const payload = ctx.frame_buffer.items[@sizeOf(protocol.FrameHeader)..expected_total];
+                    _ = posix.write(posix.STDOUT_FILENO, payload) catch {};
+                    ctx.frame_buffer.clearRetainingCapacity();
+                    ctx.frame_expecting_bytes = 0;
+                }
+            }
+            return .rearm;
+        }
+
+        // Otherwise parse as JSON control message
         const newline_idx = std.mem.indexOf(u8, data, "\n") orelse {
-            // std.debug.print("No newline found in {d} bytes, waiting for more data\n", .{len});
             return .rearm;
         };
 
         const msg_line = data[0..newline_idx];
-        // std.debug.print("Parsing message ({d} bytes): {s}\n", .{msg_line.len, msg_line});
 
         const msg_type_parsed = protocol.parseMessageType(ctx.allocator, msg_line) catch |err| {
             std.debug.print("JSON parse error: {s}\n", .{@errorName(err)});
@@ -279,15 +322,6 @@ fn readCallback(
                 cleanupClientFdFile(ctx);
                 _ = posix.write(posix.STDERR_FILENO, "\r\nSession killed\r\n") catch {};
                 return cleanup(ctx, completion);
-            },
-            .pty_out => {
-                const parsed = protocol.parseMessage(protocol.PtyOutput, ctx.allocator, msg_line) catch |err| {
-                    std.debug.print("Failed to parse pty output: {s}\n", .{@errorName(err)});
-                    return .rearm;
-                };
-                defer parsed.deinit();
-
-                _ = posix.write(posix.STDOUT_FILENO, parsed.value.payload.text) catch {};
             },
             else => {
                 std.debug.print("Unexpected message type in attach client: {s}\n", .{msg_type.toString()});
