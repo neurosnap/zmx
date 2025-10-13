@@ -1051,33 +1051,6 @@ fn createSession(allocator: std.mem.Allocator, session_name: []const u8) !*Sessi
         };
         _ = c.putenv(@ptrCast(zmx_session_var.ptr));
 
-        // Forward important environment variables from daemon
-        // (Most variables like HOME, USER, PATH are already inherited)
-        const env_vars = [_][]const u8{
-            "TERM", // Terminal type
-            "DISPLAY", // X11 display
-            "XAUTHORITY", // X11 auth
-            "WAYLAND_DISPLAY", // Wayland display
-            "WINDOWID", // X11 window ID
-            "SSH_AUTH_SOCK", // SSH agent socket
-            "SSH_AGENT_PID", // SSH agent PID
-            "SSH_CONNECTION", // SSH connection info
-            "XDG_RUNTIME_DIR", // XDG runtime directory
-            "LANG", // Primary locale
-            "LC_ALL", // Override all locale settings
-            "LC_CTYPE", // Character classification
-            "COLORTERM", // Truecolor support indicator
-        };
-
-        for (env_vars) |var_name| {
-            if (std.posix.getenv(var_name)) |value| {
-                const env_var = std.fmt.allocPrint(allocator, "{s}={s}\x00", .{ var_name, value }) catch {
-                    std.posix.exit(1);
-                };
-                _ = c.putenv(@ptrCast(env_var.ptr));
-            }
-        }
-
         const shell = std.posix.getenv("SHELL") orelse "/bin/sh";
         execShellWithPrompt(allocator, session_name, shell);
     }
