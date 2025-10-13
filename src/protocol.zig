@@ -8,7 +8,6 @@ pub const MessageType = enum {
     detach_session_request,
     kill_session_request,
     list_sessions_request,
-    pty_in,
     window_resize,
 
     // Daemon -> Client responses
@@ -16,7 +15,6 @@ pub const MessageType = enum {
     detach_session_response,
     kill_session_response,
     list_sessions_response,
-    pty_out,
 
     // Daemon -> Client notifications
     detach_notification,
@@ -28,13 +26,11 @@ pub const MessageType = enum {
             .detach_session_request => "detach_session_request",
             .kill_session_request => "kill_session_request",
             .list_sessions_request => "list_sessions_request",
-            .pty_in => "pty_in",
             .window_resize => "window_resize",
             .attach_session_response => "attach_session_response",
             .detach_session_response => "detach_session_response",
             .kill_session_response => "kill_session_response",
             .list_sessions_response => "list_sessions_response",
-            .pty_out => "pty_out",
             .detach_notification => "detach_notification",
             .kill_notification => "kill_notification",
         };
@@ -46,13 +42,11 @@ pub const MessageType = enum {
             .{ "detach_session_request", .detach_session_request },
             .{ "kill_session_request", .kill_session_request },
             .{ "list_sessions_request", .list_sessions_request },
-            .{ "pty_in", .pty_in },
             .{ "window_resize", .window_resize },
             .{ "attach_session_response", .attach_session_response },
             .{ "detach_session_response", .detach_session_response },
             .{ "kill_session_response", .kill_session_response },
             .{ "list_sessions_response", .list_sessions_response },
-            .{ "pty_out", .pty_out },
             .{ "detach_notification", .detach_notification },
             .{ "kill_notification", .kill_notification },
         });
@@ -77,10 +71,6 @@ pub const KillSessionRequest = struct {
 };
 
 pub const ListSessionsRequest = struct {};
-
-pub const PtyInput = struct {
-    text: []const u8,
-};
 
 pub const WindowResize = struct {
     rows: u16,
@@ -115,10 +105,6 @@ pub const ListSessionsResponse = struct {
     status: []const u8,
     sessions: []SessionInfo = &.{},
     error_message: ?[]const u8 = null,
-};
-
-pub const PtyOutput = struct {
-    text: []const u8,
 };
 
 pub const DetachNotification = struct {

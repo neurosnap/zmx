@@ -272,7 +272,41 @@ fn readCallback(
             return closeClient(client, completion);
         };
 
-        // Process complete messages (delimited by newline)
+        // Check for binary frames first
+        while (client.message_buffer.items.len >= @sizeOf(protocol.FrameHeader)) {
+            const header: *const protocol.FrameHeader = @ptrCast(@alignCast(client.message_buffer.items.ptr));
+
+            if (header.frame_type == @intFromEnum(protocol.FrameType.pty_binary)) {
+                const expected_total = @sizeOf(protocol.FrameHeader) + header.length;
+                if (client.message_buffer.items.len >= expected_total) {
+                    const payload = client.message_buffer.items[@sizeOf(protocol.FrameHeader)..expected_total];
+                    handleBinaryFrame(client, payload) catch |err| {
+                        std.debug.print("handleBinaryFrame failed: {s}\n", .{@errorName(err)});
+                        return closeClient(client, completion);
+                    };
+
+                    // Remove processed frame from buffer
+                    const remaining = client.message_buffer.items[expected_total..];
+                    const remaining_copy = client.allocator.dupe(u8, remaining) catch {
+                        return closeClient(client, completion);
+                    };
+                    client.message_buffer.clearRetainingCapacity();
+                    client.message_buffer.appendSlice(client.allocator, remaining_copy) catch {
+                        client.allocator.free(remaining_copy);
+                        return closeClient(client, completion);
+                    };
+                    client.allocator.free(remaining_copy);
+                } else {
+                    // Incomplete frame, wait for more data
+                    break;
+                }
+            } else {
+                // Not a binary frame, try JSON
+                break;
+            }
+        }
+
+        // Process complete JSON messages (delimited by newline)
         while (std.mem.indexOf(u8, client.message_buffer.items, "\n")) |newline_pos| {
             const message = client.message_buffer.items[0..newline_pos];
             handleMessage(client, message) catch |err| {
@@ -301,6 +335,10 @@ fn readCallback(
         std.debug.print("read failed: {s}\n", .{@errorName(err)});
         return closeClient(client, completion);
     }
+}
+
+fn handleBinaryFrame(client: *Client, payload: []const u8) !void {
+    try handlePtyInput(client, payload);
 }
 
 fn handleMessage(client: *Client, data: []const u8) !void {
@@ -337,11 +375,6 @@ fn handleMessage(client: *Client, data: []const u8) !void {
         .list_sessions_request => {
             std.debug.print("Handling list sessions request\n", .{});
             try handleListSessions(client.server_ctx, client);
-        },
-        .pty_in => {
-            const parsed = try protocol.parseMessage(protocol.PtyInput, client.allocator, data);
-            defer parsed.deinit();
-            try handlePtyInput(client, parsed.value.payload.text);
         },
         .window_resize => {
             const parsed = try protocol.parseMessage(protocol.WindowResize, client.allocator, data);
@@ -593,9 +626,7 @@ fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []con
 
         // For first attach to new session, clear the client's terminal
         if (!is_reattach) {
-            try protocol.writeJson(ctx.allocator, client.fd, .pty_out, protocol.PtyOutput{
-                .text = "\x1b[2J\x1b[H", // Clear screen and move cursor to home
-            });
+            try protocol.writeBinaryFrame(client.fd, .pty_binary, "\x1b[2J\x1b[H");
         }
     } else {
         // Send attach success response for additional clients
@@ -749,18 +780,19 @@ fn renderTerminalSnapshot(session: *Session, allocator: std.mem.Allocator) ![]u8
 }
 
 fn notifyAttachedClientsAndCleanup(session: *Session, ctx: *ServerContext, reason: []const u8) void {
-    std.debug.print("Session '{s}' ending: {s}\n", .{ session.name, reason });
-
-    // Copy the session name before cleanup since HashMap key points to session.name
+    // Copy the session name FIRST before doing anything else, including printing
+    // This protects against any potential memory corruption
     const session_name = ctx.allocator.dupe(u8, session.name) catch {
-        // Fallback: just use the existing name and skip removal if allocation fails
-        std.debug.print("Failed to allocate session name copy\n", .{});
+        // Fallback: skip notification and just cleanup
+        std.debug.print("Failed to allocate session name copy during cleanup\n", .{});
         posix.close(session.pty_master_fd);
         session.deinit();
         ctx.allocator.destroy(session);
         return;
     };
     defer ctx.allocator.free(session_name);
+
+    std.debug.print("Session '{s}' ending: {s}\n", .{ session_name, reason });
 
     // Notify all attached clients
     var it = session.attached_clients.keyIterator();
@@ -800,6 +832,22 @@ fn readPtyCallback(
     const pty_ctx = pty_ctx_opt.?;
     const session = pty_ctx.session;
     const ctx = pty_ctx.server_ctx;
+
+    // Check if session still exists (might have been killed by another client)
+    const session_exists = blk: {
+        var it = ctx.sessions.valueIterator();
+        while (it.next()) |s| {
+            if (s.* == session) break :blk true;
+        }
+        break :blk false;
+    };
+
+    if (!session_exists) {
+        // Session was already cleaned up, just free our context
+        ctx.allocator.destroy(pty_ctx);
+        ctx.allocator.destroy(completion);
+        return .disarm;
+    }
 
     if (read_result) |bytes_read| {
         if (bytes_read == 0) {

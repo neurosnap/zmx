@@ -18,6 +18,7 @@ const Context = struct {
     stream: xev.Stream,
     stdin_stream: xev.Stream,
     stdout_stream: xev.Stream,
+    socket_fd: std.posix.fd_t,
     allocator: std.mem.Allocator,
     loop: *xev.Loop,
     session_name: []const u8,
@@ -100,6 +101,7 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
         .stream = xev.Stream.initFd(socket_fd),
         .stdin_stream = xev.Stream.initFd(posix.STDIN_FILENO),
         .stdout_stream = xev.Stream.initFd(posix.STDOUT_FILENO),
+        .socket_fd = socket_fd,
         .allocator = allocator,
         .loop = &loop,
         .session_name = session_name,
@@ -328,15 +330,7 @@ fn readCallback(
                 _ = posix.write(posix.STDERR_FILENO, "\r\nSession killed\r\n") catch {};
                 return cleanup(ctx, completion);
             },
-            .pty_out => {
-                const parsed = protocol.parseMessage(protocol.PtyOutput, ctx.allocator, msg_line) catch |err| {
-                    std.debug.print("Failed to parse pty_out: {s}\r\n", .{@errorName(err)});
-                    return .rearm;
-                };
-                defer parsed.deinit();
 
-                writeToStdout(ctx, parsed.value.payload.text);
-            },
             else => {
                 std.debug.print("Unexpected message type in attach client: {s}\r\n", .{msg_type.toString()});
             },
@@ -414,29 +408,9 @@ fn sendDetachRequest(ctx: *Context) void {
 }
 
 fn sendPtyInput(ctx: *Context, data: []const u8) void {
-    const request_payload = protocol.PtyInput{ .text = data };
-    var out: std.io.Writer.Allocating = .init(ctx.allocator);
-    defer out.deinit();
-
-    const msg = protocol.Message(@TypeOf(request_payload)){
-        .type = protocol.MessageType.pty_in.toString(),
-        .payload = request_payload,
+    protocol.writeBinaryFrame(ctx.socket_fd, .pty_binary, data) catch |err| {
+        std.debug.print("Failed to send pty input: {s}\r\n", .{@errorName(err)});
     };
-
-    var stringify: std.json.Stringify = .{ .writer = &out.writer };
-    stringify.write(msg) catch return;
-    out.writer.writeByte('\n') catch return;
-
-    const owned_message = ctx.allocator.dupe(u8, out.written()) catch return;
-
-    const write_ctx = ctx.allocator.create(StdinWriteContext) catch return;
-    write_ctx.* = .{
-        .allocator = ctx.allocator,
-        .message = owned_message,
-    };
-
-    const write_completion = ctx.allocator.create(xev.Completion) catch return;
-    ctx.stream.write(ctx.loop, write_completion, .{ .slice = owned_message }, StdinWriteContext, write_ctx, stdinWriteCallback);
 }
 
 // Context for async write operations to daemon socket.
