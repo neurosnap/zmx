@@ -4,7 +4,7 @@ const toml = @import("toml");
 pub const Config = struct {
     socket_path: []const u8 = "/tmp/zmx.sock",
     socket_path_allocated: bool = false,
-    detach_prefix: u8 = 0x00, // Ctrl+Space
+    detach_prefix: u8 = 0x02, // Ctrl+B (like tmux)
     detach_key: u8 = 'd',
 
     pub fn load(allocator: std.mem.Allocator) !Config {
