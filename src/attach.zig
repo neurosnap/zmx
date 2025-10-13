@@ -8,6 +8,7 @@ const protocol = @import("protocol.zig");
 
 const c = @cImport({
     @cInclude("termios.h");
+    @cInclude("sys/ioctl.h");
 });
 
 const Context = struct {
@@ -98,7 +99,17 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
         .config = config,
     };
 
-    const request_payload = protocol.AttachSessionRequest{ .session_name = session_name };
+    // Get terminal size
+    var ws: c.struct_winsize = undefined;
+    const result = c.ioctl(posix.STDOUT_FILENO, c.TIOCGWINSZ, &ws);
+    const rows: u16 = if (result == 0) ws.ws_row else 24;
+    const cols: u16 = if (result == 0) ws.ws_col else 80;
+
+    const request_payload = protocol.AttachSessionRequest{
+        .session_name = session_name,
+        .rows = rows,
+        .cols = cols,
+    };
     var out: std.io.Writer.Allocating = .init(allocator);
     defer out.deinit();
 

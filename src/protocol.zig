@@ -63,6 +63,8 @@ pub const MessageType = enum {
 // Typed payload structs for requests
 pub const AttachSessionRequest = struct {
     session_name: []const u8,
+    rows: u16,
+    cols: u16,
 };
 
 pub const DetachSessionRequest = struct {

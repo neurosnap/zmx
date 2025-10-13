@@ -69,6 +69,8 @@ Responses are sent from the daemon to the client in response to a request. Every
 - **Request Type**: `attach_session_request`
 - **Request Payload**:
     - `session_name`: string
+    - `rows`: u16 (terminal height in rows)
+    - `cols`: u16 (terminal width in columns)
 
 - **Direction**: Daemon -> Client
 - **Response Type**: `attach_session_response`

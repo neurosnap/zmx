@@ -305,7 +305,7 @@ fn handleMessage(client: *Client, data: []const u8) !void {
             const parsed = try protocol.parseMessage(protocol.AttachSessionRequest, client.allocator, data);
             defer parsed.deinit();
             std.debug.print("Handling attach request for session: {s}\n", .{parsed.value.payload.session_name});
-            try handleAttachSession(client.server_ctx, client, parsed.value.payload.session_name);
+            try handleAttachSession(client.server_ctx, client, parsed.value.payload.session_name, parsed.value.payload.rows, parsed.value.payload.cols);
         },
         .detach_session_request => {
             const parsed = try protocol.parseMessage(protocol.DetachSessionRequest, client.allocator, data);
@@ -537,7 +537,7 @@ fn handleListSessions(ctx: *ServerContext, client: *Client) !void {
     _ = written;
 }
 
-fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []const u8) !void {
+fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []const u8, rows: u16, cols: u16) !void {
     // Check if session already exists
     const is_reattach = ctx.sessions.contains(session_name);
     const session = if (is_reattach) blk: {
@@ -550,6 +550,21 @@ fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []con
         try ctx.sessions.put(new_session.name, new_session);
         break :blk new_session;
     };
+
+    // Update libghostty-vt terminal size
+    try session.vt.resize(session.allocator, cols, rows);
+
+    // Update PTY window size
+    var ws = c.struct_winsize{
+        .ws_row = rows,
+        .ws_col = cols,
+        .ws_xpixel = 0,
+        .ws_ypixel = 0,
+    };
+    const result = c.ioctl(session.pty_master_fd, c.TIOCSWINSZ, &ws);
+    if (result < 0) {
+        return error.IoctlFailed;
+    }
 
     // Mark client as attached
     client.attached_session = session.name;
