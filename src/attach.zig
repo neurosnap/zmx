@@ -343,8 +343,8 @@ fn readCallback(
         }
 
         return .rearm;
-    } else |err| {
-        std.debug.print("read failed: {s}\r\n", .{@errorName(err)});
+    } else |_| {
+        // Connection closed by daemon (expected on shutdown)
     }
 
     ctx.allocator.destroy(read_ctx);
