@@ -34,7 +34,7 @@ The protocol uses a hybrid approach: JSON for control messages and binary frames
 **Current Usage:**
 - Control messages (attach, detach, kill, etc.): NDJSON format
 - PTY output from daemon to client: Binary frames (type 2)
-- PTY input from client to daemon: JSON `pty_in` messages (may be optimized to binary frames in future)
+- PTY input from client to daemon: Binary frames (type 2)
 
 ## Message Structure
 

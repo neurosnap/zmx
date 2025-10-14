@@ -210,11 +210,11 @@ pub const LineBuffer = struct {
     };
 };
 
-// Future: Binary frame support for PTY data
+// Binary frame support for PTY data
 // This infrastructure allows us to add binary framing later without breaking existing code
 pub const FrameType = enum(u16) {
     json_control = 1, // JSON-encoded control messages (current protocol)
-    pty_binary = 2, // Raw PTY bytes (future optimization)
+    pty_binary = 2, // Raw PTY bytes
 };
 
 pub const FrameHeader = packed struct {
@@ -222,7 +222,7 @@ pub const FrameHeader = packed struct {
     frame_type: u16, // little-endian, FrameType value
 };
 
-// Future: Helper to write a binary frame (not used yet)
+// Helper to write a binary frame
 pub fn writeBinaryFrame(fd: posix.fd_t, frame_type: FrameType, payload: []const u8) !void {
     const header = FrameHeader{
         .length = @intCast(payload.len),
@@ -234,7 +234,7 @@ pub fn writeBinaryFrame(fd: posix.fd_t, frame_type: FrameType, payload: []const 
     _ = try posix.write(fd, payload);
 }
 
-// Future: Helper to read a binary frame (not used yet)
+// Helper to read a binary frame (not used yet)
 pub fn readBinaryFrame(allocator: std.mem.Allocator, fd: posix.fd_t) !struct { frame_type: FrameType, payload: []u8 } {
     var header_bytes: [@sizeOf(FrameHeader)]u8 = undefined;
     const read_len = try posix.read(fd, &header_bytes);

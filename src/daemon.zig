@@ -638,7 +638,7 @@ fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []con
 
     // If reattaching, send the scrollback buffer as binary frame
     if (is_reattach) {
-        const buffer_slice = try session.vt.plainStringUnwrapped(client.allocator);
+        const buffer_slice = try renderTerminalSnapshot(session, client.allocator);
         defer client.allocator.free(buffer_slice);
 
         try protocol.writeBinaryFrame(client.fd, .pty_binary, buffer_slice);
@@ -738,39 +738,40 @@ fn renderTerminalSnapshot(session: *Session, allocator: std.mem.Allocator) ![]u8
     const rows = screen.pages.rows;
     const cols = screen.pages.cols;
 
-    var row: usize = 0;
-    while (row < rows) : (row += 1) {
-        var col: usize = 0;
-        while (col < cols) : (col += 1) {
-            // Build a point.Point referring to the active (visible) page
-            const pt: ghostty.point.Point = .{ .active = .{
-                .x = @as(u16, @intCast(col)),
-                .y = @as(u16, @intCast(row)),
-            } };
+    // Use cellIterator to walk through the visible viewport
+    const tl_pt: ghostty.point.Point = screen.pages.getTopLeft(tl);
+    const br_pt: ghostty.point.Point = screen.pages.getBottomRight(tl);
 
-            if (screen.pages.getCell(pt)) |cell_ref| {
-                const cp = cell_ref.cell.content.codepoint;
-                if (cp == 0) {
-                    try output.append(allocator, ' ');
-                } else {
-                    var buf: [4]u8 = undefined;
-                    const len = std.unicode.utf8Encode(cp, &buf) catch 0;
-                    if (len == 0) {
-                        try output.append(allocator, ' ');
-                    } else {
-                        try output.appendSlice(allocator, buf[0..len]);
-                    }
-                }
-            } else {
-                // Outside bounds or no cell => space to preserve width
+    var it = screen.pages.cellIterator(.right_down, tl_pt, br_pt);
+    var current_row: u16 = 0;
+
+    while (it.next()) |pin| {
+        const cell_info = pin.rowAndCell();
+        const cell = cell_info.cell;
+
+        // Check if we've moved to a new row
+        if (pin.y > current_row) {
+            try output.appendSlice(allocator, "\r\n");
+            current_row = pin.y;
+        }
+
+        // Write the cell content
+        const cp = cell.content.codepoint;
+        if (cp == 0) {
+            try output.append(allocator, ' ');
+        } else {
+            var buf: [4]u8 = undefined;
+            const len = std.unicode.utf8Encode(cp, &buf) catch 0;
+            if (len == 0) {
                 try output.append(allocator, ' ');
+            } else {
+                try output.appendSlice(allocator, buf[0..len]);
             }
         }
-
-        if (row < rows - 1) {
-            try output.appendSlice(allocator, "\r\n");
-        }
     }
+
+    // Add final newline if needed
+    try output.appendSlice(allocator, "\r\n");
 
     // Position cursor at correct location (ANSI is 1-based)
     const cursor = screen.cursor;
