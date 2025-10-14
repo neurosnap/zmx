@@ -95,6 +95,105 @@ const VTHandler = struct {
         self.terminal.tabReset();
     }
 
+    // Cursor movement (relative)
+    pub fn cursorUp(self: *VTHandler, count: usize) !void {
+        self.terminal.cursorUp(count);
+    }
+
+    pub fn cursorDown(self: *VTHandler, count: usize) !void {
+        self.terminal.cursorDown(count);
+    }
+
+    pub fn cursorForward(self: *VTHandler, count: usize) !void {
+        self.terminal.cursorRight(count);
+    }
+
+    pub fn cursorBack(self: *VTHandler, count: usize) !void {
+        self.terminal.cursorLeft(count);
+    }
+
+    pub fn setCursorColRelative(self: *VTHandler, count: usize) !void {
+        const new_col = self.terminal.screen.cursor.x + count;
+        self.terminal.setCursorPos(self.terminal.screen.cursor.y, new_col);
+    }
+
+    pub fn setCursorRowRelative(self: *VTHandler, count: usize) !void {
+        const new_row = self.terminal.screen.cursor.y + count;
+        self.terminal.setCursorPos(new_row, self.terminal.screen.cursor.x);
+    }
+
+    // Special movement (ESC sequences)
+    pub fn index(self: *VTHandler) !void {
+        try self.terminal.index();
+    }
+
+    pub fn reverseIndex(self: *VTHandler) !void {
+        self.terminal.reverseIndex();
+    }
+
+    pub fn nextLine(self: *VTHandler) !void {
+        try self.terminal.linefeed();
+        self.terminal.carriageReturn();
+    }
+
+    pub fn prevLine(self: *VTHandler) !void {
+        self.terminal.reverseIndex();
+        self.terminal.carriageReturn();
+    }
+
+    // Line/char editing
+    pub fn insertLines(self: *VTHandler, count: usize) !void {
+        self.terminal.insertLines(count);
+    }
+
+    pub fn deleteLines(self: *VTHandler, count: usize) !void {
+        self.terminal.deleteLines(count);
+    }
+
+    pub fn deleteChars(self: *VTHandler, count: usize) !void {
+        self.terminal.deleteChars(count);
+    }
+
+    pub fn eraseChars(self: *VTHandler, count: usize) !void {
+        self.terminal.eraseChars(count);
+    }
+
+    pub fn scrollUp(self: *VTHandler, count: usize) !void {
+        self.terminal.scrollUp(count);
+    }
+
+    pub fn scrollDown(self: *VTHandler, count: usize) !void {
+        self.terminal.scrollDown(count);
+    }
+
+    // Basic control characters
+    pub fn carriageReturn(self: *VTHandler) !void {
+        self.terminal.carriageReturn();
+    }
+
+    pub fn linefeed(self: *VTHandler) !void {
+        try self.terminal.linefeed();
+    }
+
+    pub fn backspace(self: *VTHandler) !void {
+        self.terminal.backspace();
+    }
+
+    pub fn horizontalTab(self: *VTHandler, count: usize) !void {
+        _ = count; // stream always passes 1
+        try self.terminal.horizontalTab();
+    }
+
+    pub fn horizontalTabBack(self: *VTHandler, count: usize) !void {
+        _ = count; // stream always passes 1
+        try self.terminal.horizontalTabBack();
+    }
+
+    pub fn bell(self: *VTHandler) !void {
+        _ = self;
+        // Ignore bell in daemon context - no UI to notify
+    }
+
     pub fn deviceAttributes(
         self: *VTHandler,
         req: ghostty.DeviceAttributeReq,
@@ -789,11 +888,9 @@ fn renderTerminalSnapshot(session: *Session, allocator: std.mem.Allocator) ![]u8
     var output = try std.ArrayList(u8).initCapacity(allocator, 4096);
     errdefer output.deinit(allocator);
 
-    // Clear screen and move to home
-    try output.appendSlice(allocator, "\x1b[2J\x1b[H");
-
     const vt = &session.vt;
     const screen = &session.vt.screen;
+    const scroll_region = &vt.scrolling_region;
 
     // Debug: Print all enabled modes
     std.debug.print("Terminal modes for session {s}:\n", .{session.name});
@@ -813,11 +910,48 @@ fn renderTerminalSnapshot(session: *Session, allocator: std.mem.Allocator) ![]u8
         }
     }
 
-    // Restore terminal modes by sending appropriate escape sequences
-    // Iterate over all modes and generate the correct escape sequence for each
+    // Step 1: Neutralize constraints for predictable snapshot printing
+    try output.appendSlice(allocator, "\x1b[?69l"); // Disable left/right margins
+    try output.appendSlice(allocator, "\x1b[r"); // Reset scroll region to full screen
+    try output.appendSlice(allocator, "\x1b[?6l"); // Disable origin mode temporarily
+    try output.appendSlice(allocator, "\x1b[2J\x1b[H"); // Clear and home
+
+    // Step 2: Print terminal content
+    const content = try session.vt.plainStringUnwrapped(allocator);
+    defer allocator.free(content);
+    try output.appendSlice(allocator, content);
+
+    // Step 3: Restore scroll regions (if non-default)
+    const default_top: u16 = 0;
+    const default_bottom: u16 = vt.rows - 1;
+    const default_left: u16 = 0;
+    const default_right: u16 = vt.cols - 1;
+
+    if (scroll_region.top != default_top or scroll_region.bottom != default_bottom) {
+        // DECSTBM - set top/bottom margins (1-based)
+        try output.writer(allocator).print("\x1b[{d};{d}r", .{
+            scroll_region.top + 1,
+            scroll_region.bottom + 1,
+        });
+    }
+
+    if (scroll_region.left != default_left or scroll_region.right != default_right) {
+        // Enable LRMM first, then set left/right margins (1-based)
+        try output.appendSlice(allocator, "\x1b[?69h"); // Enable left/right margin mode
+        try output.writer(allocator).print("\x1b[{d};{d}s", .{
+            scroll_region.left + 1,
+            scroll_region.right + 1,
+        });
+    }
+
+    // Step 4: Restore terminal modes (except origin, which we do later)
     inline for (@typeInfo(ghostty.Mode).@"enum".fields) |field| {
         @setEvalBranchQuota(6000);
         const mode: ghostty.Mode = @field(ghostty.Mode, field.name);
+
+        // Skip origin mode - we'll restore it after cursor positioning
+        if (mode == .origin) continue;
+
         const value = vt.modes.get(mode);
         const tag: ghostty.modes.ModeTag = @bitCast(@as(ghostty.modes.ModeTag.Backing, field.value));
         const mode_default = @field(vt.modes.default, field.name);
@@ -835,13 +969,24 @@ fn renderTerminalSnapshot(session: *Session, allocator: std.mem.Allocator) ![]u8
         }
     }
 
-    const content = try session.vt.plainStringUnwrapped(allocator);
-    defer allocator.free(content);
-    try output.appendSlice(allocator, content);
+    // Step 5: Restore origin mode if it was enabled
+    const origin_mode = vt.modes.get(.origin);
+    if (origin_mode) {
+        try output.appendSlice(allocator, "\x1b[?6h");
+    }
 
-    // Position cursor at correct location (ANSI is 1-based)
+    // Step 6: Position cursor (origin-aware, 1-based)
     const cursor = screen.cursor;
-    try output.writer(allocator).print("\x1b[{d};{d}H", .{ cursor.y + 1, cursor.x + 1 });
+    const cursor_row: u16 = if (origin_mode)
+        (cursor.y -| scroll_region.top) + 1
+    else
+        cursor.y + 1;
+    const cursor_col: u16 = if (origin_mode)
+        (cursor.x -| scroll_region.left) + 1
+    else
+        cursor.x + 1;
+
+    try output.writer(allocator).print("\x1b[{d};{d}H", .{ cursor_row, cursor_col });
 
     return output.toOwnedSlice(allocator);
 }
