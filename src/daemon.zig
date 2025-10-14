@@ -36,6 +36,11 @@ const VTHandler = struct {
         try self.terminal.print(cp);
     }
 
+    pub fn setMode(self: *VTHandler, mode: ghostty.Mode, enabled: bool) !void {
+        self.terminal.modes.set(mode, enabled);
+        std.debug.print("Mode changed: {s} = {}\n", .{ @tagName(mode), enabled });
+    }
+
     pub fn deviceAttributes(
         self: *VTHandler,
         req: ghostty.DeviceAttributeReq,
@@ -733,19 +738,52 @@ fn renderTerminalSnapshot(session: *Session, allocator: std.mem.Allocator) ![]u8
     // Clear screen and move to home
     try output.appendSlice(allocator, "\x1b[2J\x1b[H");
 
+    const vt = &session.vt;
     const screen = &session.vt.screen;
+
+    // Debug: Print all enabled modes
+    std.debug.print("Terminal modes for session {s}:\n", .{session.name});
+    inline for (@typeInfo(ghostty.Mode).@"enum".fields) |field| {
+        const mode: ghostty.Mode = @field(ghostty.Mode, field.name);
+        const value = vt.modes.get(mode);
+        const tag: ghostty.modes.ModeTag = @bitCast(@as(ghostty.modes.ModeTag.Backing, field.value));
+        // const mode_default = @field(vt.modes.default, field.name);
+
+        // if (value != mode_default) {
+        std.debug.print("  {s}{d} {s} = {}\n", .{
+            if (tag.ansi) "" else "?",
+            tag.value,
+            field.name,
+            value,
+        });
+        // }
+    }
+
+    // Restore terminal modes by sending appropriate escape sequences
+    // Iterate over all modes and generate the correct escape sequence for each
+    inline for (@typeInfo(ghostty.Mode).@"enum".fields) |field| {
+        @setEvalBranchQuota(6000);
+        const mode: ghostty.Mode = @field(ghostty.Mode, field.name);
+        const value = vt.modes.get(mode);
+        const tag: ghostty.modes.ModeTag = @bitCast(@as(ghostty.modes.ModeTag.Backing, field.value));
+        const mode_default = @field(vt.modes.default, field.name);
+
+        // Only send escape sequences for modes that differ from their defaults
+        if (value != mode_default) {
+            const suffix: u8 = if (value) 'h' else 'l';
+            if (tag.ansi) {
+                // ANSI mode: CSI <n> h/l
+                try output.writer(allocator).print("\x1b[{d}{c}", .{ tag.value, suffix });
+            } else {
+                // DEC mode: CSI ? <n> h/l
+                try output.writer(allocator).print("\x1b[?{d}{c}", .{ tag.value, suffix });
+            }
+        }
+    }
+
     const content = try session.vt.plainStringUnwrapped(allocator);
     defer allocator.free(content);
     try output.appendSlice(allocator, content);
-    // Get the active screen from the terminal
-    // var it = screen.pages.pageIterator(.right_down, .{ .screen = .{} }, null);
-    // var blank_rows: usize = 0;
-    // var blank_cells: usize = 0;
-    // while (it.next()) |chunk| {
-    //     const page: *const ghostty.Page = &chunk.node.data;
-    //     const start_y = chunk.start;
-    //     const end_y = chunk.end;
-    // }
 
     // Position cursor at correct location (ANSI is 1-based)
     const cursor = screen.cursor;
