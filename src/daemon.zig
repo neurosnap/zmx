@@ -916,10 +916,20 @@ fn renderTerminalSnapshot(session: *Session, allocator: std.mem.Allocator) ![]u8
     try output.appendSlice(allocator, "\x1b[?6l"); // Disable origin mode temporarily
     try output.appendSlice(allocator, "\x1b[2J\x1b[H"); // Clear and home
 
-    // Step 2: Print terminal content
-    const content = try session.vt.plainString(allocator);
+    // Step 2: Print terminal content with CRLF translation
+    // In raw mode (no ONLCR), we need explicit CR with each LF
+    const content = try session.vt.plainStringUnwrapped(allocator);
     defer allocator.free(content);
-    try output.appendSlice(allocator, content);
+    var prev: u8 = 0;
+    for (content) |b| {
+        if (b == '\n' and prev != '\r') {
+            try output.append(allocator, '\r');
+            try output.append(allocator, '\n');
+        } else {
+            try output.append(allocator, b);
+        }
+        prev = b;
+    }
 
     // Step 3: Restore scroll regions (if non-default)
     const default_top: u16 = 0;
