@@ -41,6 +41,60 @@ const VTHandler = struct {
         std.debug.print("Mode changed: {s} = {}\n", .{ @tagName(mode), enabled });
     }
 
+    // SGR attributes (colors, bold, italic, etc.)
+    pub fn setAttribute(self: *VTHandler, attr: ghostty.Attribute) !void {
+        try self.terminal.setAttribute(attr);
+    }
+
+    // Cursor positioning
+    pub fn setCursorPos(self: *VTHandler, row: usize, col: usize) !void {
+        self.terminal.setCursorPos(row, col);
+    }
+
+    pub fn setCursorRow(self: *VTHandler, row: usize) !void {
+        self.terminal.setCursorPos(row, self.terminal.screen.cursor.x);
+    }
+
+    pub fn setCursorCol(self: *VTHandler, col: usize) !void {
+        self.terminal.setCursorPos(self.terminal.screen.cursor.y, col);
+    }
+
+    // Screen/line erasing
+    pub fn eraseDisplay(self: *VTHandler, mode: ghostty.EraseDisplay, protected: bool) !void {
+        self.terminal.eraseDisplay(mode, protected);
+    }
+
+    pub fn eraseLine(self: *VTHandler, mode: ghostty.EraseLine, protected: bool) !void {
+        self.terminal.eraseLine(mode, protected);
+    }
+
+    // Scroll regions
+    pub fn setTopAndBottomMargin(self: *VTHandler, top: usize, bottom: usize) !void {
+        self.terminal.setTopAndBottomMargin(top, bottom);
+    }
+
+    // Cursor save/restore
+    pub fn saveCursor(self: *VTHandler) !void {
+        self.terminal.saveCursor();
+    }
+
+    pub fn restoreCursor(self: *VTHandler) !void {
+        try self.terminal.restoreCursor();
+    }
+
+    // Tab stops
+    pub fn tabSet(self: *VTHandler) !void {
+        self.terminal.tabSet();
+    }
+
+    pub fn tabClear(self: *VTHandler, cmd: ghostty.TabClear) !void {
+        self.terminal.tabClear(cmd);
+    }
+
+    pub fn tabReset(self: *VTHandler) !void {
+        self.terminal.tabReset();
+    }
+
     pub fn deviceAttributes(
         self: *VTHandler,
         req: ghostty.DeviceAttributeReq,
@@ -747,16 +801,16 @@ fn renderTerminalSnapshot(session: *Session, allocator: std.mem.Allocator) ![]u8
         const mode: ghostty.Mode = @field(ghostty.Mode, field.name);
         const value = vt.modes.get(mode);
         const tag: ghostty.modes.ModeTag = @bitCast(@as(ghostty.modes.ModeTag.Backing, field.value));
-        // const mode_default = @field(vt.modes.default, field.name);
+        const mode_default = @field(vt.modes.default, field.name);
 
-        // if (value != mode_default) {
-        std.debug.print("  {s}{d} {s} = {}\n", .{
-            if (tag.ansi) "" else "?",
-            tag.value,
-            field.name,
-            value,
-        });
-        // }
+        if (value != mode_default) {
+            std.debug.print("  {s}{d} {s} = {}\n", .{
+                if (tag.ansi) "" else "?",
+                tag.value,
+                field.name,
+                value,
+            });
+        }
     }
 
     // Restore terminal modes by sending appropriate escape sequences
