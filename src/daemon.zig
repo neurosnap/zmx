@@ -736,16 +736,88 @@ fn renderTerminalSnapshot(session: *Session, allocator: std.mem.Allocator) ![]u8
     // Get the active screen from the terminal
     const screen = &session.vt.screen;
     var it = screen.pages.pageIterator(.right_down, .{ .screen = .{} }, null);
-    var page_index: usize = 0;
 
-    while (it.next()) |chunk| : (page_index += 1) {
+    var blank_rows: usize = 0;
+    var blank_cells: usize = 0;
+
+    while (it.next()) |chunk| {
         const page: *const ghostty.Page = &chunk.node.data;
         const start_y = chunk.start;
         const end_y = chunk.end;
-    }
 
-    // Add final newline if needed
-    try output.appendSlice(allocator, "\r\n");
+        for (start_y..end_y) |y_usize| {
+            const y: u16 = @intCast(y_usize);
+            const row = page.getRow(y);
+            const cells = page.getCells(row);
+
+            // Check if row has any text content
+            const has_text = blk: {
+                for (cells) |cell| {
+                    if (cell.hasText()) break :blk true;
+                }
+                break :blk false;
+            };
+
+            // If row is blank, accumulate blank rows
+            if (!has_text) {
+                blank_rows += 1;
+                continue;
+            }
+
+            // Dump accumulated blank rows as newlines
+            for (0..blank_rows) |_| {
+                try output.appendSlice(allocator, "\r\n");
+            }
+            blank_rows = 0;
+
+            // If row doesn't continue a wrap, reset blank cells
+            if (!row.wrap_continuation) blank_cells = 0;
+
+            // Write each cell in the row
+            for (cells) |*cell| {
+                // Skip spacer cells (wide character continuations)
+                switch (cell.wide) {
+                    .narrow, .wide => {},
+                    .spacer_head, .spacer_tail => continue,
+                }
+
+                // Accumulate blank cells
+                if (!cell.hasText()) {
+                    blank_cells += 1;
+                    continue;
+                }
+
+                // Dump accumulated blank cells as spaces
+                if (blank_cells > 0) {
+                    for (0..blank_cells) |_| {
+                        try output.append(allocator, ' ');
+                    }
+                    blank_cells = 0;
+                }
+
+                // Write the actual character
+                const cp = cell.content.codepoint;
+                var buf: [4]u8 = undefined;
+                const len = std.unicode.utf8Encode(cp, &buf) catch continue;
+                try output.appendSlice(allocator, buf[0..len]);
+
+                // Handle grapheme clusters (combining characters)
+                if (cell.content_tag == .codepoint_grapheme) {
+                    if (page.lookupGrapheme(cell)) |grapheme| {
+                        for (grapheme) |gcp| {
+                            const glen = std.unicode.utf8Encode(gcp, &buf) catch continue;
+                            try output.appendSlice(allocator, buf[0..glen]);
+                        }
+                    }
+                }
+            }
+
+            // Add newline after each row (unless it wraps to the next)
+            if (!row.wrap) {
+                try output.appendSlice(allocator, "\r\n");
+            }
+        }
+    }
 
     // Position cursor at correct location (ANSI is 1-based)
     const cursor = screen.cursor;
