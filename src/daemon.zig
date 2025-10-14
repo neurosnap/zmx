@@ -917,7 +917,7 @@ fn renderTerminalSnapshot(session: *Session, allocator: std.mem.Allocator) ![]u8
     try output.appendSlice(allocator, "\x1b[2J\x1b[H"); // Clear and home
 
     // Step 2: Print terminal content
-    const content = try session.vt.plainStringUnwrapped(allocator);
+    const content = try session.vt.plainString(allocator);
     defer allocator.free(content);
     try output.appendSlice(allocator, content);
 
