@@ -106,7 +106,7 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
         .loop = &loop,
         .session_name = session_name,
         .config = config,
-        .frame_buffer = std.ArrayList(u8).initCapacity(allocator, 4096) catch unreachable,
+        .frame_buffer = std.ArrayList(u8).initCapacity(allocator, 64 * 1024) catch unreachable, // 64KB initial capacity
     };
 
     // Get terminal size
@@ -177,10 +177,10 @@ fn writeCallback(
 }
 
 // Context for async socket read operations from daemon.
-// Uses large buffer (128KB) to handle initial session scrollback and binary PTY frames.
+// Uses large buffer (256KB) to handle initial session scrollback and binary PTY frames.
 const ReadContext = struct {
     ctx: *Context,
-    buffer: [128 * 1024]u8, // 128KB to handle large scrollback messages
+    buffer: [256 * 1024]u8, // 256KB to handle large scrollback messages
 };
 
 fn readCallback(

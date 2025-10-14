@@ -235,7 +235,7 @@ const Session = struct {
     pty_master_fd: std.posix.fd_t,
     child_pid: std.posix.pid_t,
     allocator: std.mem.Allocator,
-    pty_read_buffer: [16384]u8,
+    pty_read_buffer: [128 * 1024]u8, // 128KB for high-throughput PTY output
     created_at: i64,
 
     // Terminal emulator state for session restore
@@ -258,7 +258,7 @@ const Session = struct {
 const Client = struct {
     fd: std.posix.fd_t,
     stream: xev.Stream,
-    read_buffer: [16384]u8,
+    read_buffer: [128 * 1024]u8, // 128KB for high-throughput socket reads
     allocator: std.mem.Allocator,
     attached_session: ?[]const u8,
     server_ctx: *ServerContext,

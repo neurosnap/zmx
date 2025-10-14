@@ -54,7 +54,7 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
         protocol.KillSessionRequest{ .session_name = session_name },
     );
 
-    var buffer: [4096]u8 = undefined;
+    var buffer: [16 * 1024]u8 = undefined; // 16KB for robustness
     const bytes_read = try posix.read(socket_fd, &buffer);
 
     if (bytes_read == 0) {

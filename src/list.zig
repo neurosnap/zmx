@@ -43,7 +43,7 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
 
     try protocol.writeJson(allocator, socket_fd, .list_sessions_request, protocol.ListSessionsRequest{});
 
-    var buffer: [8192]u8 = undefined;
+    var buffer: [32 * 1024]u8 = undefined; // 32KB to handle many sessions
     const bytes_read = try posix.read(socket_fd, &buffer);
 
     if (bytes_read == 0) {
