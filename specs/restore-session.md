@@ -4,7 +4,7 @@ This document outlines the specification how we are going to preserve session st
 
 ## purpose
 
-The `zmx attach` subcommand starts re-attaches to a previously created session.  When doing this we want to restore the session to its current state, displaying the last working screen text, layout, text wrapping, etc.  This will include a configurable scrollback buffer size that will also be restored upon reattach.
+The `zmx attach` subcommand starts re-attaches to a previously created session. When doing this we want to restore the session to its current state, displaying the last working screen text, layout, text wrapping, etc. This will include a configurable scrollback buffer size that will also be restored upon reattach.
 
 ## technical details
 
@@ -15,8 +15,7 @@ The `zmx attach` subcommand starts re-attaches to a previously created session. 
 - When you reattach, the daemon does not send the historic byte stream; instead it renders the current grid into a fresh ANSI sequence and ships that down the Unix-domain socket to the new shpool attach client.
 - The client simply write()s that sequence to stdout—your local terminal sees it and redraws the screen instantly.
 
-So the emulator is not “between” client and daemon in the latency sense; it is alongside, maintaining state.
-The only time it interposes is on re-attach: it briefly synthesizes a single frame so your local terminal can show the exact session image without having to replay minutes or hours of output.
+So the emulator is not “between” client and daemon in the latency sense; it is alongside, maintaining state. The only time it interposes is on re-attach: it briefly synthesizes a single frame so your local terminal can show the exact session image without having to replay minutes or hours of output.
 
 ## using libghostty-vt
 

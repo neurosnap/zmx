@@ -10,11 +10,11 @@ The `zmx daemon` subcommand starts the long-running background process that mana
 
 The daemon is responsible for:
 
-1.  **PTY Management**: Creating, managing, and destroying PTY processes using `fork` or `forkpty`.
-2.  **Session State Management**: Maintaining the terminal state and a buffer of text output for each active session. This ensures that when a client re-attaches, they see the previous output and the correct terminal state.
-3.  **Client Communication**: Facilitating communication between multiple `zmx` client instances and the managed PTY processes via a Unix socket.
-4.  **Session Lifecycle**: Handling the lifecycle of sessions, including creation, listing, attachment, detachment, and termination (killing).
-5.  **Resource Management**: Managing system resources associated with each session.
+1. **PTY Management**: Creating, managing, and destroying PTY processes using `fork` or `forkpty`.
+1. **Session State Management**: Maintaining the terminal state and a buffer of text output for each active session. This ensures that when a client re-attaches, they see the previous output and the correct terminal state.
+1. **Client Communication**: Facilitating communication between multiple `zmx` client instances and the managed PTY processes via a Unix socket.
+1. **Session Lifecycle**: Handling the lifecycle of sessions, including creation, listing, attachment, detachment, and termination (killing).
+1. **Resource Management**: Managing system resources associated with each session.
 
 ## usage
 

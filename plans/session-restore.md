@@ -5,9 +5,10 @@ This document outlines the plan for implementing session restore functionality i
 ## Overview
 
 When a client detaches and later reattaches to a session, we need to restore the terminal to its exact visual state without replaying all historical output. We achieve this by:
+
 1. Parsing all PTY output through libghostty-vt to maintain an up-to-date terminal grid
-2. Proxying raw bytes to attached clients (no latency impact)
-3. Rendering the terminal grid to ANSI on reattach
+1. Proxying raw bytes to attached clients (no latency impact)
+1. Rendering the terminal grid to ANSI on reattach
 
 ## 1. Add libghostty-vt Dependency
 
@@ -18,6 +19,7 @@ When a client detaches and later reattaches to a session, we need to restore the
 ## 2. Extend the Session Struct
 
 Add to `Session` struct in `daemon.zig`:
+
 ```zig
 const Session = struct {
     name: []const u8,
@@ -38,6 +40,7 @@ const Session = struct {
 ## 3. Initialize Terminal Emulator on Session Creation
 
 In `createSession()`:
+
 - After forking PTY, initialize libghostty-vt instance
 - Configure terminal size (rows, cols) - query from PTY or use defaults (e.g., 24x80)
 - Configure scrollback buffer size (make this configurable, default 10,000 lines)
@@ -64,6 +67,7 @@ fn createSession(allocator: std.mem.Allocator, session_name: []const u8) !*Sessi
 ## 4. Parse PTY Output Through Terminal Emulator
 
 Modify `readPtyCallback()`:
+
 - Feed all PTY output bytes to libghostty-vt first
 - Check if there are attached clients
 - If clients attached: proxy raw bytes directly to them (existing behavior)
@@ -101,6 +105,7 @@ fn readPtyCallback(...) xev.CallbackAction {
 ## 5. Render Terminal State on Reattach
 
 Create new function `renderTerminalSnapshot()`:
+
 - Get current grid from libghostty-vt
 - Serialize grid to ANSI escape sequences
 - Send rendered output to reattaching client
@@ -151,12 +156,13 @@ fn renderTerminalSnapshot(session: *Session, allocator: std.mem.Allocator) ![]u8
 ## 6. Modify handleAttachSession()
 
 Update attach logic to:
+
 1. Check if session exists, create if not
-2. If reattaching (session already exists):
+1. If reattaching (session already exists):
    - Render current terminal state using libghostty-vt
    - Send rendered snapshot to client
-3. Add client to session's attached_clients set
-4. Start proxying raw PTY output
+1. Add client to session's attached_clients set
+1. Start proxying raw PTY output
 
 ```zig
 fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []const u8) !void {
@@ -203,6 +209,7 @@ fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []con
 ## 7. Handle Window Resize Events
 
 Add support for window size changes:
+
 - When client sends window resize event, update libghostty-vt
 - Update PTY window size with ioctl TIOCSWINSZ
 - libghostty-vt will handle reflow automatically
@@ -229,6 +236,7 @@ fn handleWindowResize(client: *Client, rows: u16, cols: u16) !void {
 ## 8. Track Attached Clients Per Session
 
 Modify session management:
+
 - Remove client from session.attached_clients on detach
 - On disconnect, automatically detach client
 - Keep session alive even when no clients attached
@@ -248,6 +256,7 @@ fn handleDetachSession(client: *Client, session_name: []const u8, target_client_
 ## 9. Clean Up Terminal Emulator on Session Destroy
 
 In session deinit:
+
 - Free libghostty-vt resources
 - Clean up attached_clients map
 
@@ -265,6 +274,7 @@ fn deinit(self: *Session) void {
 ## 10. Configuration Options
 
 Add configurable options (future work):
+
 - Scrollback buffer size
 - Default terminal dimensions
 - Maximum grid memory usage
@@ -272,15 +282,15 @@ Add configurable options (future work):
 ## Implementation Order
 
 1. ✅ Add libghostty-vt C bindings and build integration
-2. ✅ Extend Session struct with vt fields
-3. ✅ Initialize vt in createSession()
-4. ✅ Feed PTY output to vt in readPtyCallback()
-5. ✅ Implement renderTerminalSnapshot()
-6. ✅ Modify handleAttachSession() to render on reattach
-7. ✅ Track attached_clients per session
-8. ✅ Handle window resize events
-9. ✅ Clean up vt resources in session deinit
-10. ✅ Test with multiple attach/detach cycles
+1. ✅ Extend Session struct with vt fields
+1. ✅ Initialize vt in createSession()
+1. ✅ Feed PTY output to vt in readPtyCallback()
+1. ✅ Implement renderTerminalSnapshot()
+1. ✅ Modify handleAttachSession() to render on reattach
+1. ✅ Track attached_clients per session
+1. ✅ Handle window resize events
+1. ✅ Clean up vt resources in session deinit
+1. ✅ Test with multiple attach/detach cycles
 
 ## Testing Strategy
 

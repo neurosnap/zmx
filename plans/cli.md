@@ -15,11 +15,11 @@ This document outlines the plan for implementing the CLI scaffolding for the `zm
 
 - Use `zig-clap` to define the command structure specified in `specs/cli.md`.
 - This includes the global options (`-h`, `-v`) and the subcommands:
-    - `daemon`
-    - `list`
-    - `attach <session>`
-    - `detach <session>`
-    - `kill <session>`
+  - `daemon`
+  - `list`
+  - `attach <session>`
+  - `detach <session>`
+  - `kill <session>`
 - For each command, define the expected arguments and options.
 
 ## 4. Integrate with `src/main.zig`

@@ -54,7 +54,7 @@ The `list` command will output a table with the following columns:
 - `CLIENTS`: The number of clients currently attached to the session.
 - `CREATED_AT`: The date when the session was created
 
----
+______________________________________________________________________
 
 #### `attach`
 
@@ -71,7 +71,7 @@ zmx attach <session>
 - `<session>`: The name of the session to attach to. This is a required argument.
 - `<socket>`: The location of the unix socket file.
 
----
+______________________________________________________________________
 
 #### `detach`
 
@@ -88,7 +88,7 @@ zmx detach <session>
 - `<session>`: The name of the session to detach from. This is a required argument.
 - `<socket>`: The location of the unix socket file.
 
----
+______________________________________________________________________
 
 #### `kill`
 

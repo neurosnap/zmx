@@ -13,6 +13,7 @@ All messages are currently serialized using **newline-delimited JSON (NDJSON)**.
 ### Implementation
 
 The protocol implementation is centralized in `src/protocol.zig`, which provides:
+
 - Typed message structs for all payloads
 - `MessageType` enum for type-safe dispatching
 - Helper functions: `writeJson()`, `parseMessage()`, `parseMessageType()`
@@ -23,15 +24,18 @@ The protocol implementation is centralized in `src/protocol.zig`, which provides
 The protocol uses a hybrid approach: JSON for control messages and binary frames for PTY output to avoid encoding overhead and improve throughput.
 
 **Frame Format:**
+
 ```
 [4-byte length (little-endian)][2-byte type (little-endian)][payload...]
 ```
 
 **Frame Types:**
+
 - Type 1 (`json_control`): JSON control messages (not currently used in framing)
 - Type 2 (`pty_binary`): Raw PTY output bytes
 
 **Current Usage:**
+
 - Control messages (attach, detach, kill, etc.): NDJSON format
 - PTY output from daemon to client: Binary frames (type 2)
 - PTY input from client to daemon: Binary frames (type 2)
@@ -56,14 +60,19 @@ Responses are sent from the daemon to the client in response to a request. Every
 ### `list_sessions`
 
 - **Direction**: Client -> Daemon
+
 - **Request Type**: `list_sessions_request`
+
 - **Request Payload**: (empty)
 
 - **Direction**: Daemon -> Client
+
 - **Response Type**: `list_sessions_response`
+
 - **Response Payload**:
-    - `status`: `ok`
-    - `sessions`: An array of session objects.
+
+  - `status`: `ok`
+  - `sessions`: An array of session objects.
 
 **Session Object:**
 
@@ -75,43 +84,61 @@ Responses are sent from the daemon to the client in response to a request. Every
 ### `attach_session`
 
 - **Direction**: Client -> Daemon
+
 - **Request Type**: `attach_session_request`
+
 - **Request Payload**:
-    - `session_name`: string
-    - `rows`: u16 (terminal height in rows)
-    - `cols`: u16 (terminal width in columns)
+
+  - `session_name`: string
+  - `rows`: u16 (terminal height in rows)
+  - `cols`: u16 (terminal width in columns)
 
 - **Direction**: Daemon -> Client
+
 - **Response Type**: `attach_session_response`
+
 - **Response Payload**:
-    - `status`: `ok` or `error`
-    - `error_message`: string (if status is `error`)
+
+  - `status`: `ok` or `error`
+  - `error_message`: string (if status is `error`)
 
 ### `detach_session`
 
 - **Direction**: Client -> Daemon
+
 - **Request Type**: `detach_session_request`
+
 - **Request Payload**:
-    - `session_name`: string
+
+  - `session_name`: string
 
 - **Direction**: Daemon -> Client
+
 - **Response Type**: `detach_session_response`
+
 - **Response Payload**:
-    - `status`: `ok` or `error`
-    - `error_message`: string (if status is `error`)
+
+  - `status`: `ok` or `error`
+  - `error_message`: string (if status is `error`)
 
 ### `kill_session`
 
 - **Direction**: Client -> Daemon
+
 - **Request Type**: `kill_session_request`
+
 - **Request Payload**:
-    - `session_name`: string
+
+  - `session_name`: string
 
 - **Direction**: Daemon -> Client
+
 - **Response Type**: `kill_session_response`
+
 - **Response Payload**:
-    - `status`: `ok` or `error`
-    - `error_message`: string (if status is `error`)
+
+  - `status`: `ok` or `error`
+  - `error_message`: string (if status is `error`)
 
 ### `pty_in`
 
@@ -119,7 +146,7 @@ Responses are sent from the daemon to the client in response to a request. Every
 - **Message Type**: `pty_in`
 - **Format**: NDJSON
 - **Payload**:
-    - `text`: string (raw UTF-8 text from terminal input)
+  - `text`: string (raw UTF-8 text from terminal input)
 
 This message is sent when a client wants to send user input to the PTY. It is a fire-and-forget message with no direct response. The input is forwarded to the shell running in the session's PTY.
 
@@ -129,7 +156,7 @@ This message is sent when a client wants to send user input to the PTY. It is a 
 - **Message Type**: `pty_out`
 - **Format**: NDJSON (used only for control sequences like screen clear)
 - **Payload**:
-    - `text`: string (escape sequences or control output)
+  - `text`: string (escape sequences or control output)
 
 This JSON message is sent for special control output like initial screen clearing. Regular PTY output uses binary frames (see below).
 
