@@ -735,39 +735,13 @@ fn renderTerminalSnapshot(session: *Session, allocator: std.mem.Allocator) ![]u8
 
     // Get the active screen from the terminal
     const screen = &session.vt.screen;
-    const rows = screen.pages.rows;
-    const cols = screen.pages.cols;
+    var it = screen.pages.pageIterator(.right_down, .{ .screen = .{} }, null);
+    var page_index: usize = 0;
 
-    // Use cellIterator to walk through the visible viewport
-    const tl_pt: ghostty.point.Point = screen.pages.getTopLeft(tl);
-    const br_pt: ghostty.point.Point = screen.pages.getBottomRight(tl);
-
-    var it = screen.pages.cellIterator(.right_down, tl_pt, br_pt);
-    var current_row: u16 = 0;
-
-    while (it.next()) |pin| {
-        const cell_info = pin.rowAndCell();
-        const cell = cell_info.cell;
-
-        // Check if we've moved to a new row
-        if (pin.y > current_row) {
-            try output.appendSlice(allocator, "\r\n");
-            current_row = pin.y;
-        }
-
-        // Write the cell content
-        const cp = cell.content.codepoint;
-        if (cp == 0) {
-            try output.append(allocator, ' ');
-        } else {
-            var buf: [4]u8 = undefined;
-            const len = std.unicode.utf8Encode(cp, &buf) catch 0;
-            if (len == 0) {
-                try output.append(allocator, ' ');
-            } else {
-                try output.appendSlice(allocator, buf[0..len]);
-            }
-        }
+    while (it.next()) |chunk| : (page_index += 1) {
+        const page: *const ghostty.Page = &chunk.node.data;
+        const start_y = chunk.start;
+        const end_y = chunk.end;
     }
 
     // Add final newline if needed
