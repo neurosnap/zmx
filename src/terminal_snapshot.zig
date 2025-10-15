@@ -255,8 +255,61 @@ test "wide character handling: skip spacer cells" {
     const result = try render(&vt, allocator);
     defer allocator.free(result);
 
-    // Should have emoji + AB + newline (not emoji + A + B with drift)
+    // Should have emoji + AB (not emoji + A + B with drift)
     // The emoji is UTF-8 encoded, so we just check we have content
     try testing.expect(result.len > 0);
     try testing.expect(std.mem.indexOf(u8, result, "AB") != null);
+}
+
+test "render: colored text with SGR sequences" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var vt = try ghostty.Terminal.init(allocator, 80, 24, 100);
+    defer vt.deinit(allocator);
+
+    // Set bold and write text
+    try vt.setAttribute(.{ .bold = {} });
+    try vt.print('B');
+    try vt.print('O');
+    try vt.print('L');
+    try vt.print('D');
+
+    // Reset and write normal text
+    try vt.setAttribute(.{ .reset = {} });
+    try vt.print(' ');
+    try vt.print('n');
+    try vt.print('o');
+    try vt.print('r');
+    try vt.print('m');
+
+    const result = try render(&vt, allocator);
+    defer allocator.free(result);
+
+    // Should contain bold SGR (ESC[1m) and text "BOLD"
+    try testing.expect(std.mem.indexOf(u8, result, "\x1b[1m") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "BOLD") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "norm") != null);
+}
+
+test "render: cursor position restoration" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var vt = try ghostty.Terminal.init(allocator, 80, 24, 100);
+    defer vt.deinit(allocator);
+
+    // Write some text and move cursor
+    try vt.print('T');
+    try vt.print('e');
+    try vt.print('s');
+    try vt.print('t');
+
+    const result = try render(&vt, allocator);
+    defer allocator.free(result);
+
+    // Should contain cursor positioning sequences
+    try testing.expect(std.mem.indexOf(u8, result, "\x1b[1;1H") != null); // First row positioning
+    try testing.expect(std.mem.indexOf(u8, result, "\x1b[?25h") != null); // Show cursor at end
+    try testing.expect(std.mem.indexOf(u8, result, "Test") != null);
 }
