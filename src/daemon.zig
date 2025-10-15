@@ -810,6 +810,9 @@ fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []con
             if (result < 0) {
                 return error.IoctlFailed;
             }
+
+            // Send in-band size report if mode 2048 is enabled
+            try sendInBandSizeReportIfEnabled(session, rows, cols);
         }
     } else if (!is_reattach and rows > 0 and cols > 0) {
         // New session: just resize normally
@@ -825,6 +828,9 @@ fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []con
         if (result < 0) {
             return error.IoctlFailed;
         }
+
+        // Send in-band size report if mode 2048 is enabled
+        try sendInBandSizeReportIfEnabled(session, rows, cols);
     }
 
     // Only start PTY reading if not already started
@@ -872,6 +878,22 @@ fn handlePtyInput(client: *Client, text: []const u8) !void {
     _ = written;
 }
 
+fn sendInBandSizeReportIfEnabled(session: *Session, rows: u16, cols: u16) !void {
+    // Check if in-band size reports mode (2048) is enabled
+    if (!session.vt.modes.get(.in_band_size_reports)) {
+        return;
+    }
+
+    // Format: CSI 48 ; height_chars ; width_chars ; height_pix ; width_pix t
+    // We don't track pixel sizes, so report 0 for pixels
+    var buf: [128]u8 = undefined;
+    const size_report = try std.fmt.bufPrint(&buf, "\x1b[48;{d};{d};0;0t", .{ rows, cols });
+
+    // Write directly to PTY master so app receives it
+    _ = try posix.write(session.pty_master_fd, size_report);
+    std.debug.print("Sent in-band size report: {s}\n", .{size_report});
+}
+
 fn handleWindowResize(client: *Client, rows: u16, cols: u16) !void {
     const session_name = client.attached_session orelse {
         std.debug.print("Client fd={d} not attached to any session\n", .{client.fd});
@@ -899,6 +921,9 @@ fn handleWindowResize(client: *Client, rows: u16, cols: u16) !void {
     if (result < 0) {
         return error.IoctlFailed;
     }
+
+    // Send in-band size report if mode 2048 is enabled
+    try sendInBandSizeReportIfEnabled(session, rows, cols);
 }
 
 fn readFromPty(ctx: *ServerContext, client: *Client, session: *Session) !void {
