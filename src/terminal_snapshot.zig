@@ -49,7 +49,13 @@ pub fn render(vt: *ghostty.Terminal, allocator: std.mem.Allocator) ![]u8 {
         const cells = page.getCells(row);
 
         // Extract text from each cell in the row
-        for (cells, 0..) |*cell, col_idx| {
+        var col_idx: usize = 0;
+        while (col_idx < cells.len) : (col_idx += 1) {
+            const cell = &cells[col_idx];
+
+            // Skip spacer cells (already handled by extractCellText, but we still need to skip the iteration)
+            if (cell.wide == .spacer_tail or cell.wide == .spacer_head) continue;
+
             // Create a pin for this specific cell to access graphemes
             const cell_pin = ghostty.Pin{
                 .node = pin.node,
@@ -58,6 +64,11 @@ pub fn render(vt: *ghostty.Terminal, allocator: std.mem.Allocator) ![]u8 {
             };
 
             try extractCellText(cell_pin, cell, &output, allocator);
+
+            // If this is a wide character, skip the next cell (spacer_tail)
+            if (cell.wide == .wide) {
+                col_idx += 1; // Skip the spacer cell that follows
+            }
         }
 
         // Add newline after each row
@@ -159,4 +170,26 @@ test "extractCellText: multi-codepoint grapheme (emoji)" {
 
     // Should have both codepoints encoded as UTF-8
     try testing.expect(buf.items.len > 4); // At least 2 multi-byte UTF-8 sequences
+}
+
+test "wide character handling: skip spacer cells" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var vt = try ghostty.Terminal.init(allocator, 80, 24, 100);
+    defer vt.deinit(allocator);
+
+    // Write wide character (emoji) followed by ASCII
+    try vt.print(0x1F44B); // 👋 (wide, takes 2 cells)
+    try vt.print('A');
+    try vt.print('B');
+
+    // Render the terminal
+    const result = try render(&vt, allocator);
+    defer allocator.free(result);
+
+    // Should have emoji + AB + newline (not emoji + A + B with drift)
+    // The emoji is UTF-8 encoded, so we just check we have content
+    try testing.expect(result.len > 0);
+    try testing.expect(std.mem.indexOf(u8, result, "AB") != null);
 }
