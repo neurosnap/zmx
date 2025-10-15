@@ -490,7 +490,11 @@ fn stdoutWriteCallback(
     const allocator = write_ctx.allocator;
 
     if (write_result) |_| {
-        // Successfully wrote to stdout
+        // Successfully wrote to stdout - flush to ensure immediate display
+        var buf: [0]u8 = undefined;
+        var stdout_file = std.fs.File{ .handle = posix.STDOUT_FILENO };
+        var writer = stdout_file.writer(&buf);
+        writer.interface.flush() catch {};
     } else |_| {
         // Silently ignore stdout write errors
     }
