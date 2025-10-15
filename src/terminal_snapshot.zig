@@ -1,5 +1,6 @@
 const std = @import("std");
 const ghostty = @import("ghostty-vt");
+const sgr = @import("sgr.zig");
 
 /// Extract UTF-8 text content from a cell, including multi-codepoint graphemes
 fn extractCellText(pin: ghostty.Pin, cell: *const ghostty.Cell, buf: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
@@ -62,6 +63,9 @@ pub fn render(vt: *ghostty.Terminal, allocator: std.mem.Allocator) ![]u8 {
         const page = &pin.node.data;
         const cells = page.getCells(row);
 
+        // Track style changes to emit SGR sequences
+        var last_style = ghostty.Style{}; // Start with default style
+
         // Extract text from each cell in the row
         var col_idx: usize = 0;
         while (col_idx < cells.len) : (col_idx += 1) {
@@ -77,12 +81,28 @@ pub fn render(vt: *ghostty.Terminal, allocator: std.mem.Allocator) ![]u8 {
                 .x = @intCast(col_idx),
             };
 
+            // Get the style for this cell
+            const cell_style = cell_pin.style(cell);
+
+            // If style changed, emit SGR sequence
+            if (!cell_style.eql(last_style)) {
+                const sgr_seq = try sgr.emitStyleChange(allocator, last_style, cell_style);
+                defer allocator.free(sgr_seq);
+                try output.appendSlice(allocator, sgr_seq);
+                last_style = cell_style;
+            }
+
             try extractCellText(cell_pin, cell, &output, allocator);
 
             // If this is a wide character, skip the next cell (spacer_tail)
             if (cell.wide == .wide) {
                 col_idx += 1; // Skip the spacer cell that follows
             }
+        }
+
+        // Reset style at end of row to avoid style bleeding
+        if (!last_style.default()) {
+            try output.appendSlice(allocator, "\x1b[0m");
         }
     }
 
@@ -117,12 +137,9 @@ pub fn render(vt: *ghostty.Terminal, allocator: std.mem.Allocator) ![]u8 {
             // If we found content, position cursor after the last character
             if (last_col > 0) {
                 cursor_col = @intCast(last_col + 2); // +1 for after character, +1 for 1-based
-                std.debug.print("Adjusted cursor from x=0 to col={d} (last content at col={d})\n", .{ cursor_col, last_col + 1 });
             }
         }
     }
-
-    std.debug.print("Restoring cursor to row={d} col={d} (original: y={d} x={d})\n", .{ cursor_row, cursor_col, cursor.y, cursor.x });
 
     try std.fmt.format(output.writer(allocator), "\x1b[{d};{d}H", .{ cursor_row, cursor_col });
 

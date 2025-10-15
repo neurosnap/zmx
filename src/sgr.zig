@@ -47,9 +47,9 @@ pub fn emitStyleChange(
     if (new_style.flags.faint != old_style.flags.faint) {
         try addSep(&buf, allocator, &first);
         if (new_style.flags.faint) {
-            try buf.append('2');
+            try buf.append(allocator, '2');
         } else {
-            try buf.appendSlice("22");
+            try buf.appendSlice(allocator, "22");
         }
     }
 
@@ -57,9 +57,9 @@ pub fn emitStyleChange(
     if (new_style.flags.italic != old_style.flags.italic) {
         try addSep(&buf, allocator, &first);
         if (new_style.flags.italic) {
-            try buf.append('3');
+            try buf.append(allocator, '3');
         } else {
-            try buf.appendSlice("23");
+            try buf.appendSlice(allocator, "23");
         }
     }
 
@@ -67,12 +67,12 @@ pub fn emitStyleChange(
     if (!std.meta.eql(new_style.flags.underline, old_style.flags.underline)) {
         try addSep(&buf, allocator, &first);
         switch (new_style.flags.underline) {
-            .none => try buf.appendSlice("24"),
-            .single => try buf.append('4'),
-            .double => try buf.appendSlice("21"),
-            .curly => try buf.appendSlice("4:3"),
-            .dotted => try buf.appendSlice("4:4"),
-            .dashed => try buf.appendSlice("4:5"),
+            .none => try buf.appendSlice(allocator, "24"),
+            .single => try buf.append(allocator, '4'),
+            .double => try buf.appendSlice(allocator, "21"),
+            .curly => try buf.appendSlice(allocator, "4:3"),
+            .dotted => try buf.appendSlice(allocator, "4:4"),
+            .dashed => try buf.appendSlice(allocator, "4:5"),
         }
     }
 
@@ -80,9 +80,9 @@ pub fn emitStyleChange(
     if (new_style.flags.blink != old_style.flags.blink) {
         try addSep(&buf, allocator, &first);
         if (new_style.flags.blink) {
-            try buf.append('5');
+            try buf.append(allocator, '5');
         } else {
-            try buf.appendSlice("25");
+            try buf.appendSlice(allocator, "25");
         }
     }
 
@@ -90,9 +90,9 @@ pub fn emitStyleChange(
     if (new_style.flags.inverse != old_style.flags.inverse) {
         try addSep(&buf, allocator, &first);
         if (new_style.flags.inverse) {
-            try buf.append('7');
+            try buf.append(allocator, '7');
         } else {
-            try buf.appendSlice("27");
+            try buf.appendSlice(allocator, "27");
         }
     }
 
@@ -100,9 +100,9 @@ pub fn emitStyleChange(
     if (new_style.flags.invisible != old_style.flags.invisible) {
         try addSep(&buf, allocator, &first);
         if (new_style.flags.invisible) {
-            try buf.append('8');
+            try buf.append(allocator, '8');
         } else {
-            try buf.appendSlice("28");
+            try buf.appendSlice(allocator, "28");
         }
     }
 
@@ -110,9 +110,9 @@ pub fn emitStyleChange(
     if (new_style.flags.strikethrough != old_style.flags.strikethrough) {
         try addSep(&buf, allocator, &first);
         if (new_style.flags.strikethrough) {
-            try buf.append('9');
+            try buf.append(allocator, '9');
         } else {
-            try buf.appendSlice("29");
+            try buf.appendSlice(allocator, "29");
         }
     }
 
@@ -120,14 +120,14 @@ pub fn emitStyleChange(
     if (!std.meta.eql(new_style.fg_color, old_style.fg_color)) {
         try addSep(&buf, allocator, &first);
         switch (new_style.fg_color) {
-            .none => try buf.appendSlice("39"),
+            .none => try buf.appendSlice(allocator, "39"),
             .palette => |idx| {
-                try buf.appendSlice("38;5;");
-                try buf.writer().print("{d}", .{idx});
+                try buf.appendSlice(allocator, "38;5;");
+                try std.fmt.format(buf.writer(allocator), "{d}", .{idx});
             },
             .rgb => |rgb| {
-                try buf.appendSlice("38;2;");
-                try buf.writer().print("{d};{d};{d}", .{ rgb.r, rgb.g, rgb.b });
+                try buf.appendSlice(allocator, "38;2;");
+                try std.fmt.format(buf.writer(allocator), "{d};{d};{d}", .{ rgb.r, rgb.g, rgb.b });
             },
         }
     }
@@ -136,14 +136,14 @@ pub fn emitStyleChange(
     if (!std.meta.eql(new_style.bg_color, old_style.bg_color)) {
         try addSep(&buf, allocator, &first);
         switch (new_style.bg_color) {
-            .none => try buf.appendSlice("49"),
+            .none => try buf.appendSlice(allocator, "49"),
             .palette => |idx| {
-                try buf.appendSlice("48;5;");
-                try buf.writer().print("{d}", .{idx});
+                try buf.appendSlice(allocator, "48;5;");
+                try std.fmt.format(buf.writer(allocator), "{d}", .{idx});
             },
             .rgb => |rgb| {
-                try buf.appendSlice("48;2;");
-                try buf.writer().print("{d};{d};{d}", .{ rgb.r, rgb.g, rgb.b });
+                try buf.appendSlice(allocator, "48;2;");
+                try std.fmt.format(buf.writer(allocator), "{d};{d};{d}", .{ rgb.r, rgb.g, rgb.b });
             },
         }
     }
@@ -152,29 +152,29 @@ pub fn emitStyleChange(
     if (!std.meta.eql(new_style.underline_color, old_style.underline_color)) {
         try addSep(&buf, allocator, &first);
         switch (new_style.underline_color) {
-            .none => try buf.appendSlice("59"),
+            .none => try buf.appendSlice(allocator, "59"),
             .palette => |idx| {
-                try buf.appendSlice("58;5;");
-                try buf.writer().print("{d}", .{idx});
+                try buf.appendSlice(allocator, "58;5;");
+                try std.fmt.format(buf.writer(allocator), "{d}", .{idx});
             },
             .rgb => |rgb| {
-                try buf.appendSlice("58;2;");
-                try buf.writer().print("{d};{d};{d}", .{ rgb.r, rgb.g, rgb.b });
+                try buf.appendSlice(allocator, "58;2;");
+                try std.fmt.format(buf.writer(allocator), "{d};{d};{d}", .{ rgb.r, rgb.g, rgb.b });
             },
         }
     }
 
     // End escape sequence
-    try buf.append('m');
+    try buf.append(allocator, 'm');
 
     // If we only added the escape opener and closer with nothing in between,
     // return empty string (no change needed)
     if (first) {
-        buf.deinit();
+        buf.deinit(allocator);
         return allocator.dupe(u8, "");
     }
 
-    return buf.toOwnedSlice();
+    return buf.toOwnedSlice(allocator);
 }
 
 test "emitStyleChange: default to default" {
