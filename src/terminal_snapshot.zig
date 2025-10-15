@@ -27,11 +27,18 @@ fn extractCellText(pin: ghostty.Pin, cell: *const ghostty.Cell, buf: *std.ArrayL
     }
 }
 
-/// Render the current terminal viewport state as text (with escape sequences to come)
+/// Render the current terminal viewport state as text with proper escape sequences
 /// Returns owned slice that must be freed by caller
 pub fn render(vt: *ghostty.Terminal, allocator: std.mem.Allocator) ![]u8 {
     var output = try std.ArrayList(u8).initCapacity(allocator, 4096);
     errdefer output.deinit(allocator);
+
+    // Prepare terminal: hide cursor, reset scroll region, reset SGR, clear screen, home cursor
+    try output.appendSlice(allocator, "\x1b[?25l"); // Hide cursor
+    try output.appendSlice(allocator, "\x1b[r"); // Reset scroll region
+    try output.appendSlice(allocator, "\x1b[0m"); // Reset SGR (colors/styles)
+    try output.appendSlice(allocator, "\x1b[2J"); // Clear entire screen
+    try output.appendSlice(allocator, "\x1b[H"); // Home cursor (1,1)
 
     // Get the terminal's page list
     const pages = &vt.screen.pages;
@@ -42,6 +49,13 @@ pub fn render(vt: *ghostty.Terminal, allocator: std.mem.Allocator) ![]u8 {
     // Iterate through viewport rows
     var row_idx: usize = 0;
     while (row_it.next()) |pin| : (row_idx += 1) {
+        // Position cursor at the start of this row (1-based indexing)
+        const row_num = row_idx + 1;
+        try std.fmt.format(output.writer(allocator), "\x1b[{d};1H", .{row_num});
+
+        // Clear the entire line to avoid stale content
+        try output.appendSlice(allocator, "\x1b[2K");
+
         // Get row and cell data from pin
         const rac = pin.rowAndCell();
         const row = rac.row;
@@ -70,14 +84,50 @@ pub fn render(vt: *ghostty.Terminal, allocator: std.mem.Allocator) ![]u8 {
                 col_idx += 1; // Skip the spacer cell that follows
             }
         }
-
-        // Add newline after each row
-        try output.appendSlice(allocator, "\n");
     }
 
-    // TODO: Properly restore scrollback with colors and cursor position
-    // For now, just return the text content
-    // try output.appendSlice(allocator, "\x1b[2J\x1b[H"); // Clear screen and home cursor
+    // Restore cursor position from terminal state
+    const cursor = vt.screen.cursor;
+    const cursor_row = cursor.y + 1; // Convert to 1-based
+    var cursor_col: u16 = @intCast(cursor.x + 1); // Convert to 1-based
+
+    // If cursor is at x=0, try to find the actual end of content on that row
+    // This handles race conditions where the cursor position wasn't updated yet
+    if (cursor.x == 0) {
+        const cursor_pin = pages.pin(.{ .active = .{ .x = 0, .y = cursor.y } });
+        if (cursor_pin) |cpin| {
+            const crac = cpin.rowAndCell();
+            const crow = crac.row;
+            const cpage = &cpin.node.data;
+            const ccells = cpage.getCells(crow);
+
+            // Find the last non-empty cell (including spaces)
+            var last_col: usize = 0;
+            var col: usize = 0;
+            while (col < ccells.len) : (col += 1) {
+                const cell = &ccells[col];
+                if (cell.wide == .spacer_tail or cell.wide == .spacer_head) continue;
+                const cp = cell.codepoint();
+                if (cp != 0) { // Include spaces, just not null
+                    last_col = col;
+                }
+                if (cell.wide == .wide) col += 1;
+            }
+
+            // If we found content, position cursor after the last character
+            if (last_col > 0) {
+                cursor_col = @intCast(last_col + 2); // +1 for after character, +1 for 1-based
+                std.debug.print("Adjusted cursor from x=0 to col={d} (last content at col={d})\n", .{ cursor_col, last_col + 1 });
+            }
+        }
+    }
+
+    std.debug.print("Restoring cursor to row={d} col={d} (original: y={d} x={d})\n", .{ cursor_row, cursor_col, cursor.y, cursor.x });
+
+    try std.fmt.format(output.writer(allocator), "\x1b[{d};{d}H", .{ cursor_row, cursor_col });
+
+    // Show cursor
+    try output.appendSlice(allocator, "\x1b[?25h");
 
     return output.toOwnedSlice(allocator);
 }
