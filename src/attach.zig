@@ -328,13 +328,15 @@ fn readCallback(
 
                 if (std.mem.eql(u8, parsed.value.payload.status, "ok")) {
                     cleanupClientFdFile(ctx);
-                    _ = posix.write(posix.STDERR_FILENO, "\r\nDetached from session\r\n") catch {};
+                    writeDetachCleanup();
+                    _ = posix.write(posix.STDERR_FILENO, "Detached from session\r\n") catch {};
                     return cleanup(ctx, completion);
                 }
             },
             .detach_notification => {
                 cleanupClientFdFile(ctx);
-                _ = posix.write(posix.STDERR_FILENO, "\r\nDetached from session (external request)\r\n") catch {};
+                writeDetachCleanup();
+                _ = posix.write(posix.STDERR_FILENO, "Detached from session (external request)\r\n") catch {};
                 return cleanup(ctx, completion);
             },
             .kill_notification => {
@@ -398,6 +400,15 @@ fn cleanupClientFdFile(ctx: *Context) void {
     defer ctx.allocator.free(client_fd_path);
 
     std.fs.cwd().deleteFile(client_fd_path) catch {};
+}
+
+fn writeDetachCleanup() void {
+    // Clear screen artifacts before showing detach message:
+    // \x1b[2J - Clear entire screen
+    // \x1b[H  - Move cursor to home position (1,1)
+    // \x1b[?25h - Show cursor
+    // \x1b[0m - Reset all text attributes (colors, styles)
+    _ = posix.write(posix.STDERR_FILENO, "\x1b[2J\x1b[H\x1b[?25h\x1b[0m") catch {};
 }
 
 fn sendDetachRequest(ctx: *Context) void {
