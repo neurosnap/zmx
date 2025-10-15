@@ -799,38 +799,11 @@ fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []con
         client.muted = false;
 
         // Now send TIOCSWINSZ to trigger app (vim) redraw - client will receive it
-        if (rows > 0 and cols > 0) {
-            var ws = c.struct_winsize{
-                .ws_row = rows,
-                .ws_col = cols,
-                .ws_xpixel = 0,
-                .ws_ypixel = 0,
-            };
-            const result = c.ioctl(session.pty_master_fd, c.TIOCSWINSZ, &ws);
-            if (result < 0) {
-                return error.IoctlFailed;
-            }
-
-            // Send in-band size report if mode 2048 is enabled
-            try sendInBandSizeReportIfEnabled(session, rows, cols);
-        }
+        try applyWinsize(session, rows, cols);
     } else if (!is_reattach and rows > 0 and cols > 0) {
         // New session: just resize normally
         try session.vt.resize(session.allocator, cols, rows);
-
-        var ws = c.struct_winsize{
-            .ws_row = rows,
-            .ws_col = cols,
-            .ws_xpixel = 0,
-            .ws_ypixel = 0,
-        };
-        const result = c.ioctl(session.pty_master_fd, c.TIOCSWINSZ, &ws);
-        if (result < 0) {
-            return error.IoctlFailed;
-        }
-
-        // Send in-band size report if mode 2048 is enabled
-        try sendInBandSizeReportIfEnabled(session, rows, cols);
+        try applyWinsize(session, rows, cols);
     }
 
     // Only start PTY reading if not already started
@@ -878,6 +851,23 @@ fn handlePtyInput(client: *Client, text: []const u8) !void {
     _ = written;
 }
 
+fn applyWinsize(session: *Session, rows: u16, cols: u16) !void {
+    if (rows == 0 or cols == 0) return;
+
+    var ws = c.struct_winsize{
+        .ws_row = rows,
+        .ws_col = cols,
+        .ws_xpixel = 0,
+        .ws_ypixel = 0,
+    };
+    const result = c.ioctl(session.pty_master_fd, c.TIOCSWINSZ, &ws);
+    if (result < 0) {
+        return error.IoctlFailed;
+    }
+
+    try sendInBandSizeReportIfEnabled(session, rows, cols);
+}
+
 fn sendInBandSizeReportIfEnabled(session: *Session, rows: u16, cols: u16) !void {
     // Check if in-band size reports mode (2048) is enabled
     if (!session.vt.modes.get(.in_band_size_reports)) {
@@ -910,20 +900,8 @@ fn handleWindowResize(client: *Client, rows: u16, cols: u16) !void {
     // Update libghostty-vt terminal size
     try session.vt.resize(session.allocator, cols, rows);
 
-    // Update PTY window size
-    var ws = c.struct_winsize{
-        .ws_row = rows,
-        .ws_col = cols,
-        .ws_xpixel = 0,
-        .ws_ypixel = 0,
-    };
-    const result = c.ioctl(session.pty_master_fd, c.TIOCSWINSZ, &ws);
-    if (result < 0) {
-        return error.IoctlFailed;
-    }
-
-    // Send in-band size report if mode 2048 is enabled
-    try sendInBandSizeReportIfEnabled(session, rows, cols);
+    // Update PTY window size and send notifications
+    try applyWinsize(session, rows, cols);
 }
 
 fn readFromPty(ctx: *ServerContext, client: *Client, session: *Session) !void {
