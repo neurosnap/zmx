@@ -8,6 +8,7 @@ const protocol = @import("protocol.zig");
 const builtin = @import("builtin");
 
 const ghostty = @import("ghostty-vt");
+const sgr = @import("sgr.zig");
 
 const c = switch (builtin.os.tag) {
     .macos => @cImport({
@@ -888,14 +889,57 @@ fn renderTerminalSnapshot(session: *Session, allocator: std.mem.Allocator) ![]u8
     var output = try std.ArrayList(u8).initCapacity(allocator, 4096);
     errdefer output.deinit(allocator);
 
-    _ = session;
+    // Get the terminal's page list
+    const pages = &session.vt.screen.pages;
 
-    // Clear screen when reattaching - let shell repaint naturally
-    // TODO: Properly restore scrollback once we figure out why ghostty-vt
-    // buffer contains corrupted escape sequence remnants
+    // Create row iterator for active viewport
+    var row_it = pages.rowIterator(.right_down, .{ .active = .{} }, null);
+
+    // Iterate through viewport rows
+    var row_idx: usize = 0;
+    while (row_it.next()) |pin| : (row_idx += 1) {
+        // Get row and cell data from pin
+        const rac = pin.rowAndCell();
+        const row = rac.row;
+        const page = &pin.node.data;
+        const cells = page.getCells(row);
+
+        // TODO: Process cells for this row (row_idx available for positioning)
+        _ = cells;
+    }
+
+    // TODO: Properly restore scrollback
     try output.appendSlice(allocator, "\x1b[2J\x1b[H"); // Clear screen and home cursor
 
     return output.toOwnedSlice(allocator);
+}
+
+test "renderTerminalSnapshot: rowIterator viewport iteration" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    // Create a simple terminal
+    var vt = try ghostty.Terminal.init(allocator, 80, 24, 100);
+    defer vt.deinit(allocator);
+
+    // Write some content
+    try vt.print('H');
+    try vt.print('e');
+    try vt.print('l');
+    try vt.print('l');
+    try vt.print('o');
+
+    // Test that we can iterate through viewport using rowIterator
+    const pages = &vt.screen.pages;
+    var row_it = pages.rowIterator(.right_down, .{ .active = .{} }, null);
+
+    var row_count: usize = 0;
+    while (row_it.next()) |pin| : (row_count += 1) {
+        const rac = pin.rowAndCell();
+        _ = rac; // Just verify we can access row and cell
+    }
+
+    try testing.expectEqual(pages.rows, row_count);
 }
 
 fn notifyAttachedClientsAndCleanup(session: *Session, ctx: *ServerContext, reason: []const u8) void {
