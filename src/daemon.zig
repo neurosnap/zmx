@@ -265,6 +265,9 @@ const Client = struct {
     attached_session: ?[]const u8,
     server_ctx: *ServerContext,
     message_buffer: std.ArrayList(u8),
+    /// Gate for preventing live PTY output during snapshot send
+    /// When true, this client will not receive live PTY frames
+    muted: bool = false,
 };
 
 // Main daemon server state that manages the event loop, Unix socket server,
@@ -778,10 +781,31 @@ fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []con
 
     // Mark client as attached
     client.attached_session = session.name;
+
+    // Mute client before adding to attached_clients to prevent PTY interleaving during snapshot
+    if (is_reattach) {
+        client.muted = true;
+    }
+
     try session.attached_clients.put(client.fd, {});
 
     // Start reading from PTY if not already started (first client)
-    if (session.attached_clients.count() == 1) {
+    const is_first_client = session.attached_clients.count() == 1;
+
+    // For reattaching clients, send snapshot BEFORE starting PTY reads to prevent interleaving
+    if (is_reattach) {
+        const buffer_slice = try terminal_snapshot.render(&session.vt, client.allocator);
+        defer client.allocator.free(buffer_slice);
+
+        try protocol.writeBinaryFrame(client.fd, .pty_binary, buffer_slice);
+        std.debug.print("Sent scrollback buffer to client fd={d} ({d} bytes)\n", .{ client.fd, buffer_slice.len });
+
+        // Unmute client now that snapshot is sent
+        client.muted = false;
+    }
+
+    if (is_first_client) {
+        // Start PTY reads AFTER snapshot is sent
         try readFromPty(ctx, client, session);
 
         // For first attach to new session, clear the client's terminal
@@ -794,15 +818,6 @@ fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []con
             .status = "ok",
             .client_fd = client.fd,
         });
-    }
-
-    // If reattaching, send the scrollback buffer as binary frame
-    if (is_reattach) {
-        const buffer_slice = try terminal_snapshot.render(&session.vt, client.allocator);
-        defer client.allocator.free(buffer_slice);
-
-        try protocol.writeBinaryFrame(client.fd, .pty_binary, buffer_slice);
-        std.debug.print("Sent scrollback buffer to client fd={d} ({d} bytes)\n", .{ client.fd, buffer_slice.len });
     }
 }
 
@@ -989,10 +1004,12 @@ fn readPtyCallback(
             frame_buf.appendSlice(session.allocator, header_bytes) catch return .disarm;
             frame_buf.appendSlice(session.allocator, data) catch return .disarm;
 
-            // Send to all attached clients using async write
+            // Send to all attached clients using async write (skip muted clients)
             var it = session.attached_clients.keyIterator();
             while (it.next()) |client_fd| {
                 const attached_client = ctx.clients.get(client_fd.*) orelse continue;
+                // Skip muted clients (during snapshot send)
+                if (attached_client.muted) continue;
                 const owned_frame = session.allocator.dupe(u8, frame_buf.items) catch continue;
 
                 const write_ctx = session.allocator.create(PtyWriteContext) catch {

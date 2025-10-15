@@ -57,14 +57,25 @@ pub fn render(vt: *ghostty.Terminal, allocator: std.mem.Allocator) ![]u8 {
     var output = try std.ArrayList(u8).initCapacity(allocator, 4096);
     errdefer output.deinit(allocator);
 
-    // Prepare terminal: hide cursor, reset scroll region, reset SGR, clear screen, home cursor
+    // Check if we're on alternate screen (vim, less, etc.)
+    const is_alt_screen = vt.active_screen == .alternate;
+
+    // Prepare terminal: hide cursor, reset scroll region, reset SGR
     try output.appendSlice(allocator, "\x1b[?25l"); // Hide cursor
     try output.appendSlice(allocator, "\x1b[r"); // Reset scroll region
     try output.appendSlice(allocator, "\x1b[0m"); // Reset SGR (colors/styles)
-    try output.appendSlice(allocator, "\x1b[2J"); // Clear entire screen
-    try output.appendSlice(allocator, "\x1b[H"); // Home cursor (1,1)
 
-    // Get the terminal's page list
+    // If alternate screen, switch to it before rendering
+    if (is_alt_screen) {
+        try output.appendSlice(allocator, "\x1b[?1049h"); // Enter alt screen (save cursor, switch, clear)
+        try output.appendSlice(allocator, "\x1b[2J"); // Clear alt screen explicitly
+        try output.appendSlice(allocator, "\x1b[H"); // Home cursor
+    } else {
+        try output.appendSlice(allocator, "\x1b[2J"); // Clear entire screen
+        try output.appendSlice(allocator, "\x1b[H"); // Home cursor (1,1)
+    }
+
+    // Get the terminal's page list (for active screen)
     const pages = &vt.screen.pages;
 
     // Create row iterator for active viewport
@@ -164,7 +175,56 @@ pub fn render(vt: *ghostty.Terminal, allocator: std.mem.Allocator) ![]u8 {
         }
     }
 
-    try std.fmt.format(output.writer(allocator), "\x1b[{d};{d}H", .{ cursor_row, cursor_col });
+    // Restore scroll margins from terminal state (critical for vim scrolling)
+    const scroll = vt.scrolling_region;
+    const is_full_tb = (scroll.top == 0 and scroll.bottom == vt.rows - 1);
+
+    if (!is_full_tb) {
+        // Restore top/bottom margins
+        const top = scroll.top + 1; // Convert to 1-based
+        const bottom = scroll.bottom + 1; // Convert to 1-based
+        try std.fmt.format(output.writer(allocator), "\x1b[{d};{d}r", .{ top, bottom });
+    }
+
+    // Restore terminal modes (critical for vim and other apps)
+    // These modes affect cursor positioning, scrolling, and input behavior
+
+    // Origin mode (?6 / DECOM): cursor positioning relative to margins
+    const origin = vt.modes.get(.origin);
+    if (origin) {
+        try output.appendSlice(allocator, "\x1b[?6h");
+    }
+
+    // Wraparound mode (?7 / DECAWM): automatic line wrapping
+    const wrap = vt.modes.get(.wraparound);
+    if (!wrap) { // Default is true, so only emit if disabled
+        try output.appendSlice(allocator, "\x1b[?7l");
+    }
+
+    // Reverse wraparound (?45): bidirectional wrapping
+    const reverse_wrap = vt.modes.get(.reverse_wrap);
+    if (reverse_wrap) {
+        try output.appendSlice(allocator, "\x1b[?45h");
+    }
+
+    // Bracketed paste (?2004): paste detection
+    const bracketed = vt.modes.get(.bracketed_paste);
+    if (bracketed) {
+        try output.appendSlice(allocator, "\x1b[?2004h");
+    }
+
+    // TODO: Restore left/right margins if enabled (need to check modes for left_right_margins)
+
+    // Compute cursor position (may be relative to scroll margins if origin mode is on)
+    var final_cursor_row = cursor_row;
+    const final_cursor_col = cursor_col;
+
+    // If origin mode is on, cursor is relative to the top margin
+    if (origin and !is_full_tb) {
+        final_cursor_row = cursor_row - scroll.top;
+    }
+
+    try std.fmt.format(output.writer(allocator), "\x1b[{d};{d}H", .{ final_cursor_row, final_cursor_col });
 
     // Show cursor
     try output.appendSlice(allocator, "\x1b[?25h");
@@ -335,4 +395,27 @@ test "render: cursor position restoration" {
     try testing.expect(std.mem.indexOf(u8, result, "\x1b[1;1H") != null); // First row positioning
     try testing.expect(std.mem.indexOf(u8, result, "\x1b[?25h") != null); // Show cursor at end
     try testing.expect(std.mem.indexOf(u8, result, "Test") != null);
+}
+
+test "render: alternate screen detection" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var vt = try ghostty.Terminal.init(allocator, 80, 24, 100);
+    defer vt.deinit(allocator);
+
+    // Switch to alternate screen
+    _ = vt.switchScreen(.alternate);
+
+    // Write content to alt screen
+    try vt.print('V');
+    try vt.print('I');
+    try vt.print('M');
+
+    const result = try render(&vt, allocator);
+    defer allocator.free(result);
+
+    // Should contain alt screen switch sequence
+    try testing.expect(std.mem.indexOf(u8, result, "\x1b[?1049h") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "VIM") != null);
 }
