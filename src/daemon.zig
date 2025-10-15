@@ -888,115 +888,12 @@ fn renderTerminalSnapshot(session: *Session, allocator: std.mem.Allocator) ![]u8
     var output = try std.ArrayList(u8).initCapacity(allocator, 4096);
     errdefer output.deinit(allocator);
 
-    const vt = &session.vt;
-    const screen = &session.vt.screen;
-    const scroll_region = &vt.scrolling_region;
+    _ = session;
 
-    // Debug: Print all enabled modes
-    std.debug.print("Terminal modes for session {s}:\n", .{session.name});
-    inline for (@typeInfo(ghostty.Mode).@"enum".fields) |field| {
-        const mode: ghostty.Mode = @field(ghostty.Mode, field.name);
-        const value = vt.modes.get(mode);
-        const tag: ghostty.modes.ModeTag = @bitCast(@as(ghostty.modes.ModeTag.Backing, field.value));
-        const mode_default = @field(vt.modes.default, field.name);
-
-        if (value != mode_default) {
-            std.debug.print("  {s}{d} {s} = {}\n", .{
-                if (tag.ansi) "" else "?",
-                tag.value,
-                field.name,
-                value,
-            });
-        }
-    }
-
-    // Step 1: Neutralize constraints for predictable snapshot printing
-    try output.appendSlice(allocator, "\x1b[?69l"); // Disable left/right margins
-    try output.appendSlice(allocator, "\x1b[r"); // Reset scroll region to full screen
-    try output.appendSlice(allocator, "\x1b[?6l"); // Disable origin mode temporarily
-    try output.appendSlice(allocator, "\x1b[2J\x1b[H"); // Clear and home
-
-    // Step 2: Print terminal content with CRLF translation
-    // In raw mode (no ONLCR), we need explicit CR with each LF
-    const content = try session.vt.plainStringUnwrapped(allocator);
-    defer allocator.free(content);
-    var prev: u8 = 0;
-    for (content) |b| {
-        if (b == '\n' and prev != '\r') {
-            try output.append(allocator, '\r');
-            try output.append(allocator, '\n');
-        } else {
-            try output.append(allocator, b);
-        }
-        prev = b;
-    }
-
-    // Step 3: Restore scroll regions (if non-default)
-    const default_top: u16 = 0;
-    const default_bottom: u16 = vt.rows - 1;
-    const default_left: u16 = 0;
-    const default_right: u16 = vt.cols - 1;
-
-    if (scroll_region.top != default_top or scroll_region.bottom != default_bottom) {
-        // DECSTBM - set top/bottom margins (1-based)
-        try output.writer(allocator).print("\x1b[{d};{d}r", .{
-            scroll_region.top + 1,
-            scroll_region.bottom + 1,
-        });
-    }
-
-    if (scroll_region.left != default_left or scroll_region.right != default_right) {
-        // Enable LRMM first, then set left/right margins (1-based)
-        try output.appendSlice(allocator, "\x1b[?69h"); // Enable left/right margin mode
-        try output.writer(allocator).print("\x1b[{d};{d}s", .{
-            scroll_region.left + 1,
-            scroll_region.right + 1,
-        });
-    }
-
-    // Step 4: Restore terminal modes (except origin, which we do later)
-    inline for (@typeInfo(ghostty.Mode).@"enum".fields) |field| {
-        @setEvalBranchQuota(6000);
-        const mode: ghostty.Mode = @field(ghostty.Mode, field.name);
-
-        // Skip origin mode - we'll restore it after cursor positioning
-        if (mode == .origin) continue;
-
-        const value = vt.modes.get(mode);
-        const tag: ghostty.modes.ModeTag = @bitCast(@as(ghostty.modes.ModeTag.Backing, field.value));
-        const mode_default = @field(vt.modes.default, field.name);
-
-        // Only send escape sequences for modes that differ from their defaults
-        if (value != mode_default) {
-            const suffix: u8 = if (value) 'h' else 'l';
-            if (tag.ansi) {
-                // ANSI mode: CSI <n> h/l
-                try output.writer(allocator).print("\x1b[{d}{c}", .{ tag.value, suffix });
-            } else {
-                // DEC mode: CSI ? <n> h/l
-                try output.writer(allocator).print("\x1b[?{d}{c}", .{ tag.value, suffix });
-            }
-        }
-    }
-
-    // Step 5: Restore origin mode if it was enabled
-    const origin_mode = vt.modes.get(.origin);
-    if (origin_mode) {
-        try output.appendSlice(allocator, "\x1b[?6h");
-    }
-
-    // Step 6: Position cursor (origin-aware, 1-based)
-    const cursor = screen.cursor;
-    const cursor_row: u16 = if (origin_mode)
-        (cursor.y -| scroll_region.top) + 1
-    else
-        cursor.y + 1;
-    const cursor_col: u16 = if (origin_mode)
-        (cursor.x -| scroll_region.left) + 1
-    else
-        cursor.x + 1;
-
-    try output.writer(allocator).print("\x1b[{d};{d}H", .{ cursor_row, cursor_col });
+    // Clear screen when reattaching - let shell repaint naturally
+    // TODO: Properly restore scrollback once we figure out why ghostty-vt
+    // buffer contains corrupted escape sequence remnants
+    try output.appendSlice(allocator, "\x1b[2J\x1b[H"); // Clear screen and home cursor
 
     return output.toOwnedSlice(allocator);
 }
