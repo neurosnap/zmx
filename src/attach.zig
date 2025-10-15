@@ -203,6 +203,7 @@ fn readCallback(
         const data = read_buffer.slice[0..len];
 
         // Check if this is a binary frame (starts with FrameHeader)
+        var remaining_data = data;
         if (data.len >= @sizeOf(protocol.FrameHeader)) {
             const potential_header = data[0..@sizeOf(protocol.FrameHeader)];
             const header: *const protocol.FrameHeader = @ptrCast(@alignCast(potential_header));
@@ -214,7 +215,14 @@ fn readCallback(
                     // We have the complete frame
                     const payload = data[@sizeOf(protocol.FrameHeader)..expected_total];
                     writeToStdout(ctx, payload);
-                    return .rearm;
+
+                    // Check if there's more data after this frame (e.g., JSON response)
+                    if (data.len > expected_total) {
+                        remaining_data = data[expected_total..];
+                        // Continue processing remaining data as JSON below
+                    } else {
+                        return .rearm;
+                    }
                 } else {
                     // Partial frame, buffer it
                     ctx.frame_buffer.appendSlice(ctx.allocator, data) catch {};
@@ -243,11 +251,11 @@ fn readCallback(
         }
 
         // Otherwise parse as JSON control message
-        const newline_idx = std.mem.indexOf(u8, data, "\n") orelse {
+        const newline_idx = std.mem.indexOf(u8, remaining_data, "\n") orelse {
             return .rearm;
         };
 
-        const msg_line = data[0..newline_idx];
+        const msg_line = remaining_data[0..newline_idx];
 
         const msg_type_parsed = protocol.parseMessageType(ctx.allocator, msg_line) catch |err| {
             std.debug.print("JSON parse error: {s}\r\n", .{@errorName(err)});
@@ -262,13 +270,17 @@ fn readCallback(
 
         switch (msg_type) {
             .attach_session_response => {
+                std.debug.print("Received attach_session_response\r\n", .{});
                 const parsed = protocol.parseMessage(protocol.AttachSessionResponse, ctx.allocator, msg_line) catch |err| {
                     std.debug.print("Failed to parse attach response: {s}\r\n", .{@errorName(err)});
+                    std.debug.print("Message line: {s}\r\n", .{msg_line});
                     return .rearm;
                 };
                 defer parsed.deinit();
 
+                std.debug.print("Parsed response: status={s}, client_fd={?d}\r\n", .{ parsed.value.payload.status, parsed.value.payload.client_fd });
                 if (std.mem.eql(u8, parsed.value.payload.status, "ok")) {
+                    std.debug.print("Status is OK, processing...\r\n", .{});
                     const client_fd = parsed.value.payload.client_fd orelse {
                         std.debug.print("Missing client_fd in response\r\n", .{});
                         return .rearm;
@@ -347,6 +359,12 @@ fn readCallback(
 }
 
 fn startStdinReading(ctx: *Context) void {
+    // Don't start if already reading
+    if (ctx.stdin_completion != null) {
+        std.debug.print("Stdin reading already started, skipping\r\n", .{});
+        return;
+    }
+
     const stdin_ctx = ctx.allocator.create(StdinContext) catch @panic("failed to create stdin context");
     stdin_ctx.* = .{
         .ctx = ctx,
@@ -359,6 +377,7 @@ fn startStdinReading(ctx: *Context) void {
     ctx.stdin_completion = stdin_completion;
     ctx.stdin_ctx = stdin_ctx;
 
+    std.debug.print("Starting stdin reading\r\n", .{});
     ctx.stdin_stream.read(ctx.loop, stdin_completion, .{ .slice = &stdin_ctx.buffer }, StdinContext, stdin_ctx, stdinReadCallback);
 }
 

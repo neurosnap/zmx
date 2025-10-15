@@ -245,6 +245,7 @@ const Session = struct {
     vt_stream: ghostty.Stream(*VTHandler),
     vt_handler: VTHandler,
     attached_clients: std.AutoHashMap(std.posix.fd_t, void),
+    pty_reading: bool = false, // Track if PTY reads are active
 
     fn deinit(self: *Session) void {
         self.allocator.free(self.name);
@@ -762,9 +763,56 @@ fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []con
         break :blk new_session;
     };
 
-    // Update libghostty-vt terminal size and PTY window size
-    // Only resize if we have valid dimensions
-    if (rows > 0 and cols > 0) {
+    // Mark client as attached
+    client.attached_session = session.name;
+
+    // Mute client before adding to attached_clients to prevent PTY interleaving during snapshot
+    if (is_reattach) {
+        client.muted = true;
+    }
+
+    try session.attached_clients.put(client.fd, {});
+
+    // Start reading from PTY if not already started (first client)
+    const is_first_client = session.attached_clients.count() == 1;
+    std.debug.print("is_reattach={}, is_first_client={}, attached_clients.count={}\n", .{ is_reattach, is_first_client, session.attached_clients.count() });
+
+    // For reattaching clients, resize VT BEFORE snapshot so snapshot matches client size
+    // But defer TIOCSWINSZ until after snapshot to prevent SIGWINCH during send
+    if (is_reattach) {
+        if (rows > 0 and cols > 0) {
+            // Only resize VT if geometry changed
+            if (session.vt.cols != cols or session.vt.rows != rows) {
+                try session.vt.resize(session.allocator, cols, rows);
+                std.debug.print("Resized VT to {d}x{d} before snapshot\n", .{ cols, rows });
+            }
+        }
+
+        // Render snapshot at correct client size
+        const buffer_slice = try terminal_snapshot.render(&session.vt, client.allocator);
+        defer client.allocator.free(buffer_slice);
+
+        try protocol.writeBinaryFrame(client.fd, .pty_binary, buffer_slice);
+        std.debug.print("Sent scrollback buffer to client fd={d} ({d} bytes)\n", .{ client.fd, buffer_slice.len });
+
+        // Unmute client before TIOCSWINSZ so client can receive the redraw
+        client.muted = false;
+
+        // Now send TIOCSWINSZ to trigger app (vim) redraw - client will receive it
+        if (rows > 0 and cols > 0) {
+            var ws = c.struct_winsize{
+                .ws_row = rows,
+                .ws_col = cols,
+                .ws_xpixel = 0,
+                .ws_ypixel = 0,
+            };
+            const result = c.ioctl(session.pty_master_fd, c.TIOCSWINSZ, &ws);
+            if (result < 0) {
+                return error.IoctlFailed;
+            }
+        }
+    } else if (!is_reattach and rows > 0 and cols > 0) {
+        // New session: just resize normally
         try session.vt.resize(session.allocator, cols, rows);
 
         var ws = c.struct_winsize{
@@ -779,33 +827,11 @@ fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []con
         }
     }
 
-    // Mark client as attached
-    client.attached_session = session.name;
-
-    // Mute client before adding to attached_clients to prevent PTY interleaving during snapshot
-    if (is_reattach) {
-        client.muted = true;
-    }
-
-    try session.attached_clients.put(client.fd, {});
-
-    // Start reading from PTY if not already started (first client)
-    const is_first_client = session.attached_clients.count() == 1;
-
-    // For reattaching clients, send snapshot BEFORE starting PTY reads to prevent interleaving
-    if (is_reattach) {
-        const buffer_slice = try terminal_snapshot.render(&session.vt, client.allocator);
-        defer client.allocator.free(buffer_slice);
-
-        try protocol.writeBinaryFrame(client.fd, .pty_binary, buffer_slice);
-        std.debug.print("Sent scrollback buffer to client fd={d} ({d} bytes)\n", .{ client.fd, buffer_slice.len });
-
-        // Unmute client now that snapshot is sent
-        client.muted = false;
-    }
-
-    if (is_first_client) {
-        // Start PTY reads AFTER snapshot is sent
+    // Only start PTY reading if not already started
+    if (!session.pty_reading) {
+        session.pty_reading = true;
+        std.debug.print("Starting PTY reads for session {s}\n", .{session.name});
+        // Start PTY reads AFTER snapshot is sent (readFromPty sends attach response)
         try readFromPty(ctx, client, session);
 
         // For first attach to new session, clear the client's terminal
@@ -813,11 +839,15 @@ fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []con
             try protocol.writeBinaryFrame(client.fd, .pty_binary, "\x1b[2J\x1b[H");
         }
     } else {
-        // Send attach success response for additional clients
-        try protocol.writeJson(ctx.allocator, client.fd, .attach_session_response, protocol.AttachSessionResponse{
+        // PTY already reading - just send attach response
+        std.debug.print("PTY already reading for session {s}, sending attach response to client fd={d}\n", .{ session.name, client.fd });
+        const response = protocol.AttachSessionResponse{
             .status = "ok",
             .client_fd = client.fd,
-        });
+        };
+        std.debug.print("Response payload: status={s}, client_fd={?d}\n", .{ response.status, response.client_fd });
+        try protocol.writeJson(ctx.allocator, client.fd, .attach_session_response, response);
+        std.debug.print("Attach response sent successfully\n", .{});
     }
 }
 
@@ -832,7 +862,7 @@ fn handlePtyInput(client: *Client, text: []const u8) !void {
         return error.SessionNotFound;
     };
 
-    std.debug.print("Writing {d} bytes to PTY fd={d}\n", .{ text.len, session.pty_master_fd });
+    std.debug.print("Client fd={d}: Writing {d} bytes to PTY fd={d} (first byte: {d})\n", .{ client.fd, text.len, session.pty_master_fd, if (text.len > 0) text[0] else 0 });
 
     // Write input to PTY master fd
     const written = posix.write(session.pty_master_fd, text) catch |err| {
