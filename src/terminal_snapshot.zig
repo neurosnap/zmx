@@ -2,6 +2,29 @@ const std = @import("std");
 const ghostty = @import("ghostty-vt");
 const sgr = @import("sgr.zig");
 
+/// Terminal snapshot rendering for session persistence.
+///
+/// This module renders the current viewport state (text, colors, cursor position)
+/// as a sequence of ANSI escape codes that can be sent to a client to restore
+/// the visual terminal state when reattaching to a session.
+///
+/// Current implementation: Viewport-only rendering
+/// - Renders only the visible active viewport (not full scrollback)
+/// - Includes text content, SGR attributes (colors, bold, italic, etc.), and cursor position
+/// - Handles single/multi-codepoint graphemes and wide characters correctly
+///
+/// Future work (see bd-10, bd-11):
+/// - Full scrollback history rendering (see bd-10)
+/// - Alternate screen buffer detection and handling (see bd-11)
+/// - Mode restoration (bracketed paste, origin mode, etc.)
+/// - Hyperlink reconstitution (OSC 8 sequences)
+/// - Handling buffered/unprocessed PTY data (see bd-11)
+///
+/// Why viewport-only?
+/// - Avoids payload bloat on reattach (megabytes for large scrollback)
+/// - Prevents scrollback duplication in client terminal on multiple reattaches
+/// - Faster rendering and simpler implementation
+/// - Server owns the "true" scrollback, can add browsing features later
 /// Extract UTF-8 text content from a cell, including multi-codepoint graphemes
 fn extractCellText(pin: ghostty.Pin, cell: *const ghostty.Cell, buf: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
     // Skip empty cells and spacer cells
