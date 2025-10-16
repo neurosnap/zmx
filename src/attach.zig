@@ -258,7 +258,7 @@ fn readCallback(
         const msg_line = remaining_data[0..newline_idx];
 
         const msg_type_parsed = protocol.parseMessageType(ctx.allocator, msg_line) catch |err| {
-            std.debug.print("JSON parse error: {s}\r\n", .{@errorName(err)});
+            std.debug.print("JSON parse error: {s}, data: {s}\r\n", .{ @errorName(err), msg_line });
             return .rearm;
         };
         defer msg_type_parsed.deinit();

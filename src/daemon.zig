@@ -203,11 +203,7 @@ const VTHandler = struct {
     ) !void {
         _ = da_params;
 
-        const response = switch (req) {
-            .primary => "\x1b[?1;2c", // VT100 with AVO (matches screen/tmux)
-            .secondary => "\x1b[>0;0;0c", // Conservative secondary DA
-            .tertiary => return, // Ignore tertiary DA
-        };
+        const response = getDeviceAttributeResponse(req) orelse return;
 
         _ = posix.write(self.pty_master_fd, response) catch |err| {
             std.debug.print("Error writing DA response to PTY: {s}\n", .{@errorName(err)});
@@ -830,6 +826,112 @@ fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []con
     }
 }
 
+/// Returns the device attribute response zmx should send (matching tmux/screen)
+/// Returns null for tertiary DA (ignored)
+fn getDeviceAttributeResponse(req: ghostty.DeviceAttributeReq) ?[]const u8 {
+    return switch (req) {
+        .primary => "\x1b[?1;2c", // VT100 with AVO (matches screen/tmux)
+        .secondary => "\x1b[>0;0;0c", // Conservative secondary DA
+        .tertiary => null, // Ignore tertiary DA
+    };
+}
+
+/// Filter out terminal response sequences that the client's terminal sends
+/// These should not be written to the PTY since the daemon handles queries itself
+///
+/// Architecture: When apps send queries (e.g., ESC[c), the client's terminal
+/// auto-responds. We must drop those responses because:
+/// 1. VTHandler already responds with correct zmx terminal capabilities
+/// 2. Client responses describe the client's terminal, not zmx's virtual terminal
+/// 3. Without filtering, responses get echoed by PTY and appear as literal text
+///
+/// This matches tmux/screen behavior: intercept queries, respond ourselves, drop client responses
+fn filterTerminalResponses(input: []const u8, output_buf: []u8) usize {
+    var out_idx: usize = 0;
+    var i: usize = 0;
+
+    while (i < input.len) {
+        // Look for ESC sequences
+        if (input[i] == 0x1b and i + 1 < input.len and input[i + 1] == '[') {
+            // CSI sequence - parse it
+            const seq_start = i;
+            i += 2; // Skip ESC [
+
+            // Collect parameter bytes (0x30-0x3F)
+            const param_start = i;
+            while (i < input.len and input[i] >= 0x30 and input[i] <= 0x3F) : (i += 1) {}
+            const seq_params = input[param_start..i];
+
+            // Collect intermediate bytes (0x20-0x2F)
+            while (i < input.len and input[i] >= 0x20 and input[i] <= 0x2F) : (i += 1) {}
+
+            // Final byte (0x40-0x7E)
+            if (i < input.len and input[i] >= 0x40 and input[i] <= 0x7E) {
+                const final = input[i];
+                const should_drop = blk: {
+                    // Device Attributes responses: ESC[?...c, ESC[>...c, ESC[=...c
+                    // These match the responses defined in getDeviceAttributeResponse()
+                    if (final == 'c' and seq_params.len > 0) {
+                        if (seq_params[0] == '?' or seq_params[0] == '>' or seq_params[0] == '=') {
+                            std.debug.print("Filtered DA response: ESC[{s}c\n", .{seq_params});
+                            break :blk true;
+                        }
+                    }
+                    // Cursor Position Report: ESC[<row>;<col>R
+                    if (final == 'R' and seq_params.len > 0) {
+                        // Simple heuristic: if params look like digits/semicolon, it's likely CPR
+                        var is_cpr = true;
+                        for (seq_params) |byte| {
+                            if (byte != ';' and (byte < '0' or byte > '9')) {
+                                is_cpr = false;
+                                break;
+                            }
+                        }
+                        if (is_cpr) {
+                            std.debug.print("Filtered CPR: ESC[{s}R\n", .{seq_params});
+                            break :blk true;
+                        }
+                    }
+                    // DSR responses: ESC[0n, ESC[3n, ESC[?...n
+                    if (final == 'n' and seq_params.len > 0) {
+                        if ((seq_params.len == 1 and (seq_params[0] == '0' or seq_params[0] == '3')) or
+                            seq_params[0] == '?')
+                        {
+                            std.debug.print("Filtered DSR response: ESC[{s}n\n", .{seq_params});
+                            break :blk true;
+                        }
+                    }
+                    break :blk false;
+                };
+
+                if (should_drop) {
+                    // Skip this entire sequence, continue to next character
+                    i += 1;
+                } else {
+                    // Copy the entire sequence to output
+                    const seq_len = (i + 1) - seq_start;
+                    @memcpy(output_buf[out_idx .. out_idx + seq_len], input[seq_start .. i + 1]);
+                    out_idx += seq_len;
+                    i += 1;
+                }
+            } else {
+                // Incomplete sequence, copy what we have
+                const seq_len = i - seq_start;
+                @memcpy(output_buf[out_idx .. out_idx + seq_len], input[seq_start..i]);
+                out_idx += seq_len;
+                // i is already positioned at the next byte
+            }
+        } else {
+            // Not a CSI sequence, copy the byte
+            output_buf[out_idx] = input[i];
+            out_idx += 1;
+            i += 1;
+        }
+    }
+
+    return out_idx;
+}
+
 fn handlePtyInput(client: *Client, text: []const u8) !void {
     const session_name = client.attached_session orelse {
         std.debug.print("Client fd={d} not attached to any session\n", .{client.fd});
@@ -841,10 +943,19 @@ fn handlePtyInput(client: *Client, text: []const u8) !void {
         return error.SessionNotFound;
     };
 
-    std.debug.print("Client fd={d}: Writing {d} bytes to PTY fd={d} (first byte: {d})\n", .{ client.fd, text.len, session.pty_master_fd, if (text.len > 0) text[0] else 0 });
+    // Filter out terminal response sequences before writing to PTY
+    var filtered_buf: [128 * 1024]u8 = undefined;
+    const filtered_len = filterTerminalResponses(text, &filtered_buf);
+
+    if (filtered_len == 0) {
+        return; // All input was filtered, nothing to write
+    }
+
+    const filtered_text = filtered_buf[0..filtered_len];
+    std.debug.print("Client fd={d}: Writing {d} bytes to PTY fd={d} (filtered from {d} bytes)\n", .{ client.fd, filtered_len, session.pty_master_fd, text.len });
 
     // Write input to PTY master fd
-    const written = posix.write(session.pty_master_fd, text) catch |err| {
+    const written = posix.write(session.pty_master_fd, filtered_text) catch |err| {
         std.debug.print("Error writing to PTY: {s}\n", .{@errorName(err)});
         return err;
     };
