@@ -216,12 +216,16 @@ pub fn render(vt: *ghostty.Terminal, allocator: std.mem.Allocator) ![]u8 {
     // TODO: Restore left/right margins if enabled (need to check modes for left_right_margins)
 
     // Compute cursor position (may be relative to scroll margins if origin mode is on)
+    // Note: The terminal stores cursor.y as absolute coordinates (0-based from top of screen)
+    // When origin mode is enabled, the CSI H (cursor position) escape code expects coordinates
+    // relative to the scroll region, so we need to subtract the top margin offset
     var final_cursor_row = cursor_row;
     const final_cursor_col = cursor_col;
 
-    // If origin mode is on, cursor is relative to the top margin
+    // If origin mode is on, cursor coordinates must be relative to the top/left margins
     if (origin and !is_full_tb) {
-        final_cursor_row = cursor_row - scroll.top;
+        final_cursor_row = (cursor_row -| (scroll.top + 1)) + 1;
+        // TODO: Also handle left/right margins if left_right_margins mode is enabled
     }
 
     try std.fmt.format(output.writer(allocator), "\x1b[{d};{d}H", .{ final_cursor_row, final_cursor_col });
