@@ -59,6 +59,7 @@ pub const AttachSessionRequest = struct {
     session_name: []const u8,
     rows: u16,
     cols: u16,
+    cwd: []const u8,
 };
 
 pub const DetachSessionRequest = struct {

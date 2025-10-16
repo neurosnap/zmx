@@ -517,8 +517,8 @@ fn handleMessage(client: *Client, data: []const u8) !void {
         .attach_session_request => {
             const parsed = try protocol.parseMessage(protocol.AttachSessionRequest, client.allocator, data);
             defer parsed.deinit();
-            std.debug.print("Handling attach request for session: {s} ({}x{})\n", .{ parsed.value.payload.session_name, parsed.value.payload.cols, parsed.value.payload.rows });
-            try handleAttachSession(client.server_ctx, client, parsed.value.payload.session_name, parsed.value.payload.rows, parsed.value.payload.cols);
+            std.debug.print("Handling attach request for session: {s} ({}x{}) cwd={s}\n", .{ parsed.value.payload.session_name, parsed.value.payload.cols, parsed.value.payload.rows, parsed.value.payload.cwd });
+            try handleAttachSession(client.server_ctx, client, parsed.value.payload.session_name, parsed.value.payload.rows, parsed.value.payload.cols, parsed.value.payload.cwd);
         },
         .detach_session_request => {
             const parsed = try protocol.parseMessage(protocol.DetachSessionRequest, client.allocator, data);
@@ -745,7 +745,7 @@ fn handleListSessions(ctx: *ServerContext, client: *Client) !void {
     _ = written;
 }
 
-fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []const u8, rows: u16, cols: u16) !void {
+fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []const u8, rows: u16, cols: u16, cwd: []const u8) !void {
     // Check if session already exists
     const is_reattach = ctx.sessions.contains(session_name);
     const session = if (is_reattach) blk: {
@@ -754,7 +754,7 @@ fn handleAttachSession(ctx: *ServerContext, client: *Client, session_name: []con
     } else blk: {
         // Create new session with forkpty
         std.debug.print("Creating new session: {s}\n", .{session_name});
-        const new_session = try createSession(ctx.allocator, session_name);
+        const new_session = try createSession(ctx.allocator, session_name, cwd);
         try ctx.sessions.put(new_session.name, new_session);
         break :blk new_session;
     };
@@ -1298,7 +1298,7 @@ fn execShellWithPrompt(allocator: std.mem.Allocator, session_name: []const u8, s
     }
 }
 
-fn createSession(allocator: std.mem.Allocator, session_name: []const u8) !*Session {
+fn createSession(allocator: std.mem.Allocator, session_name: []const u8, cwd: []const u8) !*Session {
     var master_fd: c_int = undefined;
 
     // Fork and create PTY
@@ -1309,6 +1309,11 @@ fn createSession(allocator: std.mem.Allocator, session_name: []const u8) !*Sessi
 
     if (pid == 0) {
         // Child process - set environment and execute shell with prompt
+
+        // Change to client's working directory
+        std.posix.chdir(cwd) catch {
+            std.posix.exit(1);
+        };
 
         // Set ZMX_SESSION to identify the session
         const zmx_session_var = std.fmt.allocPrint(allocator, "ZMX_SESSION={s}\x00", .{session_name}) catch {

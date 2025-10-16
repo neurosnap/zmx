@@ -115,10 +115,15 @@ pub fn main(config: config_mod.Config, iter: *std.process.ArgIterator) !void {
     const rows: u16 = if (result == 0) ws.ws_row else 24;
     const cols: u16 = if (result == 0) ws.ws_col else 80;
 
+    const cwd_buf = try allocator.alloc(u8, std.fs.max_path_bytes);
+    defer allocator.free(cwd_buf);
+    const cwd = try std.posix.getcwd(cwd_buf);
+
     const request_payload = protocol.AttachSessionRequest{
         .session_name = session_name,
         .rows = rows,
         .cols = cols,
+        .cwd = cwd,
     };
     var out: std.io.Writer.Allocating = .init(allocator);
     defer out.deinit();
