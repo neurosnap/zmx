@@ -1,12 +1,9 @@
 const std = @import("std");
+const clap = @import("clap");
 const cli = @import("cli.zig");
-const config_mod = @import("config.zig");
 const daemon = @import("daemon.zig");
 const attach = @import("attach.zig");
-const detach = @import("detach.zig");
-const kill = @import("kill.zig");
-const list = @import("list.zig");
-const clap = @import("clap");
+const Config = @import("config.zig");
 
 pub const std_options: std.Options = .{
     .log_level = .err,
@@ -34,15 +31,59 @@ pub fn main() !void {
         return;
     };
 
-    var config = try config_mod.Config.load(allocator);
-    defer config.deinit(allocator);
-
     switch (command) {
         .help => try cli.help(),
-        .daemon => try daemon.main(config, &iter),
-        .list => try list.main(config, &iter),
-        .attach => try attach.main(config, &iter),
-        .detach => try detach.main(config, &iter),
-        .kill => try kill.main(config, &iter),
+        .daemon => try daemonCli(allocator),
+        .attach => try attachCli(allocator),
     }
 }
+
+fn daemonCli(alloc: std.mem.Allocator) !void {
+    const params = comptime clap.parseParamsComptime(
+        \\-s, --socket-path <str>  Path to the Unix socket file
+        \\
+    );
+    var diag = clap.Diagnostic{};
+    var res = clap.parse(clap.Help, &params, clap.parsers.default, .{
+        .diagnostic = &diag,
+        .allocator = alloc,
+    }) catch |err| {
+        try diag.reportToFile(.stderr(), err);
+        return err;
+    };
+    defer res.deinit();
+
+    const socket_path = res.args.@"socket-path";
+    const cfg = Config.init(socket_path);
+    try daemon.main(cfg);
+}
+
+fn attachCli(alloc: std.mem.Allocator) !void {
+    const params = comptime clap.parseParamsComptime(
+        \\-s, --socket-path <str>  Path to the Unix socket file
+        \\<str>
+        \\
+    );
+    var diag = clap.Diagnostic{};
+    var res = clap.parse(clap.Help, &params, clap.parsers.default, .{
+        .diagnostic = &diag,
+        .allocator = alloc,
+    }) catch |err| {
+        try diag.reportToFile(.stderr(), err);
+        return err;
+    };
+    defer res.deinit();
+
+    const socket_path = res.args.@"socket-path";
+
+    const session_name = res.positionals[0] orelse {
+        std.debug.print("Usage: zmx attach <session-name>\n", .{});
+        return error.MissingSessionName;
+    };
+
+    const cfg = Config.init(socket_path);
+    cfg.session_name = session_name;
+    try attach.main(cfg);
+}
+
+test {}

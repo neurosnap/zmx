@@ -7,10 +7,7 @@ pub const version = "0.1.0";
 const SubCommands = enum {
     help,
     daemon,
-    list,
     attach,
-    detach,
-    kill,
 };
 
 const main_parsers = .{
@@ -25,8 +22,6 @@ const main_params = clap.parseParamsComptime(
     \\
 );
 
-// To pass around arguments returned by clap, `clap.Result` and `clap.ResultEx` can be used to
-// get the return type of `clap.parse` and `clap.parseEx`.
 const MainArgs = clap.ResultEx(clap.Help, &main_params, main_parsers);
 
 pub fn help() !void {
@@ -37,9 +32,6 @@ pub fn help() !void {
         \\  help       Show this help message
         \\  daemon     Start the zmx daemon
         \\  attach     Attach to a session
-        \\  detach     Detach from a session
-        \\  kill       Kill a session
-        \\  list       List all sessions
         \\
         \\Options:
         \\
