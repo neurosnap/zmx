@@ -55,7 +55,7 @@ fn daemonCli(alloc: std.mem.Allocator) !void {
 
     const socket_path = res.args.@"socket-path";
     const cfg = Config.init(socket_path);
-    try daemon.main(cfg);
+    try daemon.main(cfg, alloc);
 }
 
 fn attachCli(alloc: std.mem.Allocator) !void {
@@ -83,7 +83,7 @@ fn attachCli(alloc: std.mem.Allocator) !void {
 
     const cfg = Config.init(socket_path);
     cfg.session_name = session_name;
-    try attach.main(cfg);
+    try attach.main(cfg, alloc);
 }
 
 test {}

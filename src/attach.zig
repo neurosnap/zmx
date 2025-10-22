@@ -11,7 +11,8 @@ const c = @cImport({
     @cInclude("sys/ioctl.h");
 });
 
-pub fn main(cfg: *Config) !void {
+pub fn main(cfg: *Config, alloc: std.mem.Allocator) !void {
+    _ = alloc;
     var thread_pool = xevg.ThreadPool.init(.{});
     defer thread_pool.deinit();
     defer thread_pool.shutdown();
@@ -24,7 +25,11 @@ pub fn main(cfg: *Config) !void {
     // SOCK.STREAM: Reliable, connection-oriented communication for protocol messages
     // SOCK.NONBLOCK: Prevents blocking to work with libxev's async event loop
     const socket_fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.NONBLOCK, 0);
-    // Save original terminal settings first (before connecting)
+    //  this is typically used with tcsetattr() to modify terminal settings.
+    //      - you first get the current settings with tcgetattr()
+    //      - modify the desired attributes in the termios structure
+    //      - then apply the changes with tcsetattr().
+    //  This prevents unintended side effects by preserving other settings.
     var orig_termios: c.termios = undefined;
     _ = c.tcgetattr(posix.STDIN_FILENO, &orig_termios);
 
@@ -36,10 +41,13 @@ pub fn main(cfg: *Config) !void {
         return err;
     };
 
-    // Set raw mode after successful connection
+    // restore stdin fd to its original state after exiting.
     defer _ = c.tcsetattr(posix.STDIN_FILENO, c.TCSANOW, &orig_termios);
 
     var raw_termios = orig_termios;
+    //  set raw mode after successful connection.
+    //      disables canonical mode (line buffering), input echoing, signal generation from
+    //      control characters (like Ctrl+C), and flow control.
     c.cfmakeraw(&raw_termios);
     _ = c.tcsetattr(posix.STDIN_FILENO, c.TCSANOW, &raw_termios);
 
