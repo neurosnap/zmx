@@ -4,12 +4,9 @@ const xevg = @import("xev");
 const xev = xevg.Dynamic;
 const clap = @import("clap");
 const builtin = @import("builtin");
-const ghostty = @import("ghostty-vt");
 
 const Config = @import("config.zig");
 const protocol = @import("protocol.zig");
-const sgr = @import("sgr.zig");
-const terminal_snapshot = @import("terminal_snapshot.zig");
 
 const c = switch (builtin.os.tag) {
     .macos => @cImport({
@@ -29,12 +26,14 @@ const c = switch (builtin.os.tag) {
     }),
 };
 
+// stores all the necessary data for managing clients and pty sessions
 const Daemon = struct {
     cfg: *Config,
     accept_completion: xev.Completion,
     server_fd: std.posix.fd_t,
     allocator: std.mem.Allocator,
     clients: std.AutoHashMap(std.posix.fd_t, *Client),
+    sessions: std.StringHashMap(*Session),
 
     pub fn init(cfg: *Config, allocator: std.mem.Allocator, server_fd: std.posix.fd_t) *Daemon {
         var ctx = Daemon{
@@ -42,6 +41,7 @@ const Daemon = struct {
             .accept_completion = .{},
             .allocator = allocator,
             .clients = std.AutoHashMap(std.posix.fd_t, *Client).init(allocator),
+            .sessions = std.StringHashMap(*Session).init(allocator),
             .server_fd = server_fd,
         };
         return &ctx;
@@ -65,15 +65,39 @@ const Daemon = struct {
             return err;
         };
         client.* = .{
+            .daemon = self,
             .fd = client_fd,
             .allocator = self.allocator,
             .stream = stream,
             .read_buffer = undefined,
             .msg_buffer = msg_buffer,
+            .session = null,
         };
 
         try self.clients.put(client.fd, client);
         return client;
+    }
+
+    pub fn attach(self: *Daemon, client: *Client, req: protocol.AttachSessionRequest) !*Session {
+        const is_reattach = self.sessions.contains(req.session_name);
+        const session = if (is_reattach) blk: {
+            std.log.info("reattaching to session: {s} {d}x{d}\n", .{ req.session_name, req.rows, req.cols });
+            break :blk self.sessions.get(req.session_name).?;
+        } else blk: {
+            std.log.info("creating new session: {s} {d}x{d} {s}\n", .{ req.session_name, req.rows, req.cols, req.cwd });
+            const new_session = try Session.init(self.allocator, req);
+            try self.sessions.put(req.session_name, new_session);
+            break :blk new_session;
+        };
+
+        client.session = session.name;
+        try session.attached_clients.put(client.fd, {});
+        const response = protocol.AttachSessionResponse{
+            .status = "ok",
+            .client_fd = client.fd,
+        };
+        try protocol.writeJson(self.allocator, client.fd, .attach_session_response, response);
+        return session;
     }
 };
 
@@ -88,11 +112,14 @@ const FrameData = struct {
 };
 
 const Client = struct {
+    daemon: *Daemon,
     fd: std.posix.fd_t,
     stream: xev.Stream,
     allocator: std.mem.Allocator,
     read_buffer: [128 * 1024]u8, // 128KB for high-throughput socket reads
     msg_buffer: std.ArrayList(u8),
+    // TODO: session -> session_name
+    session: ?[]const u8,
 
     pub fn next_msg(self: *Client) FrameError!FrameData {
         const msg: *std.ArrayList(u8) = &self.msg_buffer;
@@ -125,6 +152,101 @@ const Client = struct {
             .type = @enumFromInt(header.frame_type),
             .payload = payload,
         };
+    }
+
+    fn handle_frame(self: *Client, msg: FrameData) !?*Session {
+        if (msg.type == protocol.FrameType.pty_binary) {
+            const session_name = self.session orelse {
+                std.log.err("self fd={d} not attached to any session\n", .{self.fd});
+                return error.NotAttached;
+            };
+
+            const session = self.daemon.sessions.get(session_name) orelse {
+                std.log.err("session {s} not found\n", .{session_name});
+                return error.SessionNotFound;
+            };
+
+            // Write input to PTY master fd
+            _ = try posix.write(session.pty_master_fd, msg.payload);
+        } else {
+            const type_parsed = try protocol.parseMessageType(self.allocator, msg.payload);
+            defer type_parsed.deinit();
+
+            const msg_type = protocol.MessageType.fromString(type_parsed.value.type).?;
+            switch (msg_type) {
+                .attach_session_request => {
+                    const parsed = try protocol.parseMessage(protocol.AttachSessionRequest, self.allocator, msg.payload);
+                    // TODO: defer parsed.deint();
+                    std.log.info(
+                        "handling attach request for session: {s} ({}x{}) cwd={s}\n",
+                        .{ parsed.value.payload.session_name, parsed.value.payload.cols, parsed.value.payload.rows, parsed.value.payload.cwd },
+                    );
+                    const session = try self.daemon.attach(self, parsed.value.payload);
+                    return session;
+                },
+                else => {
+                    std.log.err("unhandled message type: {s}\n", .{type_parsed.value.type});
+                },
+            }
+        }
+
+        return null;
+    }
+};
+
+const Session = struct {
+    name: []const u8,
+    pty_master_fd: std.posix.fd_t,
+    child_pid: std.posix.fd_t,
+    created_at: i64,
+    allocator: std.mem.Allocator,
+    attached_clients: std.AutoHashMap(std.posix.fd_t, void),
+    pty_read_buffer: [128 * 1024]u8, // 128KB for high-throughput PTY output
+
+    fn init(alloc: std.mem.Allocator, req: protocol.AttachSessionRequest) !*Session {
+        var master_fd: c_int = undefined;
+        const pid = c.forkpty(&master_fd, null, null, null);
+        if (pid < 0) {
+            return error.ForkPtyFailed;
+        }
+
+        if (pid == 0) { // child pid code path
+            const session_env = try std.fmt.allocPrint(alloc, "ZMX_SESSION={s}\x00", .{req.session_name});
+            _ = c.putenv(@ptrCast(session_env.ptr));
+
+            const shell = std.posix.getenv("SHELL") orelse "/bin/sh";
+            const argv = [_:null]?[*:0]const u8{ shell, null };
+            const err = std.posix.execveZ(shell, &argv, std.c.environ);
+            std.log.err("execve failed: {s}\n", .{@errorName(err)});
+            std.posix.exit(1);
+        }
+        // master pid code path
+
+        std.log.info("created pty session: name={s} master_pid={d} child_pid={d}\n", .{ req.session_name, master_fd, pid });
+
+        // make pty non-blocking
+        const flags = try posix.fcntl(master_fd, posix.F.GETFL, 0);
+        _ = try posix.fcntl(master_fd, posix.F.SETFL, flags | @as(u32, 0o4000));
+
+        const session = try alloc.create(Session);
+
+        // TODO: init ghostty
+
+        session.* = .{
+            .name = try alloc.dupe(u8, req.session_name),
+            .created_at = std.time.timestamp(),
+
+            .allocator = alloc,
+            .pty_master_fd = @intCast(master_fd),
+            .child_pid = pid,
+            .attached_clients = std.AutoHashMap(std.posix.fd_t, void).init(alloc),
+            .pty_read_buffer = undefined,
+        };
+        return session;
+    }
+
+    fn deinit(self: *Session) void {
+        self.allocator.free(self.name);
     }
 };
 
@@ -212,9 +334,14 @@ fn acceptCallback(
     return .rearm;
 }
 
+const ReadPty = struct{
+    client: *Client,
+    session: *Session,
+};
+
 fn readCallback(
     client_opt: ?*Client,
-    _: *xev.Loop,
+    loop: *xev.Loop,
     read_compl: *xev.Completion,
     _: xev.Stream,
     read_buffer: xev.ReadBuffer,
@@ -226,14 +353,41 @@ fn readCallback(
         client.msg_buffer.appendSlice(client.allocator, data) catch |err| {
             std.log.err("cannot append to message buffer: {s}\n", .{@errorName(err)});
             client.allocator.destroy(read_compl);
-            return .disarm;
+            return closeClient(loop, client, read_compl);
         };
 
         while (client.next_msg()) |msg| {
             std.log.info("msg_type: {d}\n", .{msg.type});
+            const session_opt = client.handle_frame(msg) catch |err| {
+                std.log.err("handle frame error: {s}\n", .{@errorName(err)});
+                return closeClient(loop, client, read_compl);
+            };
+            if (session_opt) |session| {
+                const stream = xev.Stream.initFd(session.pty_master_fd);
+                const read_pty_compl = client.allocator.create(xev.Completion) catch |err| {
+                    std.log.err("could not allocate completion: {s}\n", .{@errorName(err)});
+                    return .disarm;
+                };
+                const read_pty = client.allocator.create(ReadPty) catch |err| {
+                    std.log.err("could not allocate read pty: {s}\n", .{@errorName(err)});
+                    return .disarm;
+                };
+                read_pty.* = .{
+                    .client = client,
+                    .session = session,
+                };
+                stream.read(
+                    loop,
+                    read_pty_compl,
+                    .{ .slice = &session.pty_read_buffer },
+                    ReadPty,
+                    read_pty,
+                    readPtyCallback,
+                );
+            }
         } else |err| {
             std.log.err("could not get next client msg: {s}\n", .{@errorName(err)});
-            // TODO: close client?
+            return closeClient(loop, client, read_compl);
         }
     } else |err| {
         std.log.err("no read result: {s}\n", .{@errorName(err)});
@@ -243,33 +397,178 @@ fn readCallback(
     return .rearm;
 }
 
-// fn handleBinaryFrame(client: *Client, text: []const u8) !void {
-//     const session_name = client.attached_session orelse {
-//         std.debug.print("Client fd={d} not attached to any session\n", .{client.fd});
-//         return error.NotAttached;
-//     };
-//
-//     const session = client.server_ctx.sessions.get(session_name) orelse {
-//         std.debug.print("Session {s} not found\n", .{session_name});
-//         return error.SessionNotFound;
-//     };
-//
-//     // Filter out terminal response sequences before writing to PTY
-//     // var filtered_buf: [128 * 1024]u8 = undefined;
-//     // const filtered_len = filterTerminalResponses(text, &filtered_buf);
-//
-//     // if (filtered_len == 0) {
-//     //     return; // All input was filtered, nothing to write
-//     // }
-//     //
-//     const filtered_len = client.msg_buffer.len;
-//     const filtered_text = client.msg_buffer; // filtered_buf[0..filtered_len];
-//     std.debug.print("Client fd={d}: Writing {d} bytes to PTY fd={d} (filtered from {d} bytes)\n", .{ client.fd, filtered_len, session.pty_master_fd, text.len });
-//
-//     // Write input to PTY master fd
-//     const written = posix.write(session.pty_master_fd, filtered_text) catch |err| {
-//         std.debug.print("Error writing to PTY: {s}\n", .{@errorName(err)});
-//         return err;
-//     };
-//     _ = written;
-// }
+const WritePty = struct{
+    alloc: std.mem.Allocator,
+    msg: []u8,
+};
+
+fn readPtyCallback(
+    pty_ctx_opt: ?*ReadPty,
+    loop: *xev.Loop,
+    completion: *xev.Completion,
+    _: xev.Stream,
+    read_buffer: xev.ReadBuffer,
+    read_result: xev.ReadError!usize,
+) xev.CallbackAction {
+    const ctx = pty_ctx_opt.?;
+    const client = ctx.client;
+    const daemon = client.daemon;
+    const session = daemon.sessions.get(ctx.session.name) orelse {
+        std.log.err("session {s} not found\n", .{ctx.session.name});
+        client.allocator.destroy(ctx);
+        client.allocator.destroy(completion);
+        return .disarm;
+    };
+
+    if (read_result) |bytes_read| {
+        if (bytes_read == 0) {
+            std.log.err("session {s} pty eof\n", .{ctx.session.name});
+            client.allocator.destroy(ctx);
+            client.allocator.destroy(completion);
+            return .disarm;
+        }
+
+        const data = read_buffer.slice[0..bytes_read];
+        std.log.info("pty output: {s} bytes\n", .{bytes_read});
+
+        // TODO: ghostty stream nextSlice
+
+        if (session.attached_clients.count() > 0 and data.len > 0) {
+            // Send PTY output as binary frame to avoid JSON escaping issues
+            // Frame format: [4-byte length][2-byte type][payload]
+            const header = protocol.FrameHeader{
+                .length = @intCast(data.len),
+                .frame_type = @intFromEnum(protocol.FrameType.pty_binary),
+            };
+
+            const frame_size = @sizeOf(protocol.FrameHeader) + data.len;
+            var frame_buf = std.ArrayList(u8).initCapacity(session.allocator, frame_size) catch |err| {
+                std.log.err("cannot allocate frame buffer: {s}\n", .{@errorName(err)});
+                client.allocator.destroy(ctx);
+                client.allocator.destroy(completion);
+                return .disarm;
+            };
+            defer frame_buf.deinit(session.allocator);
+
+            const header_bytes = std.mem.asBytes(&header);
+            frame_buf.appendSlice(session.allocator, header_bytes) catch |err| {
+                std.log.err("cannot append frame buffer with header: {s}\n", .{@errorName(err)});
+                client.allocator.destroy(ctx);
+                client.allocator.destroy(completion);
+                return .disarm;
+            };
+            frame_buf.appendSlice(session.allocator, data) catch |err| {
+                std.log.err("cannot append frame buffer with data: {s}\n", .{@errorName(err)});
+                client.allocator.destroy(ctx);
+                client.allocator.destroy(completion);
+                return .disarm;
+            };
+
+            var it = session.attached_clients.keyIterator();
+            while (it.next()) |client_fd| {
+                const attached_client = daemon.clients.get(client_fd.*) orelse continue;
+                const owned_frame = session.allocator.dupe(u8, frame_buf.items) catch continue;
+
+                const write_ctx = session.allocator.create(WritePty) catch {
+                    session.allocator.free(owned_frame);
+                    continue;
+                };
+                write_ctx.* = .{
+                    .alloc = session.allocator,
+                    .msg = owned_frame,
+                };
+                const write_completion = session.allocator.create(xev.Completion) catch {
+                    session.allocator.free(owned_frame);
+                    session.allocator.destroy(write_ctx);
+                    continue;
+                };
+                attached_client.stream.write(
+                    loop,
+                    write_completion,
+                    .{ .slice = owned_frame },
+                    WritePty,
+                    write_ctx,
+                    writePtyCallback,
+                );
+            }
+        }
+
+        return .rearm;
+    } else |err| {
+        if (err == error.WouldBlock) {
+            return .rearm;
+        }
+        client.allocator.destroy(ctx);
+        client.allocator.destroy(completion);
+        return .disarm;
+    }
+    unreachable;
+}
+
+fn writePtyCallback(
+    write_ctx_opt: ?*WritePty,
+    _: *xev.Loop,
+    completion: *xev.Completion,
+    _: xev.Stream,
+    _: xev.WriteBuffer,
+    write_result: xev.WriteError!usize,
+) xev.CallbackAction {
+    const write_ctx = write_ctx_opt.?;
+    const allocator = write_ctx.alloc;
+
+    if (write_result) |_| {
+        // Successfully sent PTY output to client
+    } else |_| {
+        // Silently ignore write errors to prevent log spam
+    }
+    allocator.free(write_ctx.msg);
+    allocator.destroy(write_ctx);
+    allocator.destroy(completion);
+    return .disarm;
+}
+
+fn closeClient(loop: *xev.Loop, client: *Client, completion: *xev.Completion) xev.CallbackAction {
+    std.debug.print("closing client fd={d}\n", .{client.fd});
+
+    // Remove client from attached session if any
+    if (client.session) |session_name| {
+        if (client.daemon.sessions.get(session_name)) |session| {
+            _ = session.attached_clients.remove(client.fd);
+            std.debug.print("removed client fd={d} from session {s} attached_clients\n", .{ client.fd, session_name });
+        }
+    }
+
+    // Remove client from the clients map
+    _ = client.daemon.clients.remove(client.fd);
+
+    // Initiate async close of the client stream
+    const close_completion = client.allocator.create(xev.Completion) catch {
+        // If we can't allocate, just clean up synchronously
+        posix.close(client.fd);
+        client.allocator.destroy(completion);
+        client.allocator.destroy(client);
+        return .disarm;
+    };
+
+    client.stream.close(loop, close_completion, Client, client, closeCallback);
+    client.allocator.destroy(completion);
+    return .disarm;
+}
+
+fn closeCallback(
+    client_opt: ?*Client,
+    _: *xev.Loop,
+    completion: *xev.Completion,
+    _: xev.Stream,
+    close_result: xev.CloseError!void,
+) xev.CallbackAction {
+    const client = client_opt.?;
+    if (close_result) |_| {} else |err| {
+        std.debug.print("close failed: {s}\n", .{@errorName(err)});
+    }
+    std.debug.print("client disconnected fd={d}\n", .{client.fd});
+    client.msg_buffer.deinit(client.allocator);
+    client.allocator.destroy(completion);
+    client.allocator.destroy(client);
+    return .disarm;
+}
