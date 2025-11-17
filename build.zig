@@ -25,19 +25,6 @@ pub fn build(b: *std.Build) void {
         );
     }
 
-    if (b.lazyDependency("libxev", .{
-        .target = target,
-        .optimize = optimize,
-    })) |dep| {
-        exe_mod.addImport("xev", dep.module("xev"));
-    }
-
-    const clap_dep = b.dependency("clap", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    exe_mod.addImport("clap", clap_dep.module("clap"));
-
     const toml_dep = b.dependency("toml", .{
         .target = target,
         .optimize = optimize,

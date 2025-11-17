@@ -36,14 +36,6 @@
             .url = "git+https://github.com/ghostty-org/ghostty.git?ref=HEAD#42a38ff672fe0cbbb8588380058c91ac16ed9069",
             .hash = "ghostty-1.2.1-5UdBC-7EVAMgwHLhtsdeH4rgcZ7WlagXZ1QXN9bRKJ5s",
         },
-        .libxev = .{
-            .url = "git+https://github.com/mitchellh/libxev?ref=HEAD#34fa50878aec6e5fa8f532867001ab3c36fae23e",
-            .hash = "libxev-0.0.0-86vtc4IcEwCqEYxEYoN_3KXmc6A9VLcm22aVImfvecYs",
-        },
-        .clap = .{
-            .url = "git+https://github.com/Hejsil/zig-clap?ref=HEAD#b7e3348ed60f99ba32c75aa707ff7c87adc31b36",
-            .hash = "clap-0.11.0-oBajB-TnAQC7yPLnZRT5WzHZ_4Ly4dX2OILskli74b9H",
-        },
         .toml = .{
             .url = "git+https://github.com/sam701/zig-toml#3aaeb0bf14935eabae118196f7949b404a42f8ea",
             .hash = "toml-0.3.0-bV14BTd8AQA-wZERtB3dvRE3eSZ-m48AyXFUGkZ_Tm3d",
