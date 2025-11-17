@@ -7,11 +7,10 @@
 - Native terminal scrollback
 - Manage shell sessions
 - Multiple clients can connect to the same session
-- Background process (`daemon`) manages all pty processes
-- A cli tool to interact with `daemon` and all pty processes
+- Each session creates its own unix socket
 - Re-attaching to a session restores previous terminal state and output
 - The `daemon` and client processes communicate via a unix socket
-- The `daemon` is managed by a supervisor like `systemd`
+- All sessions (via unix socket files) are managed by `systemd`
 - We provide a `systemd` unit file that users can install that manages the `daemon` process
 - The cli tool supports the following commands:
   - `attach {session}`: attach to the pty process
@@ -25,7 +24,6 @@
 
 ## usage
 
-- `zmx daemon` - start the background process that all other commands communicate with
 - `zmx attach <session_name>` - create or attach to a session
 - `zmx detach` (or Ctrl+b + d) - detach from session while keeping pty alive
 - `zmx list` - list sessions
@@ -46,3 +44,9 @@ You can find the source code at this repo: https://github.com/shell-pool/shpool
 `shpool` can be thought of as a lighter weight alternative to tmux or GNU screen. While tmux and screen take over the whole terminal and provide window splitting and tiling features, `shpool` only provides persistent sessions.
 
 The biggest advantage of this approach is that `shpool` does not break native scrollback or copy-paste.
+
+### abduco
+
+You can find the source code at this repo: https://github.com/martanne/abduco
+
+abduco provides session management i.e. it allows programs to be run independently from its controlling terminal. That is programs can be detached - run in the background - and then later reattached. Together with dvtm it provides a simpler and cleaner alternative to tmux or screen.
