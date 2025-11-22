@@ -24,6 +24,11 @@ const c = switch (builtin.os.tag) {
 //     .log_level = .err,
 // };
 
+const Client = struct {
+    socket_fd: i32,
+    has_pending_output: bool = false,
+};
+
 const Cfg = struct {
     socket_dir: []const u8 = "/tmp/zmx",
     alloc: std.mem.Allocator,
@@ -36,6 +41,28 @@ const Cfg = struct {
             },
             else => return err,
         };
+    }
+};
+
+const Daemon = struct {
+    cfg: *Cfg,
+    alloc: std.mem.Allocator,
+    clients: std.ArrayList(*Client),
+    session_name: []const u8,
+    socket_path: []const u8,
+
+    pub fn deinit(self: *Daemon) void {
+        self.clients.deinit(self.alloc);
+        self.alloc.free(self.socket_path);
+    }
+
+    pub fn setSocketPath(self: *Daemon) !void {
+        const dir = self.cfg.socket_dir;
+        const fname = try self.alloc.alloc(u8, dir.len + self.session_name.len + 1);
+        @memcpy(fname[0..dir.len], dir);
+        @memcpy(fname[dir.len .. dir.len + 1], "/");
+        @memcpy(fname[dir.len + 1 ..], self.session_name);
+        self.socket_path = fname;
     }
 };
 
@@ -64,7 +91,17 @@ pub fn main() !void {
             std.log.err("session name required", .{});
             return;
         };
-        return attach(&cfg, session_name);
+        const clients = try std.ArrayList(*Client).initCapacity(alloc, 10);
+        var daemon = Daemon{
+            .cfg = &cfg,
+            .alloc = alloc,
+            .clients = clients,
+            .session_name = session_name,
+            .socket_path = undefined,
+        };
+        try daemon.setSocketPath();
+        std.log.info("socket path={s}", .{daemon.socket_path});
+        return attach(&daemon);
     } else {
         std.log.err("unknown cmd={s}", .{cmd});
     }
@@ -74,54 +111,135 @@ fn help() !void {
     std.log.info("running cmd=help", .{});
 }
 
-fn attach(cfg: *Cfg, name: []const u8) !void {
-    std.log.info("running cmd=attach {s}", .{name});
-    const fname = try socketPath(cfg, name);
-    defer cfg.alloc.free(fname);
-    std.log.info("socket path={s}", .{fname});
+fn attach(daemon: *Daemon) !void {
+    std.log.info("running cmd=attach {s}", .{daemon.session_name});
 
-    var dir = try std.fs.openDirAbsolute(cfg.socket_dir, .{});
+    var dir = try std.fs.openDirAbsolute(daemon.cfg.socket_dir, .{});
     defer dir.close();
 
-    const exists = try sessionExists(dir, name);
+    const exists = try sessionExists(dir, daemon.session_name);
     if (exists) {
-        std.log.info("reattaching to session: session_name={s}", .{name});
-        const socket_fd = try sessionConnect(fname);
-        std.log.info("unix socket connected: socket_fd={d}", .{socket_fd});
-        // TODO: spawn client
-        return;
+        std.log.info("reattaching to session: session_name={s}", .{daemon.session_name});
+        _ = try sessionConnect(daemon.socket_path);
+    } else {
+        std.log.info("creating session: session_name={s}", .{daemon.session_name});
+        const server_sock_fd = try createSocket(daemon.socket_path);
+        std.log.info("unix socket created: server_sock_fd={d}", .{server_sock_fd});
+
+        const pid = try posix.fork();
+        if (pid == 0) { // child
+            _ = try posix.setsid();
+            const pty_fd = try spawnPty(daemon);
+            defer {
+                posix.close(server_sock_fd);
+                std.log.info("deleting socket file: fname={s}", .{daemon.socket_path});
+                dir.deleteFile(daemon.socket_path) catch {};
+            }
+            try daemonLoop(daemon, server_sock_fd, pty_fd);
+            std.process.exit(0);
+        }
+        posix.close(server_sock_fd);
+        std.Thread.sleep(10 * std.time.ns_per_ms);
     }
 
-    std.log.info("creating session: session_name={s}", .{name});
-    const fd = try createSocket(fname);
-    defer {
-        posix.close(fd);
-        std.log.info("deleting socket file: fname={s}", .{fname});
-        dir.deleteFile(name) catch {};
-    }
-    std.log.info("unix socket created: fd={d}", .{fd});
+    const client_sock = try sessionConnect(daemon.socket_path);
+    try clientLoop(client_sock);
+}
 
-    const pid = try posix.fork();
-    if (pid == 0) { // child
-        _ = try posix.setsid();
-        const socket_fd = try sessionConnect(fname);
-        std.log.info("unix socket connected: socket_fd={d}", .{socket_fd});
-        try spawnPty(cfg, name);
-        // TODO: spawn daemon
-        // TODO: spawn client
-    } else { // parent
-        const result = posix.waitpid(pid, 0);
+fn clientLoop(client_sock_fd: i32) !void {
+    // TODO: implement
+}
 
-        if (posix.W.IFEXITED(result.status)) {
-            const exit_status = posix.W.EXITSTATUS(result.status);
-            std.log.info("daemon exited with status: status={d}", .{exit_status});
-        } else {
-            std.log.err("daemon terminated abnormally", .{});
+fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
+    var should_exit = false;
+    var poll_fds = try std.ArrayList(posix.pollfd).initCapacity(daemon.alloc, 8);
+    defer poll_fds.deinit(daemon.alloc);
+
+    while (!should_exit) {
+        poll_fds.clearRetainingCapacity();
+
+        try poll_fds.append(daemon.alloc, .{
+            .fd = server_sock_fd,
+            .events = posix.POLL.IN,
+            .revents = 0,
+        });
+
+        try poll_fds.append(daemon.alloc, .{
+            .fd = pty_fd,
+            .events = posix.POLL.IN,
+            .revents = 0,
+        });
+
+        for (daemon.clients.items) |client| {
+            var events: i16 = posix.POLL.IN;
+            if (client.has_pending_output) {
+                events |= posix.POLL.OUT;
+            }
+            try poll_fds.append(daemon.alloc, .{
+                .fd = client.socket_fd,
+                .events = events,
+                .revents = 0,
+            });
+        }
+
+        _ = posix.poll(poll_fds.items, -1) catch |err| {
+            if (err == error.SystemResources) {
+                // Interrupted by signal (EINTR) - check flags (e.g. child exit) and continue
+                continue;
+            }
+            return err;
+        };
+
+        if (poll_fds.items[0].revents & posix.POLL.IN != 0) {
+            const client_fd = try posix.accept(server_sock_fd, null, null, posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC);
+            const client = try daemon.alloc.create(Client);
+            client.* = Client{
+                .socket_fd = client_fd,
+            };
+            try daemon.clients.append(daemon.alloc, client);
+        }
+
+        if (poll_fds.items[1].revents & posix.POLL.IN != 0) {
+            // Read from PTY
+            var buf: [4096]u8 = undefined;
+            const n = posix.read(pty_fd, &buf) catch 0;
+            if (n == 0) {
+                // EOF: Shell exited
+                should_exit = true;
+            } else {
+                // Broadcast data to all clients
+                // If write blocks, buffer it and set client.has_pending_output
+            }
+        }
+
+        var i: usize = daemon.clients.items.len;
+        while (i > 0) {
+            i -= 1;
+            const client = daemon.clients.items[i];
+            const revents = poll_fds.items[i + 2].revents;
+
+            if (revents & posix.POLL.IN != 0) {
+                // TODO: read from client
+                // parse packets (attach, resize, input, detach)
+                // if input -> write to pty
+                // if resize -> ioctl(pty_fd, tiocswinsz, ...)
+                // if detach/error -> close and remove client
+            }
+
+            if (revents & posix.POLL.OUT != 0) {
+                // Flush pending output buffers
+            }
+
+            if (revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
+                posix.close(client.socket_fd);
+                daemon.alloc.destroy(client);
+                _ = daemon.clients.orderedRemove(i);
+            }
         }
     }
 }
 
-fn spawnPty(cfg: *Cfg, name: []const u8) !void {
+fn spawnPty(daemon: *Daemon) !c_int {
     // Get terminal size
     var orig_ws: c.struct_winsize = undefined;
     const result = c.ioctl(posix.STDOUT_FILENO, c.TIOCGWINSZ, &orig_ws);
@@ -141,7 +259,7 @@ fn spawnPty(cfg: *Cfg, name: []const u8) !void {
     }
 
     if (pid == 0) { // child pid code path
-        const session_env = try std.fmt.allocPrint(cfg.alloc, "ZMX_SESSION={s}\x00", .{name});
+        const session_env = try std.fmt.allocPrint(daemon.alloc, "ZMX_SESSION={s}\x00", .{daemon.session_name});
         _ = c.putenv(@ptrCast(session_env.ptr));
 
         const shell = std.posix.getenv("SHELL") orelse "/bin/sh";
@@ -152,11 +270,12 @@ fn spawnPty(cfg: *Cfg, name: []const u8) !void {
     }
     // master pid code path
 
-    std.log.info("created pty session: session_name={s} master_pid={d} child_pid={d}", .{ name, master_fd, pid });
+    std.log.info("created pty session: session_name={s} master_pid={d} child_pid={d}", .{ daemon.session_name, master_fd, pid });
 
     // make pty non-blocking
     const flags = try posix.fcntl(master_fd, posix.F.GETFL, 0);
     _ = try posix.fcntl(master_fd, posix.F.SETFL, flags | @as(u32, 0o4000));
+    return master_fd;
 }
 
 fn sessionConnect(fname: []const u8) !i32 {
@@ -169,6 +288,7 @@ fn sessionConnect(fname: []const u8) !i32 {
         }
         return err;
     };
+    std.log.info("unix socket connected: client_socket_fd={d}", .{socket_fd});
     return socket_fd;
 }
 
@@ -181,14 +301,6 @@ fn sessionExists(dir: std.fs.Dir, name: []const u8) !bool {
         return error.FileNotUnixSocket;
     }
     return true;
-}
-
-fn socketPath(cfg: *Cfg, name: []const u8) ![]const u8 {
-    const fname = try cfg.alloc.alloc(u8, cfg.socket_dir.len + name.len + 1);
-    @memcpy(fname[0..cfg.socket_dir.len], cfg.socket_dir);
-    @memcpy(fname[cfg.socket_dir.len .. cfg.socket_dir.len + 1], "/");
-    @memcpy(fname[cfg.socket_dir.len + 1 ..], name);
-    return fname;
 }
 
 fn createSocket(fname: []const u8) !i32 {
