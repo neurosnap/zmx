@@ -1,5 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
+const ipc = @import("ipc.zig");
 const builtin = @import("builtin");
 
 const c = switch (builtin.os.tag) {
@@ -7,16 +8,19 @@ const c = switch (builtin.os.tag) {
         @cInclude("sys/ioctl.h"); // ioctl and constants
         @cInclude("util.h"); // openpty()
         @cInclude("stdlib.h");
+        @cInclude("unistd.h");
     }),
     .freebsd => @cImport({
         @cInclude("termios.h"); // ioctl and constants
         @cInclude("libutil.h"); // openpty()
         @cInclude("stdlib.h");
+        @cInclude("unistd.h");
     }),
     else => @cImport({
         @cInclude("sys/ioctl.h"); // ioctl and constants
         @cInclude("pty.h");
         @cInclude("stdlib.h");
+        @cInclude("unistd.h");
     }),
 };
 
@@ -27,6 +31,8 @@ const c = switch (builtin.os.tag) {
 const Client = struct {
     socket_fd: i32,
     has_pending_output: bool = false,
+    read_buf: ipc.SocketBuffer,
+    write_buf: std.ArrayList(u8),
 };
 
 const Cfg = struct {
@@ -118,10 +124,25 @@ fn attach(daemon: *Daemon) !void {
     defer dir.close();
 
     const exists = try sessionExists(dir, daemon.session_name);
+    var should_create = !exists;
+
     if (exists) {
         std.log.info("reattaching to session: session_name={s}", .{daemon.session_name});
-        _ = try sessionConnect(daemon.socket_path);
-    } else {
+        const fd = sessionConnect(daemon.socket_path) catch |err| switch (err) {
+            error.ConnectionRefused => blk: {
+                std.log.warn("stale socket found, cleaning up: fname={s}", .{daemon.socket_path});
+                try dir.deleteFile(daemon.socket_path);
+                should_create = true;
+                break :blk -1;
+            },
+            else => return err,
+        };
+        if (fd != -1) {
+            posix.close(fd);
+        }
+    }
+
+    if (should_create) {
         std.log.info("creating session: session_name={s}", .{daemon.session_name});
         const server_sock_fd = try createSocket(daemon.socket_path);
         std.log.info("unix socket created: server_sock_fd={d}", .{server_sock_fd});
@@ -143,11 +164,161 @@ fn attach(daemon: *Daemon) !void {
     }
 
     const client_sock = try sessionConnect(daemon.socket_path);
+
+    //  this is typically used with tcsetattr() to modify terminal settings.
+    //      - you first get the current settings with tcgetattr()
+    //      - modify the desired attributes in the termios structure
+    //      - then apply the changes with tcsetattr().
+    //  This prevents unintended side effects by preserving other settings.
+    var orig_termios: c.termios = undefined;
+    _ = c.tcgetattr(posix.STDIN_FILENO, &orig_termios);
+
+    // restore stdin fd to its original state and exit alternate buffer after exiting.
+    defer {
+        _ = c.tcsetattr(posix.STDIN_FILENO, c.TCSANOW, &orig_termios);
+        // Restore normal buffer and show cursor
+        const restore_seq = "\x1b[?25h\x1b[?1049l";
+        _ = posix.write(posix.STDOUT_FILENO, restore_seq) catch {};
+    }
+
+    var raw_termios = orig_termios;
+    //  set raw mode after successful connection.
+    //      disables canonical mode (line buffering), input echoing, signal generation from
+    //      control characters (like Ctrl+C), and flow control.
+    c.cfmakeraw(&raw_termios);
+
+    // Additional granular raw mode settings for precise control
+    // (matches what abduco and shpool do)
+    raw_termios.c_cc[c.VLNEXT] = c._POSIX_VDISABLE; // Disable literal-next (Ctrl-V)
+    raw_termios.c_cc[c.VMIN] = 1; // Minimum chars to read: return after 1 byte
+    raw_termios.c_cc[c.VTIME] = 0; // Read timeout: no timeout, return immediately
+
+    _ = c.tcsetattr(posix.STDIN_FILENO, c.TCSANOW, &raw_termios);
+
+    // Switch to alternate screen buffer and home cursor
+    // This prevents session output from polluting the terminal after detach
+    const alt_buffer_seq = "\x1b[?1049h\x1b[H";
+    _ = try posix.write(posix.STDOUT_FILENO, alt_buffer_seq);
+
     try clientLoop(client_sock);
 }
 
 fn clientLoop(client_sock_fd: i32) !void {
-    // TODO: implement
+    // use c_allocator to avoid "reached unreachable code" panic in DebugAllocator when forking
+    const alloc = std.heap.c_allocator;
+
+    var poll_fds = try std.ArrayList(posix.pollfd).initCapacity(alloc, 2);
+    defer poll_fds.deinit(alloc);
+
+    var read_buf = try ipc.SocketBuffer.init(alloc);
+    defer read_buf.deinit();
+
+    var stdout_buf = try std.ArrayList(u8).initCapacity(alloc, 4096);
+    defer stdout_buf.deinit(alloc);
+
+    const stdin_fd = posix.STDIN_FILENO;
+
+    // Make stdin non-blocking
+    const flags = try posix.fcntl(stdin_fd, posix.F.GETFL, 0);
+    _ = try posix.fcntl(stdin_fd, posix.F.SETFL, flags | posix.SOCK.NONBLOCK);
+
+    while (true) {
+        poll_fds.clearRetainingCapacity();
+
+        try poll_fds.append(alloc, .{
+            .fd = stdin_fd,
+            .events = posix.POLL.IN,
+            .revents = 0,
+        });
+
+        try poll_fds.append(alloc, .{
+            .fd = client_sock_fd,
+            .events = posix.POLL.IN,
+            .revents = 0,
+        });
+
+        if (stdout_buf.items.len > 0) {
+            try poll_fds.append(alloc, .{
+                .fd = posix.STDOUT_FILENO,
+                .events = posix.POLL.OUT,
+                .revents = 0,
+            });
+        }
+
+        _ = posix.poll(poll_fds.items, -1) catch |err| {
+            if (err == error.SystemResources) continue;
+            return err;
+        };
+
+        // Handle stdin -> socket (Input)
+        if (poll_fds.items[0].revents & (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR) != 0) {
+            var buf: [4096]u8 = undefined;
+            const n_opt: ?usize = posix.read(stdin_fd, &buf) catch |err| blk: {
+                if (err == error.WouldBlock) break :blk null;
+                return err;
+            };
+
+            if (n_opt) |n| {
+                if (n > 0) {
+                    ipc.send(client_sock_fd, .Input, buf[0..n]) catch |err| switch (err) {
+                        error.BrokenPipe, error.ConnectionResetByPeer => return,
+                        else => return err,
+                    };
+                } else {
+                    // EOF on stdin
+                    return;
+                }
+            }
+        }
+
+        // Handle socket -> stdout (Output)
+        if (poll_fds.items[1].revents & posix.POLL.IN != 0) {
+            const n = read_buf.read(client_sock_fd) catch |err| {
+                if (err == error.WouldBlock) continue;
+                if (err == error.ConnectionResetByPeer or err == error.BrokenPipe) {
+                    std.log.info("client: daemon disconnected", .{});
+                    return;
+                }
+                std.log.err("client: read error from daemon: {s}", .{@errorName(err)});
+                return err;
+            };
+            if (n == 0) {
+                std.log.info("client: daemon closed connection", .{});
+                return; // Server closed connection
+            }
+
+            const Ctx = struct {
+                buf: *std.ArrayList(u8),
+                alloc: std.mem.Allocator,
+            };
+            try read_buf.process(Ctx{ .buf = &stdout_buf, .alloc = alloc }, struct {
+                fn handler(ctx: Ctx, header: ipc.Header, payload: []u8) !void {
+                    switch (header.tag) {
+                        .Output => {
+                            if (payload.len > 0) {
+                                try ctx.buf.appendSlice(ctx.alloc, payload);
+                            }
+                        },
+                        else => {},
+                    }
+                }
+            }.handler);
+        }
+
+        if (stdout_buf.items.len > 0) {
+            const n = posix.write(posix.STDOUT_FILENO, stdout_buf.items) catch |err| blk: {
+                if (err == error.WouldBlock) break :blk 0;
+                return err;
+            };
+            if (n > 0) {
+                try stdout_buf.replaceRange(alloc, 0, n, &[_]u8{});
+            }
+        }
+
+        if (poll_fds.items[1].revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
+            return;
+        }
+    }
 }
 
 fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
@@ -195,43 +366,132 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
             const client = try daemon.alloc.create(Client);
             client.* = Client{
                 .socket_fd = client_fd,
+                .read_buf = try ipc.SocketBuffer.init(daemon.alloc),
+                .write_buf = try std.ArrayList(u8).initCapacity(daemon.alloc, 4096),
             };
             try daemon.clients.append(daemon.alloc, client);
         }
 
-        if (poll_fds.items[1].revents & posix.POLL.IN != 0) {
+        if (poll_fds.items[1].revents & (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR) != 0) {
             // Read from PTY
             var buf: [4096]u8 = undefined;
-            const n = posix.read(pty_fd, &buf) catch 0;
-            if (n == 0) {
-                // EOF: Shell exited
-                should_exit = true;
-            } else {
-                // Broadcast data to all clients
-                // If write blocks, buffer it and set client.has_pending_output
+            const n_opt: ?usize = posix.read(pty_fd, &buf) catch |err| blk: {
+                if (err == error.WouldBlock) break :blk null;
+                break :blk 0;
+            };
+
+            if (n_opt) |n| {
+                if (n == 0) {
+                    // EOF: Shell exited
+                    std.log.info("pty: shell exited", .{});
+                    should_exit = true;
+                } else {
+                    // Broadcast data to all clients
+                    for (daemon.clients.items) |client| {
+                        ipc.appendMessage(daemon.alloc, &client.write_buf, .Output, buf[0..n]) catch |err| {
+                            std.log.warn("failed to buffer output for client: err={s}", .{@errorName(err)});
+                            continue;
+                        };
+                        client.has_pending_output = true;
+                    }
+                }
             }
         }
 
         var i: usize = daemon.clients.items.len;
+        // Only iterate over clients that were present when poll_fds was constructed
+        // poll_fds contains [server, pty, client0, client1, ...]
+        // So number of clients in poll_fds is poll_fds.items.len - 2
+        const num_polled_clients = poll_fds.items.len - 2;
+        if (i > num_polled_clients) {
+            // If we have more clients than polled (i.e. we just accepted one), start from the polled ones
+            i = num_polled_clients;
+        }
+
         while (i > 0) {
             i -= 1;
             const client = daemon.clients.items[i];
             const revents = poll_fds.items[i + 2].revents;
 
             if (revents & posix.POLL.IN != 0) {
-                // TODO: read from client
-                // parse packets (attach, resize, input, detach)
-                // if input -> write to pty
-                // if resize -> ioctl(pty_fd, tiocswinsz, ...)
-                // if detach/error -> close and remove client
+                const n = client.read_buf.read(client.socket_fd) catch |err| {
+                    if (err == error.WouldBlock) continue;
+                    std.log.warn("client read error: err={s}", .{@errorName(err)});
+                    // Force close on error
+                    posix.close(client.socket_fd);
+                    client.read_buf.deinit();
+                    client.write_buf.deinit(daemon.alloc);
+                    daemon.alloc.destroy(client);
+                    _ = daemon.clients.orderedRemove(i);
+                    continue;
+                };
+
+                if (n == 0) {
+                    // Client closed connection
+                    posix.close(client.socket_fd);
+                    client.read_buf.deinit();
+                    client.write_buf.deinit(daemon.alloc);
+                    daemon.alloc.destroy(client);
+                    _ = daemon.clients.orderedRemove(i);
+                    continue;
+                }
+
+                const Ctx = struct {
+                    pty_fd: i32,
+                };
+                try client.read_buf.process(Ctx{ .pty_fd = pty_fd }, struct {
+                    fn handler(ctx: Ctx, header: ipc.Header, payload: []u8) !void {
+                        switch (header.tag) {
+                            .Input => {
+                                if (payload.len > 0) {
+                                    _ = try posix.write(ctx.pty_fd, payload);
+                                }
+                            },
+                            .Resize => {
+                                if (payload.len == @sizeOf(ipc.Resize)) {
+                                    const resize = std.mem.bytesToValue(ipc.Resize, payload);
+                                    var ws: c.struct_winsize = .{
+                                        .ws_row = resize.rows,
+                                        .ws_col = resize.cols,
+                                        .ws_xpixel = 0,
+                                        .ws_ypixel = 0,
+                                    };
+                                    _ = c.ioctl(ctx.pty_fd, c.TIOCSWINSZ, &ws);
+                                }
+                            },
+                            .Output => {}, // Clients shouldn't send output
+                            .Pid => {}, // Clients shouldn't send pid
+                        }
+                    }
+                }.handler);
             }
 
             if (revents & posix.POLL.OUT != 0) {
                 // Flush pending output buffers
+                const n = posix.write(client.socket_fd, client.write_buf.items) catch |err| blk: {
+                    if (err == error.WouldBlock) break :blk 0;
+                    // Error on write, close client
+                    posix.close(client.socket_fd);
+                    client.read_buf.deinit();
+                    client.write_buf.deinit(daemon.alloc);
+                    daemon.alloc.destroy(client);
+                    _ = daemon.clients.orderedRemove(i);
+                    continue;
+                };
+
+                if (n > 0) {
+                    client.write_buf.replaceRange(daemon.alloc, 0, n, &[_]u8{}) catch unreachable;
+                }
+
+                if (client.write_buf.items.len == 0) {
+                    client.has_pending_output = false;
+                }
             }
 
             if (revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
                 posix.close(client.socket_fd);
+                client.read_buf.deinit();
+                client.write_buf.deinit(daemon.alloc);
                 daemon.alloc.destroy(client);
                 _ = daemon.clients.orderedRemove(i);
             }
@@ -280,7 +540,7 @@ fn spawnPty(daemon: *Daemon) !c_int {
 
 fn sessionConnect(fname: []const u8) !i32 {
     var unix_addr = try std.net.Address.initUnix(fname);
-    const socket_fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+    const socket_fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
     posix.connect(socket_fd, &unix_addr.any, unix_addr.getOsSockLen()) catch |err| {
         if (err == error.ConnectionRefused) {
             std.log.err("unable to connect to unix socket: fname={s}", .{fname});
@@ -306,7 +566,8 @@ fn sessionExists(dir: std.fs.Dir, name: []const u8) !bool {
 fn createSocket(fname: []const u8) !i32 {
     // AF.UNIX: Unix domain socket for local IPC with client processes
     // SOCK.STREAM: Reliable, bidirectional communication
-    const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.NONBLOCK, 0);
+    // SOCK.NONBLOCK: Set socket to non-blocking
+    const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC, 0);
 
     var unix_addr = try std.net.Address.initUnix(fname);
     try posix.bind(fd, &unix_addr.any, unix_addr.getOsSockLen());
