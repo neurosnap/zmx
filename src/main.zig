@@ -44,6 +44,8 @@ const Client = struct {
 
 const Cfg = struct {
     socket_dir: []const u8 = "/tmp/zmx",
+    prefix_key: []const u8 = "^", // control key
+    detach_key: []const u8 = "\\", // backslash key
 
     pub fn mkdir(self: *Cfg) !void {
         std.log.info("creating socket dir: socket_dir={s}", .{self.socket_dir});
@@ -232,11 +234,13 @@ fn attach(daemon: *Daemon) !void {
             const pty_fd = try spawnPty(daemon);
             defer {
                 posix.close(server_sock_fd);
-                std.log.info("deleting socket file fname={s}", .{daemon.socket_path});
-                dir.deleteFile(daemon.socket_path) catch {};
+                std.log.info("deleting socket file session_name={s}", .{daemon.session_name});
+                dir.deleteFile(daemon.session_name) catch |err| {
+                    std.log.warn("failed to delete socket file err={s}", .{@errorName(err)});
+                };
             }
             try daemonLoop(daemon, server_sock_fd, pty_fd);
-            std.process.exit(0);
+            return;
         }
         posix.close(server_sock_fd);
         std.Thread.sleep(10 * std.time.ns_per_ms);
@@ -277,7 +281,6 @@ fn attach(daemon: *Daemon) !void {
 
     // Switch to alternate screen buffer and home cursor
     // This prevents session output from polluting the terminal after detach
-    std.log.info("switching stdin to alt-screen", .{});
     const alt_buffer_seq = "\x1b[?1049h\x1b[H";
     _ = try posix.write(posix.STDOUT_FILENO, alt_buffer_seq);
 
@@ -639,7 +642,7 @@ fn sessionExists(dir: std.fs.Dir, name: []const u8) !bool {
 }
 
 fn createSocket(fname: []const u8) !i32 {
-    std.log.info("creating unix socket fname={s}", fname);
+    std.log.info("creating unix socket fname={s}", .{fname});
     // AF.UNIX: Unix domain socket for local IPC with client processes
     // SOCK.STREAM: Reliable, bidirectional communication
     // SOCK.NONBLOCK: Set socket to non-blocking
