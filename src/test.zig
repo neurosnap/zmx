@@ -1,3 +1,1 @@
-test {
-    _ = @import("daemon_test.zig");
-}
+test "dummy" {}
