@@ -6,6 +6,8 @@ pub const Tag = enum(u8) {
     Output = 1,
     Resize = 2,
     Pid = 3,
+    Detach = 4,
+    Kill = 5,
 };
 
 pub const Header = packed struct {
@@ -40,11 +42,6 @@ pub fn send(fd: i32, tag: Tag, data: []const u8) !void {
     }
 }
 
-pub fn sendStruct(fd: i32, tag: Tag, payload: anytype) !void {
-    const bytes = std.mem.asBytes(&payload);
-    return send(fd, tag, bytes);
-}
-
 pub fn appendMessage(alloc: std.mem.Allocator, list: *std.ArrayList(u8), tag: Tag, data: []const u8) !void {
     const header = Header{
         .tag = tag,
@@ -76,14 +73,21 @@ pub const Message = struct {
     }
 };
 
+pub const SocketMsg = struct {
+    header: Header,
+    payload: []const u8,
+};
+
 pub const SocketBuffer = struct {
     buf: std.ArrayList(u8),
     alloc: std.mem.Allocator,
+    head: usize,
 
     pub fn init(alloc: std.mem.Allocator) !SocketBuffer {
         return .{
             .buf = try std.ArrayList(u8).initCapacity(alloc, 4096),
             .alloc = alloc,
+            .head = 0,
         };
     }
 
@@ -96,6 +100,17 @@ pub const SocketBuffer = struct {
     /// Propagates error.WouldBlock and other errors to caller.
     /// Returns 0 on EOF.
     pub fn read(self: *SocketBuffer, fd: i32) !usize {
+        if (self.head > 0) {
+            const remaining = self.buf.items.len - self.head;
+            if (remaining > 0) {
+                std.mem.copyForwards(u8, self.buf.items[0..remaining], self.buf.items[self.head..]);
+                self.buf.items.len = remaining;
+            } else {
+                self.buf.clearRetainingCapacity();
+            }
+            self.head = 0;
+        }
+
         var tmp: [4096]u8 = undefined;
         const n = try posix.read(fd, &tmp);
         if (n > 0) {
@@ -104,20 +119,18 @@ pub const SocketBuffer = struct {
         return n;
     }
 
-    /// Process all complete messages in the buffer.
-    /// callback is called for each message.
-    /// The payload slice is valid only during the callback execution.
-    pub fn process(self: *SocketBuffer, context: anytype, callback: fn (ctx: @TypeOf(context), header: Header, payload: []u8) anyerror!void) !void {
-        while (true) {
-            const total_len = expectedLength(self.buf.items) orelse break;
-            if (self.buf.items.len < total_len) break;
+    /// Returns the next complete message or `null` when none available.
+    /// `buf` is advanced automatically; caller keeps the returned slices
+    /// valid until the following `next()` (or `deinit`).
+    pub fn next(self: *SocketBuffer) ?SocketMsg {
+        const available = self.buf.items[self.head..];
+        const total = expectedLength(available) orelse return null;
+        if (available.len < total) return null;
 
-            const header = std.mem.bytesToValue(Header, self.buf.items[0..@sizeOf(Header)]);
-            const payload = self.buf.items[@sizeOf(Header)..total_len];
+        const hdr = std.mem.bytesToValue(Header, available[0..@sizeOf(Header)]);
+        const pay = available[@sizeOf(Header)..total];
 
-            try callback(context, header, payload);
-
-            try self.buf.replaceRange(self.alloc, 0, total_len, &[_]u8{});
-        }
+        self.head += total;
+        return .{ .header = hdr, .payload = pay };
     }
 };

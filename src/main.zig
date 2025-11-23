@@ -29,15 +29,21 @@ const c = switch (builtin.os.tag) {
 // };
 
 const Client = struct {
+    alloc: std.mem.Allocator,
     socket_fd: i32,
     has_pending_output: bool = false,
     read_buf: ipc.SocketBuffer,
     write_buf: std.ArrayList(u8),
+
+    pub fn deinit(self: *Client) void {
+        posix.close(self.socket_fd);
+        self.read_buf.deinit();
+        self.write_buf.deinit(self.alloc);
+    }
 };
 
 const Cfg = struct {
     socket_dir: []const u8 = "/tmp/zmx",
-    alloc: std.mem.Allocator,
 
     pub fn mkdir(self: *Cfg) !void {
         std.log.info("creating socket dir: socket_dir={s}", .{self.socket_dir});
@@ -56,19 +62,21 @@ const Daemon = struct {
     clients: std.ArrayList(*Client),
     session_name: []const u8,
     socket_path: []const u8,
+    running: bool,
 
     pub fn deinit(self: *Daemon) void {
         self.clients.deinit(self.alloc);
         self.alloc.free(self.socket_path);
     }
 
-    pub fn setSocketPath(self: *Daemon) !void {
-        const dir = self.cfg.socket_dir;
-        const fname = try self.alloc.alloc(u8, dir.len + self.session_name.len + 1);
-        @memcpy(fname[0..dir.len], dir);
-        @memcpy(fname[dir.len .. dir.len + 1], "/");
-        @memcpy(fname[dir.len + 1 ..], self.session_name);
-        self.socket_path = fname;
+    pub fn shutdown(self: *Daemon) void {
+        self.running = false;
+
+        for (self.clients.items) |client| {
+            client.deinit();
+            self.alloc.destroy(client);
+        }
+        self.clients.clearRetainingCapacity();
     }
 };
 
@@ -81,9 +89,7 @@ pub fn main() !void {
     defer args.deinit();
     _ = args.skip(); // skip program name
 
-    var cfg = Cfg{
-        .alloc = alloc,
-    };
+    var cfg = Cfg{};
     try cfg.mkdir();
 
     const cmd = args.next() orelse {
@@ -92,6 +98,8 @@ pub fn main() !void {
 
     if (std.mem.eql(u8, cmd, "help")) {
         return help();
+    } else if (std.mem.eql(u8, cmd, "detach")) {
+        return detach(&cfg);
     } else if (std.mem.eql(u8, cmd, "attach")) {
         const session_name = args.next() orelse {
             std.log.err("session name required", .{});
@@ -99,13 +107,14 @@ pub fn main() !void {
         };
         const clients = try std.ArrayList(*Client).initCapacity(alloc, 10);
         var daemon = Daemon{
+            .running = true,
             .cfg = &cfg,
             .alloc = alloc,
             .clients = clients,
             .session_name = session_name,
             .socket_path = undefined,
         };
-        try daemon.setSocketPath();
+        daemon.socket_path = try getSocketPath(alloc, cfg.socket_dir, session_name);
         std.log.info("socket path={s}", .{daemon.socket_path});
         return attach(&daemon);
     } else {
@@ -115,6 +124,29 @@ pub fn main() !void {
 
 fn help() !void {
     std.log.info("running cmd=help", .{});
+}
+
+fn detach(cfg: *Cfg) !void {
+    std.log.info("running cmd=detach", .{});
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+    const session_name = std.process.getEnvVarOwned(alloc, "ZMX_SESSION") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => {
+            std.log.err("ZMX_SESSION env var not found. Are you inside a zmx session?", .{});
+            return;
+        },
+        else => return err,
+    };
+    defer alloc.free(session_name);
+
+    const socket_path = try getSocketPath(alloc, cfg.socket_dir, session_name);
+    defer alloc.free(socket_path);
+    const client_sock_fd = try sessionConnect(socket_path);
+    ipc.send(client_sock_fd, .Detach, "") catch |err| switch (err) {
+        error.BrokenPipe, error.ConnectionResetByPeer => return,
+        else => return err,
+    };
 }
 
 fn attach(daemon: *Daemon) !void {
@@ -287,22 +319,16 @@ fn clientLoop(client_sock_fd: i32) !void {
                 return; // Server closed connection
             }
 
-            const Ctx = struct {
-                buf: *std.ArrayList(u8),
-                alloc: std.mem.Allocator,
-            };
-            try read_buf.process(Ctx{ .buf = &stdout_buf, .alloc = alloc }, struct {
-                fn handler(ctx: Ctx, header: ipc.Header, payload: []u8) !void {
-                    switch (header.tag) {
-                        .Output => {
-                            if (payload.len > 0) {
-                                try ctx.buf.appendSlice(ctx.alloc, payload);
-                            }
-                        },
-                        else => {},
-                    }
+            while (read_buf.next()) |msg| {
+                switch (msg.header.tag) {
+                    .Output => {
+                        if (msg.payload.len > 0) {
+                            try stdout_buf.appendSlice(alloc, msg.payload);
+                        }
+                    },
+                    else => {},
                 }
-            }.handler);
+            }
         }
 
         if (stdout_buf.items.len > 0) {
@@ -326,7 +352,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
     var poll_fds = try std.ArrayList(posix.pollfd).initCapacity(daemon.alloc, 8);
     defer poll_fds.deinit(daemon.alloc);
 
-    while (!should_exit) {
+    while (!should_exit and daemon.running) {
         poll_fds.clearRetainingCapacity();
 
         try poll_fds.append(daemon.alloc, .{
@@ -365,10 +391,12 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
             const client_fd = try posix.accept(server_sock_fd, null, null, posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC);
             const client = try daemon.alloc.create(Client);
             client.* = Client{
+                .alloc = daemon.alloc,
                 .socket_fd = client_fd,
                 .read_buf = try ipc.SocketBuffer.init(daemon.alloc),
-                .write_buf = try std.ArrayList(u8).initCapacity(daemon.alloc, 4096),
+                .write_buf = undefined,
             };
+            client.write_buf = try std.ArrayList(u8).initCapacity(client.alloc, 4096);
             try daemon.clients.append(daemon.alloc, client);
         }
 
@@ -408,7 +436,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
             i = num_polled_clients;
         }
 
-        while (i > 0) {
+        clients_loop: while (i > 0) {
             i -= 1;
             const client = daemon.clients.items[i];
             const revents = poll_fds.items[i + 2].revents;
@@ -417,10 +445,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                 const n = client.read_buf.read(client.socket_fd) catch |err| {
                     if (err == error.WouldBlock) continue;
                     std.log.warn("client read error: err={s}", .{@errorName(err)});
-                    // Force close on error
-                    posix.close(client.socket_fd);
-                    client.read_buf.deinit();
-                    client.write_buf.deinit(daemon.alloc);
+                    client.deinit();
                     daemon.alloc.destroy(client);
                     _ = daemon.clients.orderedRemove(i);
                     continue;
@@ -428,42 +453,48 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
 
                 if (n == 0) {
                     // Client closed connection
-                    posix.close(client.socket_fd);
-                    client.read_buf.deinit();
-                    client.write_buf.deinit(daemon.alloc);
+                    client.deinit();
                     daemon.alloc.destroy(client);
                     _ = daemon.clients.orderedRemove(i);
                     continue;
                 }
 
-                const Ctx = struct {
-                    pty_fd: i32,
-                };
-                try client.read_buf.process(Ctx{ .pty_fd = pty_fd }, struct {
-                    fn handler(ctx: Ctx, header: ipc.Header, payload: []u8) !void {
-                        switch (header.tag) {
-                            .Input => {
-                                if (payload.len > 0) {
-                                    _ = try posix.write(ctx.pty_fd, payload);
-                                }
-                            },
-                            .Resize => {
-                                if (payload.len == @sizeOf(ipc.Resize)) {
-                                    const resize = std.mem.bytesToValue(ipc.Resize, payload);
-                                    var ws: c.struct_winsize = .{
-                                        .ws_row = resize.rows,
-                                        .ws_col = resize.cols,
-                                        .ws_xpixel = 0,
-                                        .ws_ypixel = 0,
-                                    };
-                                    _ = c.ioctl(ctx.pty_fd, c.TIOCSWINSZ, &ws);
-                                }
-                            },
-                            .Output => {}, // Clients shouldn't send output
-                            .Pid => {}, // Clients shouldn't send pid
-                        }
+                while (client.read_buf.next()) |msg| {
+                    switch (msg.header.tag) {
+                        .Input => {
+                            if (msg.payload.len > 0) {
+                                _ = try posix.write(pty_fd, msg.payload);
+                            }
+                        },
+                        .Resize => {
+                            if (msg.payload.len == @sizeOf(ipc.Resize)) {
+                                const resize = std.mem.bytesToValue(ipc.Resize, msg.payload);
+                                var ws: c.struct_winsize = .{
+                                    .ws_row = resize.rows,
+                                    .ws_col = resize.cols,
+                                    .ws_xpixel = 0,
+                                    .ws_ypixel = 0,
+                                };
+                                _ = c.ioctl(pty_fd, c.TIOCSWINSZ, &ws);
+                            }
+                        },
+                        .Detach => {
+                            for (daemon.clients.items) |client_to_close| {
+                                client_to_close.deinit();
+                                daemon.alloc.destroy(client_to_close);
+                            }
+                            daemon.clients.clearRetainingCapacity();
+                            break :clients_loop;
+                        },
+                        .Kill => {
+                            daemon.shutdown();
+                            should_exit = true;
+                            break :clients_loop;
+                        },
+                        .Pid => {},
+                        .Output => {}, // Clients shouldn't send output
                     }
-                }.handler);
+                }
             }
 
             if (revents & posix.POLL.OUT != 0) {
@@ -471,9 +502,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                 const n = posix.write(client.socket_fd, client.write_buf.items) catch |err| blk: {
                     if (err == error.WouldBlock) break :blk 0;
                     // Error on write, close client
-                    posix.close(client.socket_fd);
-                    client.read_buf.deinit();
-                    client.write_buf.deinit(daemon.alloc);
+                    client.deinit();
                     daemon.alloc.destroy(client);
                     _ = daemon.clients.orderedRemove(i);
                     continue;
@@ -489,9 +518,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
             }
 
             if (revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
-                posix.close(client.socket_fd);
-                client.read_buf.deinit();
-                client.write_buf.deinit(daemon.alloc);
+                client.deinit();
                 daemon.alloc.destroy(client);
                 _ = daemon.clients.orderedRemove(i);
             }
@@ -573,6 +600,15 @@ fn createSocket(fname: []const u8) !i32 {
     try posix.bind(fd, &unix_addr.any, unix_addr.getOsSockLen());
     try posix.listen(fd, 128);
     return fd;
+}
+
+pub fn getSocketPath(alloc: std.mem.Allocator, socket_dir: []const u8, session_name: []const u8) ![]const u8 {
+    const dir = socket_dir;
+    const fname = try alloc.alloc(u8, dir.len + session_name.len + 1);
+    @memcpy(fname[0..dir.len], dir);
+    @memcpy(fname[dir.len .. dir.len + 1], "/");
+    @memcpy(fname[dir.len + 1 ..], session_name);
+    return fname;
 }
 
 fn list(_: *Cfg) !void {
