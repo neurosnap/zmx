@@ -5,8 +5,8 @@ pub const Tag = enum(u8) {
     Input = 0,
     Output = 1,
     Resize = 2,
-    Pid = 3,
-    Detach = 4,
+    Detach = 3,
+    DetachAll = 4,
     Kill = 5,
 };
 
@@ -18,10 +18,6 @@ pub const Header = packed struct {
 pub const Resize = packed struct {
     rows: u16,
     cols: u16,
-};
-
-pub const Pid = packed struct {
-    pid: i32,
 };
 
 pub fn expectedLength(data: []const u8) ?usize {

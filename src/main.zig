@@ -82,12 +82,12 @@ const Daemon = struct {
         self.clients.clearRetainingCapacity();
     }
 
-    pub fn closeClient(self: *Daemon, client: *Client, i: usize) bool {
+    pub fn closeClient(self: *Daemon, client: *Client, i: usize, shutdown_on_last: bool) bool {
         std.log.info("closing client idx={d}", .{i});
         client.deinit();
         self.alloc.destroy(client);
         _ = self.clients.orderedRemove(i);
-        if (self.clients.items.len == 0) {
+        if (shutdown_on_last and self.clients.items.len == 0) {
             std.log.info("last client disconnected, shutting down", .{});
             self.shutdown();
             return true;
@@ -115,7 +115,7 @@ pub fn main() !void {
     if (std.mem.eql(u8, cmd, "help")) {
         return help();
     } else if (std.mem.eql(u8, cmd, "detach")) {
-        return detach(&cfg);
+        return detachAll(&cfg);
     } else if (std.mem.eql(u8, cmd, "kill")) {
         const session_name = args.next() orelse {
             std.log.err("session name required", .{});
@@ -152,7 +152,7 @@ fn list(_: *Cfg) !void {
     std.log.info("running cmd=list", .{});
 }
 
-fn detach(cfg: *Cfg) !void {
+fn detachAll(cfg: *Cfg) !void {
     std.log.info("running cmd=detach", .{});
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -169,7 +169,7 @@ fn detach(cfg: *Cfg) !void {
     const socket_path = try getSocketPath(alloc, cfg.socket_dir, session_name);
     defer alloc.free(socket_path);
     const client_sock_fd = try sessionConnect(socket_path);
-    ipc.send(client_sock_fd, .Detach, "") catch |err| switch (err) {
+    ipc.send(client_sock_fd, .DetachAll, "") catch |err| switch (err) {
         error.BrokenPipe, error.ConnectionResetByPeer => return,
         else => return err,
     };
@@ -499,14 +499,14 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                 const n = client.read_buf.read(client.socket_fd) catch |err| {
                     if (err == error.WouldBlock) continue;
                     std.log.warn("client read error err={s}", .{@errorName(err)});
-                    const last = daemon.closeClient(client, i);
+                    const last = daemon.closeClient(client, i, true);
                     if (last) should_exit = true;
                     continue;
                 };
 
                 if (n == 0) {
                     // Client closed connection
-                    const last = daemon.closeClient(client, i);
+                    const last = daemon.closeClient(client, i, true);
                     if (last) should_exit = true;
                     continue;
                 }
@@ -531,6 +531,10 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                             }
                         },
                         .Detach => {
+                            _ = daemon.closeClient(client, i, false);
+                            break :clients_loop;
+                        },
+                        .DetachAll => {
                             for (daemon.clients.items) |client_to_close| {
                                 client_to_close.deinit();
                                 daemon.alloc.destroy(client_to_close);
@@ -543,7 +547,6 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                             should_exit = true;
                             break :clients_loop;
                         },
-                        .Pid => {},
                         .Output => {}, // Clients shouldn't send output
                     }
                 }
@@ -554,7 +557,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                 const n = posix.write(client.socket_fd, client.write_buf.items) catch |err| blk: {
                     if (err == error.WouldBlock) break :blk 0;
                     // Error on write, close client
-                    const last = daemon.closeClient(client, i);
+                    const last = daemon.closeClient(client, i, true);
                     if (last) should_exit = true;
                     continue;
                 };
@@ -569,7 +572,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
             }
 
             if (revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
-                const last = daemon.closeClient(client, i);
+                const last = daemon.closeClient(client, i, true);
                 if (last) should_exit = true;
             }
         }
