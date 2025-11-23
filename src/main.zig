@@ -70,6 +70,7 @@ const Daemon = struct {
     }
 
     pub fn shutdown(self: *Daemon) void {
+        std.log.info("shutting down daemon session_name={s}", .{self.session_name});
         self.running = false;
 
         for (self.clients.items) |client| {
@@ -77,6 +78,19 @@ const Daemon = struct {
             self.alloc.destroy(client);
         }
         self.clients.clearRetainingCapacity();
+    }
+
+    pub fn closeClient(self: *Daemon, client: *Client, i: usize) bool {
+        std.log.info("closing client idx={d}", .{i});
+        client.deinit();
+        self.alloc.destroy(client);
+        _ = self.clients.orderedRemove(i);
+        if (self.clients.items.len == 0) {
+            std.log.info("last client disconnected, shutting down", .{});
+            self.shutdown();
+            return true;
+        }
+        return false;
     }
 };
 
@@ -100,6 +114,12 @@ pub fn main() !void {
         return help();
     } else if (std.mem.eql(u8, cmd, "detach")) {
         return detach(&cfg);
+    } else if (std.mem.eql(u8, cmd, "kill")) {
+        const session_name = args.next() orelse {
+            std.log.err("session name required", .{});
+            return;
+        };
+        return kill(&cfg, session_name);
     } else if (std.mem.eql(u8, cmd, "attach")) {
         const session_name = args.next() orelse {
             std.log.err("session name required", .{});
@@ -126,6 +146,10 @@ fn help() !void {
     std.log.info("running cmd=help", .{});
 }
 
+fn list(_: *Cfg) !void {
+    std.log.info("running cmd=list", .{});
+}
+
 fn detach(cfg: *Cfg) !void {
     std.log.info("running cmd=detach", .{});
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -133,7 +157,7 @@ fn detach(cfg: *Cfg) !void {
     const alloc = gpa.allocator();
     const session_name = std.process.getEnvVarOwned(alloc, "ZMX_SESSION") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => {
-            std.log.err("ZMX_SESSION env var not found. Are you inside a zmx session?", .{});
+            std.log.err("ZMX_SESSION env var not found: are you inside a zmx session?", .{});
             return;
         },
         else => return err,
@@ -149,6 +173,29 @@ fn detach(cfg: *Cfg) !void {
     };
 }
 
+fn kill(cfg: *Cfg, session_name: []const u8) !void {
+    std.log.info("running cmd=kill session_name={s}", .{session_name});
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    var dir = try std.fs.openDirAbsolute(cfg.socket_dir, .{});
+    defer dir.close();
+
+    const exists = try sessionExists(dir, session_name);
+    if (!exists) {
+        std.log.err("cannot kill session because it does not exist session_name={s}", .{session_name});
+    }
+
+    const socket_path = try getSocketPath(alloc, cfg.socket_dir, session_name);
+    defer alloc.free(socket_path);
+    const client_sock_fd = try sessionConnect(socket_path);
+    ipc.send(client_sock_fd, .Kill, "") catch |err| switch (err) {
+        error.BrokenPipe, error.ConnectionResetByPeer => return,
+        else => return err,
+    };
+}
+
 fn attach(daemon: *Daemon) !void {
     std.log.info("running cmd=attach {s}", .{daemon.session_name});
 
@@ -159,10 +206,10 @@ fn attach(daemon: *Daemon) !void {
     var should_create = !exists;
 
     if (exists) {
-        std.log.info("reattaching to session: session_name={s}", .{daemon.session_name});
+        std.log.info("reattaching to session session_name={s}", .{daemon.session_name});
         const fd = sessionConnect(daemon.socket_path) catch |err| switch (err) {
             error.ConnectionRefused => blk: {
-                std.log.warn("stale socket found, cleaning up: fname={s}", .{daemon.socket_path});
+                std.log.warn("stale socket found, cleaning up fname={s}", .{daemon.socket_path});
                 try dir.deleteFile(daemon.socket_path);
                 should_create = true;
                 break :blk -1;
@@ -175,9 +222,9 @@ fn attach(daemon: *Daemon) !void {
     }
 
     if (should_create) {
-        std.log.info("creating session: session_name={s}", .{daemon.session_name});
+        std.log.info("creating session session_name={s}", .{daemon.session_name});
         const server_sock_fd = try createSocket(daemon.socket_path);
-        std.log.info("unix socket created: server_sock_fd={d}", .{server_sock_fd});
+        std.log.info("unix socket created server_sock_fd={d}", .{server_sock_fd});
 
         const pid = try posix.fork();
         if (pid == 0) { // child
@@ -185,7 +232,7 @@ fn attach(daemon: *Daemon) !void {
             const pty_fd = try spawnPty(daemon);
             defer {
                 posix.close(server_sock_fd);
-                std.log.info("deleting socket file: fname={s}", .{daemon.socket_path});
+                std.log.info("deleting socket file fname={s}", .{daemon.socket_path});
                 dir.deleteFile(daemon.socket_path) catch {};
             }
             try daemonLoop(daemon, server_sock_fd, pty_fd);
@@ -197,6 +244,7 @@ fn attach(daemon: *Daemon) !void {
 
     const client_sock = try sessionConnect(daemon.socket_path);
 
+    std.log.info("setting client stdin to raw mode", .{});
     //  this is typically used with tcsetattr() to modify terminal settings.
     //      - you first get the current settings with tcgetattr()
     //      - modify the desired attributes in the termios structure
@@ -229,6 +277,7 @@ fn attach(daemon: *Daemon) !void {
 
     // Switch to alternate screen buffer and home cursor
     // This prevents session output from polluting the terminal after detach
+    std.log.info("switching stdin to alt-screen", .{});
     const alt_buffer_seq = "\x1b[?1049h\x1b[H";
     _ = try posix.write(posix.STDOUT_FILENO, alt_buffer_seq);
 
@@ -236,6 +285,7 @@ fn attach(daemon: *Daemon) !void {
 }
 
 fn clientLoop(client_sock_fd: i32) !void {
+    std.log.info("starting client loop client_sock_fd={d}", .{client_sock_fd});
     // use c_allocator to avoid "reached unreachable code" panic in DebugAllocator when forking
     const alloc = std.heap.c_allocator;
 
@@ -308,14 +358,14 @@ fn clientLoop(client_sock_fd: i32) !void {
             const n = read_buf.read(client_sock_fd) catch |err| {
                 if (err == error.WouldBlock) continue;
                 if (err == error.ConnectionResetByPeer or err == error.BrokenPipe) {
-                    std.log.info("client: daemon disconnected", .{});
+                    std.log.info("client daemon disconnected", .{});
                     return;
                 }
-                std.log.err("client: read error from daemon: {s}", .{@errorName(err)});
+                std.log.err("client read error from daemon: {s}", .{@errorName(err)});
                 return err;
             };
             if (n == 0) {
-                std.log.info("client: daemon closed connection", .{});
+                std.log.info("client daemon closed connection", .{});
                 return; // Server closed connection
             }
 
@@ -348,6 +398,7 @@ fn clientLoop(client_sock_fd: i32) !void {
 }
 
 fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
+    std.log.info("starting daemon loop server_sock_fd={d} pty_fd={d}", .{ server_sock_fd, pty_fd });
     var should_exit = false;
     var poll_fds = try std.ArrayList(posix.pollfd).initCapacity(daemon.alloc, 8);
     defer poll_fds.deinit(daemon.alloc);
@@ -411,13 +462,13 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
             if (n_opt) |n| {
                 if (n == 0) {
                     // EOF: Shell exited
-                    std.log.info("pty: shell exited", .{});
+                    std.log.info("shell exited pty_fd={d}", .{pty_fd});
                     should_exit = true;
                 } else {
                     // Broadcast data to all clients
                     for (daemon.clients.items) |client| {
                         ipc.appendMessage(daemon.alloc, &client.write_buf, .Output, buf[0..n]) catch |err| {
-                            std.log.warn("failed to buffer output for client: err={s}", .{@errorName(err)});
+                            std.log.warn("failed to buffer output for client err={s}", .{@errorName(err)});
                             continue;
                         };
                         client.has_pending_output = true;
@@ -444,18 +495,16 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
             if (revents & posix.POLL.IN != 0) {
                 const n = client.read_buf.read(client.socket_fd) catch |err| {
                     if (err == error.WouldBlock) continue;
-                    std.log.warn("client read error: err={s}", .{@errorName(err)});
-                    client.deinit();
-                    daemon.alloc.destroy(client);
-                    _ = daemon.clients.orderedRemove(i);
+                    std.log.warn("client read error err={s}", .{@errorName(err)});
+                    const last = daemon.closeClient(client, i);
+                    if (last) should_exit = true;
                     continue;
                 };
 
                 if (n == 0) {
                     // Client closed connection
-                    client.deinit();
-                    daemon.alloc.destroy(client);
-                    _ = daemon.clients.orderedRemove(i);
+                    const last = daemon.closeClient(client, i);
+                    if (last) should_exit = true;
                     continue;
                 }
 
@@ -502,9 +551,8 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                 const n = posix.write(client.socket_fd, client.write_buf.items) catch |err| blk: {
                     if (err == error.WouldBlock) break :blk 0;
                     // Error on write, close client
-                    client.deinit();
-                    daemon.alloc.destroy(client);
-                    _ = daemon.clients.orderedRemove(i);
+                    const last = daemon.closeClient(client, i);
+                    if (last) should_exit = true;
                     continue;
                 };
 
@@ -518,15 +566,15 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
             }
 
             if (revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
-                client.deinit();
-                daemon.alloc.destroy(client);
-                _ = daemon.clients.orderedRemove(i);
+                const last = daemon.closeClient(client, i);
+                if (last) should_exit = true;
             }
         }
     }
 }
 
 fn spawnPty(daemon: *Daemon) !c_int {
+    std.log.info("spawning pty session_name={s}", .{daemon.session_name});
     // Get terminal size
     var orig_ws: c.struct_winsize = undefined;
     const result = c.ioctl(posix.STDOUT_FILENO, c.TIOCGWINSZ, &orig_ws);
@@ -570,12 +618,12 @@ fn sessionConnect(fname: []const u8) !i32 {
     const socket_fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
     posix.connect(socket_fd, &unix_addr.any, unix_addr.getOsSockLen()) catch |err| {
         if (err == error.ConnectionRefused) {
-            std.log.err("unable to connect to unix socket: fname={s}", .{fname});
+            std.log.err("unable to connect to unix socket fname={s}", .{fname});
             return err;
         }
         return err;
     };
-    std.log.info("unix socket connected: client_socket_fd={d}", .{socket_fd});
+    std.log.info("unix socket connected client_socket_fd={d}", .{socket_fd});
     return socket_fd;
 }
 
@@ -591,6 +639,7 @@ fn sessionExists(dir: std.fs.Dir, name: []const u8) !bool {
 }
 
 fn createSocket(fname: []const u8) !i32 {
+    std.log.info("creating unix socket fname={s}", fname);
     // AF.UNIX: Unix domain socket for local IPC with client processes
     // SOCK.STREAM: Reliable, bidirectional communication
     // SOCK.NONBLOCK: Set socket to non-blocking
@@ -609,8 +658,4 @@ pub fn getSocketPath(alloc: std.mem.Allocator, socket_dir: []const u8, session_n
     @memcpy(fname[dir.len .. dir.len + 1], "/");
     @memcpy(fname[dir.len + 1 ..], session_name);
     return fname;
-}
-
-fn list(_: *Cfg) !void {
-    std.log.info("running cmd=list", .{});
 }
