@@ -65,6 +65,7 @@ const Daemon = struct {
     session_name: []const u8,
     socket_path: []const u8,
     running: bool,
+    pid: i32,
 
     pub fn deinit(self: *Daemon) void {
         self.clients.deinit(self.alloc);
@@ -114,6 +115,8 @@ pub fn main() !void {
 
     if (std.mem.eql(u8, cmd, "help")) {
         return help();
+    } else if (std.mem.eql(u8, cmd, "list")) {
+        return list(&cfg);
     } else if (std.mem.eql(u8, cmd, "detach")) {
         return detachAll(&cfg);
     } else if (std.mem.eql(u8, cmd, "kill")) {
@@ -135,6 +138,7 @@ pub fn main() !void {
             .clients = clients,
             .session_name = session_name,
             .socket_path = undefined,
+            .pid = undefined,
         };
         daemon.socket_path = try getSocketPath(alloc, cfg.socket_dir, session_name);
         std.log.info("socket path={s}", .{daemon.socket_path});
@@ -148,8 +152,53 @@ fn help() !void {
     std.log.info("running cmd=help", .{});
 }
 
-fn list(_: *Cfg) !void {
+fn list(cfg: *Cfg) !void {
     std.log.info("running cmd=list", .{});
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    var dir = try std.fs.openDirAbsolute(cfg.socket_dir, .{ .iterate = true });
+    defer dir.close();
+    var iter = dir.iterate();
+    while (try iter.next()) |entry| {
+        if (try sessionExists(dir, entry.name)) {
+            const socket_path = try getSocketPath(alloc, cfg.socket_dir, entry.name);
+            defer alloc.free(socket_path);
+
+            const fd = sessionConnect(socket_path) catch |err| {
+                std.log.warn("could not connect to session {s}: {s}", .{ entry.name, @errorName(err) });
+                continue;
+            };
+            defer posix.close(fd);
+
+            try ipc.send(fd, .Info, "");
+
+            var sb = try ipc.SocketBuffer.init(alloc);
+            defer sb.deinit();
+
+            var info: ?ipc.Info = null;
+            read_loop: while (true) {
+                const n = try sb.read(fd);
+                if (n == 0) break; // EOF
+
+                while (sb.next()) |msg| {
+                    if (msg.header.tag == .Info) {
+                        if (msg.payload.len == @sizeOf(ipc.Info)) {
+                            info = std.mem.bytesToValue(ipc.Info, msg.payload[0..@sizeOf(ipc.Info)]);
+                            break :read_loop;
+                        }
+                    }
+                }
+            }
+
+            if (info) |i| {
+                std.log.info("session_name={s}\tpid={d}\tclients={d}", .{ entry.name, i.pid, i.clients_len });
+            } else {
+                std.log.info("session_name={s}\tpid=?\tclients=?", .{entry.name});
+            }
+        }
+    }
 }
 
 fn detachAll(cfg: *Cfg) !void {
@@ -499,14 +548,14 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                 const n = client.read_buf.read(client.socket_fd) catch |err| {
                     if (err == error.WouldBlock) continue;
                     std.log.warn("client read error err={s}", .{@errorName(err)});
-                    const last = daemon.closeClient(client, i, true);
+                    const last = daemon.closeClient(client, i, false);
                     if (last) should_exit = true;
                     continue;
                 };
 
                 if (n == 0) {
                     // Client closed connection
-                    const last = daemon.closeClient(client, i, true);
+                    const last = daemon.closeClient(client, i, false);
                     if (last) should_exit = true;
                     continue;
                 }
@@ -547,6 +596,16 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                             should_exit = true;
                             break :clients_loop;
                         },
+                        .Info => {
+                            // subtract current client since it's just fetching info
+                            const clients_len = daemon.clients.items.len - 1;
+                            const info = ipc.Info{
+                                .clients_len = clients_len,
+                                .pid = daemon.pid,
+                            };
+                            try ipc.appendMessage(daemon.alloc, &client.write_buf, .Info, std.mem.asBytes(&info));
+                            client.has_pending_output = true;
+                        },
                         .Output => {}, // Clients shouldn't send output
                     }
                 }
@@ -557,7 +616,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                 const n = posix.write(client.socket_fd, client.write_buf.items) catch |err| blk: {
                     if (err == error.WouldBlock) break :blk 0;
                     // Error on write, close client
-                    const last = daemon.closeClient(client, i, true);
+                    const last = daemon.closeClient(client, i, false);
                     if (last) should_exit = true;
                     continue;
                 };
@@ -572,7 +631,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
             }
 
             if (revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
-                const last = daemon.closeClient(client, i, true);
+                const last = daemon.closeClient(client, i, false);
                 if (last) should_exit = true;
             }
         }
@@ -611,6 +670,7 @@ fn spawnPty(daemon: *Daemon) !c_int {
     }
     // master pid code path
 
+    daemon.pid = pid;
     std.log.info("created pty session: session_name={s} master_pid={d} child_pid={d}", .{ daemon.session_name, master_fd, pid });
 
     // make pty non-blocking
