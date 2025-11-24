@@ -19,9 +19,16 @@ session persistence for terminal processes
 ## usage
 
 - `zmx attach {session_name}` - create or attach to a session
-- `zmx detach [{session_name}]` (or Ctrl+\) - detach all connected clients to session, can be used inside session without providing name
+- `zmx detach [{session_name}]` (or Ctrl+\\) - detach all connected clients to session, can be used inside session without providing name
 - `zmx list` - list sessions
 - `zmx kill {session_name}` kill pty and all clients attached to session
+
+## todo
+
+- [ ] Detach client using a key combination
+- [ ] Ability to pass a command to attach `zmx attach mux dvtm`
+- [ ] Integrate with `libghostty` to restore terminal state on re-attach
+- [ ] Binary distribution (e.g. pkg managers)
 
 ## prior art
 
