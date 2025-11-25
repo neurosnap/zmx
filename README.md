@@ -25,9 +25,9 @@ session persistence for terminal processes
 
 ## todo
 
-- [ ] Detach client using a key combination
 - [ ] Ability to pass a command to attach `zmx attach mux dvtm`
 - [ ] Integrate with `libghostty` to restore terminal state on re-attach
+- [ ] How to add debug logs without disrupting active client terminal output
 - [ ] Binary distribution (e.g. pkg managers)
 
 ## prior art
