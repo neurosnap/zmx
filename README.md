@@ -6,6 +6,7 @@ session persistence for terminal processes
 
 - Persist terminal shell sessions (pty processes)
 - Ability to attach and detach from a shell session without killing it
+- Supports all the terminal features that the client's terminal emulator supports
 - Native terminal scrollback
 - Manage shell sessions
 - Multiple clients can connect to the same session
@@ -13,7 +14,6 @@ session persistence for terminal processes
 - Re-attaching to a session restores previous terminal state and output
 - The `daemon` and client processes communicate via a unix socket
 - This project does **NOT** provide windows, tabs, or window splits
-- It supports all the terminal features that the client's terminal emulator supports
 - Works on mac and linux
 
 ## usage

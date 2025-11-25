@@ -44,8 +44,6 @@ const Client = struct {
 
 const Cfg = struct {
     socket_dir: []const u8 = "/tmp/zmx",
-    prefix_key: []const u8 = "^", // control key
-    detach_key: []const u8 = "\\", // backslash key
 
     pub fn mkdir(self: *Cfg) !void {
         std.log.info("creating socket dir: socket_dir={s}", .{self.socket_dir});
@@ -323,6 +321,8 @@ fn attach(daemon: *Daemon) !void {
     // Additional granular raw mode settings for precise control
     // (matches what abduco and shpool do)
     raw_termios.c_cc[c.VLNEXT] = c._POSIX_VDISABLE; // Disable literal-next (Ctrl-V)
+    // We want to intercept Ctrl+\ (SIGQUIT) so we can use it as a detach key
+    raw_termios.c_cc[c.VQUIT] = c._POSIX_VDISABLE; // Disable SIGQUIT (Ctrl+\)
     raw_termios.c_cc[c.VMIN] = 1; // Minimum chars to read: return after 1 byte
     raw_termios.c_cc[c.VTIME] = 0; // Read timeout: no timeout, return immediately
 
@@ -333,10 +333,10 @@ fn attach(daemon: *Daemon) !void {
     const alt_buffer_seq = "\x1b[?1049h\x1b[H";
     _ = try posix.write(posix.STDOUT_FILENO, alt_buffer_seq);
 
-    try clientLoop(client_sock);
+    try clientLoop(daemon.cfg, client_sock);
 }
 
-fn clientLoop(client_sock_fd: i32) !void {
+fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
     std.log.info("starting client loop client_sock_fd={d}", .{client_sock_fd});
     // use c_allocator to avoid "reached unreachable code" panic in DebugAllocator when forking
     const alloc = std.heap.c_allocator;
@@ -394,10 +394,32 @@ fn clientLoop(client_sock_fd: i32) !void {
 
             if (n_opt) |n| {
                 if (n > 0) {
-                    ipc.send(client_sock_fd, .Input, buf[0..n]) catch |err| switch (err) {
-                        error.BrokenPipe, error.ConnectionResetByPeer => return,
-                        else => return err,
-                    };
+                    // Check for extended escape sequence for Ctrl+\ (ESC [ 92 ; 5 u)
+                    // This is sent by some terminals (like ghostty/kitty) in CSI u mode
+                    const esc_seq = "\x1b[92;5u";
+                    if (std.mem.indexOf(u8, buf[0..n], esc_seq) != null) {
+                        ipc.send(client_sock_fd, .Detach, "") catch |err| switch (err) {
+                            error.BrokenPipe, error.ConnectionResetByPeer => return,
+                            else => return err,
+                        };
+                        continue;
+                    }
+
+                    var i: usize = 0;
+                    while (i < n) : (i += 1) {
+                        if (buf[i] == 0x1C) { // Ctrl+\ (File Separator)
+                            ipc.send(client_sock_fd, .Detach, "") catch |err| switch (err) {
+                                error.BrokenPipe, error.ConnectionResetByPeer => return,
+                                else => return err,
+                            };
+                        } else {
+                            const payload = buf[i .. i + 1];
+                            ipc.send(client_sock_fd, .Input, payload) catch |err| switch (err) {
+                                error.BrokenPipe, error.ConnectionResetByPeer => return,
+                                else => return err,
+                            };
+                        }
+                    }
                 } else {
                     // EOF on stdin
                     return;
