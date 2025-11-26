@@ -79,6 +79,7 @@ const Daemon = struct {
     socket_path: []const u8,
     running: bool,
     pid: i32,
+    command: ?[]const []const u8 = null,
 
     pub fn deinit(self: *Daemon) void {
         self.clients.deinit(self.alloc);
@@ -147,6 +148,13 @@ pub fn main() !void {
             std.log.err("session name required", .{});
             return;
         };
+
+        var command_args: std.ArrayList([]const u8) = .empty;
+        defer command_args.deinit(alloc);
+        while (args.next()) |arg| {
+            try command_args.append(alloc, arg);
+        }
+
         const clients = try std.ArrayList(*Client).initCapacity(alloc, 10);
         var daemon = Daemon{
             .running = true,
@@ -156,6 +164,7 @@ pub fn main() !void {
             .session_name = session_name,
             .socket_path = undefined,
             .pid = undefined,
+            .command = if (command_args.items.len > 0) command_args.items else null,
         };
         daemon.socket_path = try getSocketPath(alloc, cfg.socket_dir, session_name);
         std.log.info("socket path={s}", .{daemon.socket_path});
@@ -172,11 +181,11 @@ fn help() !void {
         \\Usage: zmx <command> [args]
         \\
         \\Commands:
-        \\  attach <name>   Create or attach to a session
-        \\  detach          Detach from current session (or Ctrl+\)
-        \\  list            List active sessions
-        \\  kill <name>     Kill a session and all attached clients
-        \\  help            Show this help message
+        \\  attach <name> [command...]  Create or attach to a session
+        \\  detach                      Detach from current session (or Ctrl+\)
+        \\  list                        List active sessions
+        \\  kill <name>                 Kill a session and all attached clients
+        \\  help                        Show this help message
         \\
     ;
     try std.fs.File.stdout().writeAll(help_text);
@@ -315,6 +324,9 @@ fn attach(daemon: *Daemon) !void {
         };
         if (fd != -1) {
             posix.close(fd);
+            if (daemon.command != null) {
+                std.log.warn("session already exists, ignoring command session={s}", .{daemon.session_name});
+            }
         }
     }
 
@@ -753,11 +765,24 @@ fn spawnPty(daemon: *Daemon) !c_int {
         const session_env = try std.fmt.allocPrint(daemon.alloc, "ZMX_SESSION={s}\x00", .{daemon.session_name});
         _ = c.putenv(@ptrCast(session_env.ptr));
 
-        const shell = std.posix.getenv("SHELL") orelse "/bin/sh";
-        const argv = [_:null]?[*:0]const u8{ shell, null };
-        const err = std.posix.execveZ(shell, &argv, std.c.environ);
-        std.log.err("execve failed: err={s}", .{@errorName(err)});
-        std.posix.exit(1);
+        if (daemon.command) |cmd_args| {
+            const cmd = cmd_args[0];
+            var argv_buf: [64:null]?[*:0]const u8 = undefined;
+            for (cmd_args, 0..) |arg, i| {
+                argv_buf[i] = @ptrCast(arg.ptr);
+            }
+            argv_buf[cmd_args.len] = null;
+            const argv: [*:null]const ?[*:0]const u8 = &argv_buf;
+            const err = std.posix.execvpeZ(@ptrCast(cmd.ptr), argv, std.c.environ);
+            std.log.err("execvpe failed: cmd={s} err={s}", .{ cmd, @errorName(err) });
+            std.posix.exit(1);
+        } else {
+            const shell = std.posix.getenv("SHELL") orelse "/bin/sh";
+            const argv = [_:null]?[*:0]const u8{ shell, null };
+            const err = std.posix.execveZ(shell, &argv, std.c.environ);
+            std.log.err("execve failed: err={s}", .{@errorName(err)});
+            std.posix.exit(1);
+        }
     }
     // master pid code path
     daemon.pid = pid;

@@ -18,14 +18,22 @@ session persistence for terminal processes
 
 ## usage
 
-- `zmx attach {session_name}` - create or attach to a session
+- `zmx attach {session_name} [command...]` - create or attach to a session, optionally running a command instead of shell
 - `zmx detach [{session_name}]` (or Ctrl+\\) - detach all connected clients to session, can be used inside session without providing name
 - `zmx list` - list sessions
 - `zmx kill {session_name}` kill pty and all clients attached to session
 
+### examples
+
+```bash
+zmx attach dev              # start a shell session
+zmx attach dev nvim .       # start nvim in a persistent session
+zmx attach build make -j8   # run a build, reattach to check progress
+zmx attach mux dvtm         # run a multiplexer inside zmx
+```
+
 ## todo
 
-- [ ] Ability to pass a command to attach `zmx attach mux dvtm`
 - [ ] Integrate with `libghostty` to restore terminal state on re-attach
 - [ ] Binary distribution (e.g. pkg managers)
 
