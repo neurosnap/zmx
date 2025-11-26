@@ -1,7 +1,24 @@
 const std = @import("std");
 const posix = std.posix;
-const ipc = @import("ipc.zig");
 const builtin = @import("builtin");
+const ipc = @import("ipc.zig");
+const log = @import("log.zig");
+const RingBuffer = @import("ring_buffer.zig").RingBuffer;
+
+var log_system = log.LogSystem{};
+
+pub const std_options: std.Options = .{
+    .logFn = zmxLogFn,
+};
+
+fn zmxLogFn(
+    comptime level: std.log.Level,
+    comptime scope: @Type(.enum_literal),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    log_system.log(level, scope, format, args);
+}
 
 const c = switch (builtin.os.tag) {
     .macos => @cImport({
@@ -24,10 +41,6 @@ const c = switch (builtin.os.tag) {
     }),
 };
 
-// pub const std_options: std.Options = .{
-//     .log_level = .err,
-// };
-
 const Client = struct {
     alloc: std.mem.Allocator,
     socket_fd: i32,
@@ -44,13 +57,16 @@ const Client = struct {
 
 const Cfg = struct {
     socket_dir: []const u8 = "/tmp/zmx",
+    log_dir: []const u8 = "/tmp/zmx/logs",
 
     pub fn mkdir(self: *Cfg) !void {
-        std.log.info("creating socket dir: socket_dir={s}", .{self.socket_dir});
         std.fs.makeDirAbsolute(self.socket_dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {
-                std.log.info("socket dir already exists", .{});
-            },
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+
+        std.fs.makeDirAbsolute(self.log_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
             else => return err,
         };
     }
@@ -96,7 +112,6 @@ const Daemon = struct {
 };
 
 pub fn main() !void {
-    std.log.info("running cli", .{});
     // use c_allocator to avoid "reached unreachable code" panic in DebugAllocator when forking
     const alloc = std.heap.c_allocator;
 
@@ -106,6 +121,13 @@ pub fn main() !void {
 
     var cfg = Cfg{};
     try cfg.mkdir();
+
+    const log_path = try std.fs.path.join(alloc, &.{ cfg.log_dir, "zmx.log" });
+    defer alloc.free(log_path);
+    try log_system.init(alloc, log_path);
+    defer log_system.deinit();
+
+    std.log.info("running cli", .{});
 
     const cmd = args.next() orelse {
         return list(&cfg);
@@ -159,13 +181,18 @@ fn list(cfg: *Cfg) !void {
     var dir = try std.fs.openDirAbsolute(cfg.socket_dir, .{ .iterate = true });
     defer dir.close();
     var iter = dir.iterate();
+    var hasSessions = false;
     while (try iter.next()) |entry| {
-        if (try sessionExists(dir, entry.name)) {
+        const exists = sessionExists(dir, entry.name) catch continue;
+        if (exists) {
+            hasSessions = true;
             const socket_path = try getSocketPath(alloc, cfg.socket_dir, entry.name);
             defer alloc.free(socket_path);
 
             const fd = sessionConnect(socket_path) catch |err| {
-                std.log.warn("could not connect to session {s}: {s}", .{ entry.name, @errorName(err) });
+                var msg_buf: [256]u8 = undefined;
+                const msg = try std.fmt.bufPrint(&msg_buf, "could not connect to session {s}: {s}\n", .{ entry.name, @errorName(err) });
+                try std.fs.File.stdout().writeAll(msg);
                 continue;
             };
             defer posix.close(fd);
@@ -191,11 +218,21 @@ fn list(cfg: *Cfg) !void {
             }
 
             if (info) |i| {
-                std.log.info("session_name={s}\tpid={d}\tclients={d}", .{ entry.name, i.pid, i.clients_len });
+                var msg_buf: [256]u8 = undefined;
+                const msg = try std.fmt.bufPrint(&msg_buf, "session_name={s}\tpid={d}\tclients={d}\n", .{ entry.name, i.pid, i.clients_len });
+                try std.fs.File.stdout().writeAll(msg);
             } else {
-                std.log.info("session_name={s}\tpid=?\tclients=?", .{entry.name});
+                var msg_buf: [256]u8 = undefined;
+                const msg = try std.fmt.bufPrint(&msg_buf, "session_name={s}\tpid=?\tclients=?\n", .{entry.name});
+                try std.fs.File.stdout().writeAll(msg);
             }
         }
+    }
+
+    if (!hasSessions) {
+        var msg_buf: [256]u8 = undefined;
+        const msg = try std.fmt.bufPrint(&msg_buf, "no sessions found in {s}\n", .{cfg.socket_dir});
+        try std.fs.File.stdout().writeAll(msg);
     }
 }
 
@@ -216,6 +253,7 @@ fn detachAll(cfg: *Cfg) !void {
     const socket_path = try getSocketPath(alloc, cfg.socket_dir, session_name);
     defer alloc.free(socket_path);
     const client_sock_fd = try sessionConnect(socket_path);
+    defer posix.close(client_sock_fd);
     ipc.send(client_sock_fd, .DetachAll, "") catch |err| switch (err) {
         error.BrokenPipe, error.ConnectionResetByPeer => return,
         else => return err,
@@ -239,10 +277,16 @@ fn kill(cfg: *Cfg, session_name: []const u8) !void {
     const socket_path = try getSocketPath(alloc, cfg.socket_dir, session_name);
     defer alloc.free(socket_path);
     const client_sock_fd = try sessionConnect(socket_path);
+    defer posix.close(client_sock_fd);
     ipc.send(client_sock_fd, .Kill, "") catch |err| switch (err) {
         error.BrokenPipe, error.ConnectionResetByPeer => return,
         else => return err,
     };
+
+    var buf: [4096]u8 = undefined;
+    var w = std.fs.File.stdout().writer(&buf);
+    try w.interface.print("killed session {s}\n", .{session_name});
+    try w.interface.flush();
 }
 
 fn attach(daemon: *Daemon) !void {
@@ -278,6 +322,14 @@ fn attach(daemon: *Daemon) !void {
         const pid = try posix.fork();
         if (pid == 0) { // child
             _ = try posix.setsid();
+
+            log_system.deinit();
+            const session_log_name = try std.fmt.allocPrint(daemon.alloc, "{s}.log", .{daemon.session_name});
+            defer daemon.alloc.free(session_log_name);
+            const session_log_path = try std.fs.path.join(daemon.alloc, &.{ daemon.cfg.log_dir, session_log_name });
+            defer daemon.alloc.free(session_log_path);
+            try log_system.init(daemon.alloc, session_log_path);
+
             const pty_fd = try spawnPty(daemon);
             defer {
                 posix.close(server_sock_fd);
@@ -707,6 +759,7 @@ fn spawnPty(daemon: *Daemon) !c_int {
 fn sessionConnect(fname: []const u8) !i32 {
     var unix_addr = try std.net.Address.initUnix(fname);
     const socket_fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    errdefer posix.close(socket_fd);
     posix.connect(socket_fd, &unix_addr.any, unix_addr.getOsSockLen()) catch |err| {
         if (err == error.ConnectionRefused) {
             std.log.err("unable to connect to unix socket fname={s}", .{fname});

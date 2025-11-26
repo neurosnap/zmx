@@ -9,3 +9,4 @@ commit_msg
 zig_std_src/
 ghostty_src/
 prior_art/
+.beads/
