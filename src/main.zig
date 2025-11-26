@@ -385,7 +385,7 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
         };
 
         // Handle stdin -> socket (Input)
-        if (poll_fds.items[0].revents & (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR) != 0) {
+        if (poll_fds.items[0].revents & (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
             var buf: [4096]u8 = undefined;
             const n_opt: ?usize = posix.read(stdin_fd, &buf) catch |err| blk: {
                 if (err == error.WouldBlock) break :blk null;
@@ -512,7 +512,10 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
             return err;
         };
 
-        if (poll_fds.items[0].revents & posix.POLL.IN != 0) {
+        if (poll_fds.items[0].revents & (posix.POLL.ERR | posix.POLL.HUP | posix.POLL.NVAL) != 0) {
+            std.log.err("server socket error revents={}", .{poll_fds.items[0].revents});
+            should_exit = true;
+        } else if (poll_fds.items[0].revents & posix.POLL.IN != 0) {
             const client_fd = try posix.accept(server_sock_fd, null, null, posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC);
             const client = try daemon.alloc.create(Client);
             client.* = Client{
@@ -525,7 +528,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
             try daemon.clients.append(daemon.alloc, client);
         }
 
-        if (poll_fds.items[1].revents & (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR) != 0) {
+        if (poll_fds.items[1].revents & (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
             // Read from PTY
             var buf: [4096]u8 = undefined;
             const n_opt: ?usize = posix.read(pty_fd, &buf) catch |err| blk: {
