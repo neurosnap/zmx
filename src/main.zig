@@ -3,7 +3,6 @@ const posix = std.posix;
 const builtin = @import("builtin");
 const ipc = @import("ipc.zig");
 const log = @import("log.zig");
-const RingBuffer = @import("ring_buffer.zig").RingBuffer;
 
 var log_system = log.LogSystem{};
 
@@ -578,6 +577,17 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
             };
             client.write_buf = try std.ArrayList(u8).initCapacity(client.alloc, 4096);
             try daemon.clients.append(daemon.alloc, client);
+
+            // TODO: Replace this SIGWINCH hack with proper terminal state restoration
+            // using ghostty-vt to maintain a virtual terminal buffer and replay it
+            // to new clients on re-attach.
+            // For now, trigger a SIGWINCH and in-band resize to force applications to redraw.
+            var ws: c.struct_winsize = undefined;
+            if (c.ioctl(pty_fd, c.TIOCGWINSZ, &ws) == 0) {
+                _ = c.ioctl(pty_fd, c.TIOCSWINSZ, &ws);
+            }
+            // Send in-band resize notification
+            _ = posix.write(pty_fd, "\x1b[?2048h") catch {};
         }
 
         if (poll_fds.items[1].revents & (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
