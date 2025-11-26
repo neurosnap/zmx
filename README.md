@@ -27,7 +27,6 @@ session persistence for terminal processes
 
 - [ ] Ability to pass a command to attach `zmx attach mux dvtm`
 - [ ] Integrate with `libghostty` to restore terminal state on re-attach
-- [ ] How to add debug logs without disrupting active client terminal output
 - [ ] Binary distribution (e.g. pkg managers)
 
 ## shell prompt
