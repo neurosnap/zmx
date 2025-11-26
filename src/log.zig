@@ -62,7 +62,7 @@ pub const LogSystem = struct {
             self.current_size += total_len;
 
             var buf: [4096]u8 = undefined;
-            var w = f.writer(&buf);
+            var w = f.writerStreaming(&buf);
             w.interface.print(prefix ++ format ++ "\n", prefix_args ++ args) catch {};
             w.interface.flush() catch {};
         }
