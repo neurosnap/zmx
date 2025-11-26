@@ -30,6 +30,25 @@ session persistence for terminal processes
 - [ ] How to add debug logs without disrupting active client terminal output
 - [ ] Binary distribution (e.g. pkg managers)
 
+## shell prompt
+
+When you attach to a zmx session, we don't provide any indication that you are inside zmx. We do provide an environment variable `ZMX_SESSION` which contains the session name.
+
+We recommend checking for that env var inside your prompt and displaying some indication there.
+
+### fish
+
+```fish
+functions -c fish_prompt _original_fish_prompt 2>/dev/null
+
+function fish_prompt --description 'Write out the prompt'
+  if set -q ZMX_SESSION
+    echo -n "[$ZMX_SESSION] "
+  end
+  _original_fish_prompt
+end
+```
+
 ## prior art
 
 Below is a list of projects that inspired me to build this project.
