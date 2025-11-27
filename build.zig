@@ -25,12 +25,6 @@ pub fn build(b: *std.Build) void {
         );
     }
 
-    const toml_dep = b.dependency("toml", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    exe_mod.addImport("toml", toml_dep.module("toml"));
-
     // Exe
     const exe = b.addExecutable(.{
         .name = "zmx",
@@ -66,7 +60,7 @@ pub fn build(b: *std.Build) void {
     // As you can see we are re-defining the same executable but
     // we're binding it to a dedicated build step.
     const exe_check = b.addExecutable(.{
-        .name = "foo",
+        .name = "zmx",
         .root_module = exe_mod,
     });
     // There is no `b.installArtifact(exe_check);` here.

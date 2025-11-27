@@ -36,10 +36,6 @@
             .url = "git+https://github.com/ghostty-org/ghostty.git?ref=HEAD#42a38ff672fe0cbbb8588380058c91ac16ed9069",
             .hash = "ghostty-1.2.1-5UdBC-7EVAMgwHLhtsdeH4rgcZ7WlagXZ1QXN9bRKJ5s",
         },
-        .toml = .{
-            .url = "git+https://github.com/sam701/zig-toml#3aaeb0bf14935eabae118196f7949b404a42f8ea",
-            .hash = "toml-0.3.0-bV14BTd8AQA-wZERtB3dvRE3eSZ-m48AyXFUGkZ_Tm3d",
-        },
     },
     .paths = .{
         "build.zig",
