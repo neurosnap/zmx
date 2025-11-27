@@ -402,8 +402,9 @@ fn attach(daemon: *Daemon) !void {
     _ = c.tcgetattr(posix.STDIN_FILENO, &orig_termios);
 
     // restore stdin fd to its original state and exit alternate buffer after exiting.
+    // Use TCSAFLUSH to discard any unread input, preventing stale input after detach.
     defer {
-        _ = c.tcsetattr(posix.STDIN_FILENO, c.TCSANOW, &orig_termios);
+        _ = c.tcsetattr(posix.STDIN_FILENO, c.TCSAFLUSH, &orig_termios);
         // Restore normal buffer and show cursor
         const restore_seq = "\x1b[?25h\x1b[?1049l";
         _ = posix.write(posix.STDOUT_FILENO, restore_seq) catch {};
