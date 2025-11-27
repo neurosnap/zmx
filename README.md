@@ -18,12 +18,15 @@ session persistence for terminal processes
 
 ## usage
 
+> [!IMPORTANT]
+> Press `ctrl+\` to detach from the session.
+
 ```
 Usage: zmx <command> [args]
 
 Commands:
   attach <name> [command...]  Create or attach to a session
-  detach                      Detach from current session (or ctrl+\)
+  detach                      Detach all clients from current session  (ctrl+\ for current client)
   list                        List active sessions
   kill <name>                 Kill a session and all attached clients
   help                        Show this help message
@@ -37,9 +40,6 @@ zmx attach dev nvim .       # start nvim in a persistent session
 zmx attach build make -j8   # run a build, reattach to check progress
 zmx attach mux dvtm         # run a multiplexer inside zmx
 ```
-
-> [!IMPORTANT]
-> Press `ctrl+\` to detach from the session.
 
 ## shell prompt
 
@@ -82,7 +82,7 @@ At this point, nothing is configurable and we aren't convinced they should ever 
 
 ## a smol contract
 
-- Write programs that do one thing and do it well.
+- Write programs that solve a well defined problem.
 - Write programs that behave the way most users expect them to behave.
 - Write programs that a single person can maintain.
 - Write programs that compose with other smol tools.

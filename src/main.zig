@@ -184,7 +184,7 @@ fn help() !void {
         \\
         \\Commands:
         \\  attach <name> [command...]  Create or attach to a session
-        \\  detach                      Detach from current session (or Ctrl+\)
+        \\  detach                      Detach all clients from current session (ctrl+\ for current client)
         \\  list                        List active sessions
         \\  kill <name>                 Kill a session and all attached clients
         \\  help                        Show this help message
