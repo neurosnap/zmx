@@ -354,6 +354,8 @@ fn attach(daemon: *Daemon) !void {
                 };
             }
             try daemonLoop(daemon, server_sock_fd, pty_fd);
+            // Reap PTY child to prevent zombie
+            _ = posix.waitpid(daemon.pid, 0);
             return;
         }
         posix.close(server_sock_fd);
