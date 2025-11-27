@@ -445,7 +445,6 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
         }
 
         _ = posix.poll(poll_fds.items, -1) catch |err| {
-            if (err == error.SystemResources) continue;
             return err;
         };
 
@@ -568,10 +567,6 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
         }
 
         _ = posix.poll(poll_fds.items, -1) catch |err| {
-            if (err == error.SystemResources) {
-                // Interrupted by signal (EINTR) - check flags (e.g. child exit) and continue
-                continue;
-            }
             return err;
         };
 
@@ -766,15 +761,17 @@ fn spawnPty(daemon: *Daemon) !c_int {
         _ = c.putenv(@ptrCast(session_env.ptr));
 
         if (daemon.command) |cmd_args| {
-            const cmd = cmd_args[0];
+            const alloc = std.heap.c_allocator;
             var argv_buf: [64:null]?[*:0]const u8 = undefined;
             for (cmd_args, 0..) |arg, i| {
-                argv_buf[i] = @ptrCast(arg.ptr);
+                argv_buf[i] = alloc.dupeZ(u8, arg) catch {
+                    std.posix.exit(1);
+                };
             }
             argv_buf[cmd_args.len] = null;
             const argv: [*:null]const ?[*:0]const u8 = &argv_buf;
-            const err = std.posix.execvpeZ(@ptrCast(cmd.ptr), argv, std.c.environ);
-            std.log.err("execvpe failed: cmd={s} err={s}", .{ cmd, @errorName(err) });
+            const err = std.posix.execvpeZ(argv_buf[0].?, argv, std.c.environ);
+            std.log.err("execvpe failed: cmd={s} err={s}", .{ cmd_args[0], @errorName(err) });
             std.posix.exit(1);
         } else {
             const shell = std.posix.getenv("SHELL") orelse "/bin/sh";
