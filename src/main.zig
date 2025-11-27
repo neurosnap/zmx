@@ -1,6 +1,7 @@
 const std = @import("std");
 const posix = std.posix;
 const builtin = @import("builtin");
+const ghostty_vt = @import("ghostty-vt");
 const ipc = @import("ipc.zig");
 const log = @import("log.zig");
 
@@ -158,6 +159,10 @@ pub fn main() !void {
         }
 
         const clients = try std.ArrayList(*Client).initCapacity(alloc, 10);
+        var command: ?[][]const u8 = null;
+        if (command_args.items.len > 0) {
+            command = command_args.items;
+        }
         var daemon = Daemon{
             .running = true,
             .cfg = &cfg,
@@ -166,7 +171,7 @@ pub fn main() !void {
             .session_name = session_name,
             .socket_path = undefined,
             .pid = undefined,
-            .command = if (command_args.items.len > 0) command_args.items else null,
+            .command = command,
         };
         daemon.socket_path = try getSocketPath(alloc, cfg.socket_dir, session_name);
         std.log.info("socket path={s}", .{daemon.socket_path});
@@ -420,10 +425,9 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
 
     setupSigwinchHandler();
 
-    // Send initial terminal size
-    if (getTerminalSize()) |size| {
-        ipc.send(client_sock_fd, .Resize, std.mem.asBytes(&size)) catch {};
-    }
+    // Send init message with terminal size
+    const size = getTerminalSize(posix.STDOUT_FILENO);
+    ipc.send(client_sock_fd, .Init, std.mem.asBytes(&size)) catch {};
 
     var poll_fds = try std.ArrayList(posix.pollfd).initCapacity(alloc, 2);
     defer poll_fds.deinit(alloc);
@@ -443,12 +447,11 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
     while (true) {
         // Check for pending SIGWINCH
         if (sigwinch_received.swap(false, .acq_rel)) {
-            if (getTerminalSize()) |size| {
-                ipc.send(client_sock_fd, .Resize, std.mem.asBytes(&size)) catch |err| switch (err) {
-                    error.BrokenPipe, error.ConnectionResetByPeer => return,
-                    else => return err,
-                };
-            }
+            const next_size = getTerminalSize(posix.STDOUT_FILENO);
+            ipc.send(client_sock_fd, .Resize, std.mem.asBytes(&next_size)) catch |err| switch (err) {
+                error.BrokenPipe, error.ConnectionResetByPeer => return,
+                else => return err,
+            };
         }
 
         poll_fds.clearRetainingCapacity();
@@ -569,6 +572,15 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
     var poll_fds = try std.ArrayList(posix.pollfd).initCapacity(daemon.alloc, 8);
     defer poll_fds.deinit(daemon.alloc);
 
+    const init_size = getTerminalSize(pty_fd);
+    var term = try ghostty_vt.Terminal.init(daemon.alloc, .{
+        .cols = init_size.cols,
+        .rows = init_size.rows,
+    });
+    defer term.deinit(daemon.alloc);
+    var vt_stream = term.vtStream();
+    defer vt_stream.deinit();
+
     while (!should_exit and daemon.running) {
         poll_fds.clearRetainingCapacity();
 
@@ -615,17 +627,6 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
             client.write_buf = try std.ArrayList(u8).initCapacity(client.alloc, 4096);
             try daemon.clients.append(daemon.alloc, client);
             std.log.info("client connected fd={d} total={d}", .{ client_fd, daemon.clients.items.len });
-
-            // TODO: Replace this SIGWINCH hack with proper terminal state restoration
-            // using ghostty-vt to maintain a virtual terminal buffer and replay it
-            // to new clients on re-attach.
-            // For now, trigger a SIGWINCH and in-band resize to force applications to redraw.
-            var ws: c.struct_winsize = undefined;
-            if (c.ioctl(pty_fd, c.TIOCGWINSZ, &ws) == 0) {
-                _ = c.ioctl(pty_fd, c.TIOCSWINSZ, &ws);
-            }
-            // Send in-band resize notification
-            _ = posix.write(pty_fd, "\x1b[?2048h") catch {};
         }
 
         if (poll_fds.items[1].revents & (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
@@ -642,6 +643,9 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                     std.log.info("shell exited pty_fd={d}", .{pty_fd});
                     should_exit = true;
                 } else {
+                    // Feed PTY output to terminal emulator for state tracking
+                    try vt_stream.nextSlice(buf[0..n]);
+
                     // Broadcast data to all clients
                     for (daemon.clients.items) |client| {
                         ipc.appendMessage(daemon.alloc, &client.write_buf, .Output, buf[0..n]) catch |err| {
@@ -692,6 +696,37 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                                 _ = try posix.write(pty_fd, msg.payload);
                             }
                         },
+                        .Init => {
+                            if (msg.payload.len == @sizeOf(ipc.Resize)) {
+                                const resize = std.mem.bytesToValue(ipc.Resize, msg.payload);
+                                var ws: c.struct_winsize = .{
+                                    .ws_row = resize.rows,
+                                    .ws_col = resize.cols,
+                                    .ws_xpixel = 0,
+                                    .ws_ypixel = 0,
+                                };
+                                _ = c.ioctl(pty_fd, c.TIOCSWINSZ, &ws);
+                                try term.resize(daemon.alloc, resize.cols, resize.rows);
+                                std.log.debug("init resize rows={d} cols={d}", .{ resize.rows, resize.cols });
+
+                                // Send terminal state after resize
+                                var builder: std.Io.Writer.Allocating = .init(daemon.alloc);
+                                defer builder.deinit();
+                                var term_formatter = ghostty_vt.formatter.TerminalFormatter.init(&term, .vt);
+                                term_formatter.content = .{ .selection = null };
+                                term_formatter.extra = .all;
+                                term_formatter.format(&builder.writer) catch |err| {
+                                    std.log.warn("failed to format terminal state err={s}", .{@errorName(err)});
+                                };
+                                const term_output = builder.writer.buffered();
+                                if (term_output.len > 0) {
+                                    ipc.appendMessage(daemon.alloc, &client.write_buf, .Output, term_output) catch |err| {
+                                        std.log.warn("failed to buffer terminal state for client err={s}", .{@errorName(err)});
+                                    };
+                                    client.has_pending_output = true;
+                                }
+                            }
+                        },
                         .Resize => {
                             if (msg.payload.len == @sizeOf(ipc.Resize)) {
                                 const resize = std.mem.bytesToValue(ipc.Resize, msg.payload);
@@ -702,6 +737,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                                     .ws_ypixel = 0,
                                 };
                                 _ = c.ioctl(pty_fd, c.TIOCSWINSZ, &ws);
+                                try term.resize(daemon.alloc, resize.cols, resize.rows);
                                 std.log.debug("resize rows={d} cols={d}", .{ resize.rows, resize.cols });
                             }
                         },
@@ -768,14 +804,10 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
 }
 
 fn spawnPty(daemon: *Daemon) !c_int {
-    // Get terminal size
-    var orig_ws: c.struct_winsize = undefined;
-    const result = c.ioctl(posix.STDOUT_FILENO, c.TIOCGWINSZ, &orig_ws);
-    const rows: u16 = if (result == 0) orig_ws.ws_row else 24;
-    const cols: u16 = if (result == 0) orig_ws.ws_col else 80;
+    const size = getTerminalSize(posix.STDOUT_FILENO);
     var ws: c.struct_winsize = .{
-        .ws_row = rows,
-        .ws_col = cols,
+        .ws_row = size.rows,
+        .ws_col = size.cols,
         .ws_xpixel = 0,
         .ws_ypixel = 0,
     };
@@ -875,10 +907,10 @@ fn setupSigwinchHandler() void {
     posix.sigaction(posix.SIG.WINCH, &act, null);
 }
 
-fn getTerminalSize() ?ipc.Resize {
+fn getTerminalSize(fd: i32) ipc.Resize {
     var ws: c.struct_winsize = undefined;
-    if (c.ioctl(posix.STDOUT_FILENO, c.TIOCGWINSZ, &ws) == 0) {
+    if (c.ioctl(fd, c.TIOCGWINSZ, &ws) == 0) {
         return .{ .rows = ws.ws_row, .cols = ws.ws_col };
     }
-    return null;
+    return .{ .rows = 24, .cols = 80 };
 }
