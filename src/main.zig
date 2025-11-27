@@ -42,27 +42,6 @@ const c = switch (builtin.os.tag) {
 
 var sigwinch_received: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
-fn handleSigwinch(_: i32, _: *const posix.siginfo_t, _: ?*anyopaque) callconv(.c) void {
-    sigwinch_received.store(true, .release);
-}
-
-fn setupSigwinchHandler() void {
-    const act: posix.Sigaction = .{
-        .handler = .{ .sigaction = handleSigwinch },
-        .mask = posix.sigemptyset(),
-        .flags = posix.SA.SIGINFO,
-    };
-    posix.sigaction(posix.SIG.WINCH, &act, null);
-}
-
-fn getTerminalSize() ?ipc.Resize {
-    var ws: c.struct_winsize = undefined;
-    if (c.ioctl(posix.STDOUT_FILENO, c.TIOCGWINSZ, &ws) == 0) {
-        return .{ .rows = ws.ws_row, .cols = ws.ws_col };
-    }
-    return null;
-}
-
 const Client = struct {
     alloc: std.mem.Allocator,
     socket_fd: i32,
@@ -881,4 +860,25 @@ pub fn getSocketPath(alloc: std.mem.Allocator, socket_dir: []const u8, session_n
     @memcpy(fname[dir.len .. dir.len + 1], "/");
     @memcpy(fname[dir.len + 1 ..], session_name);
     return fname;
+}
+
+fn handleSigwinch(_: i32, _: *const posix.siginfo_t, _: ?*anyopaque) callconv(.c) void {
+    sigwinch_received.store(true, .release);
+}
+
+fn setupSigwinchHandler() void {
+    const act: posix.Sigaction = .{
+        .handler = .{ .sigaction = handleSigwinch },
+        .mask = posix.sigemptyset(),
+        .flags = posix.SA.SIGINFO,
+    };
+    posix.sigaction(posix.SIG.WINCH, &act, null);
+}
+
+fn getTerminalSize() ?ipc.Resize {
+    var ws: c.struct_winsize = undefined;
+    if (c.ioctl(posix.STDOUT_FILENO, c.TIOCGWINSZ, &ws) == 0) {
+        return .{ .rows = ws.ws_row, .cols = ws.ws_col };
+    }
+    return null;
 }
