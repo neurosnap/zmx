@@ -18,10 +18,16 @@ session persistence for terminal processes
 
 ## usage
 
-- `zmx attach {session_name} [command...]` - create or attach to a session, optionally running a command instead of shell
-- `zmx detach [{session_name}]` (or Ctrl+\\) - detach all connected clients to session, can be used inside session without providing name
-- `zmx list` - list sessions
-- `zmx kill {session_name}` kill pty and all clients attached to session
+```
+Usage: zmx <command> [args]
+
+Commands:
+  attach <name> [command...]  Create or attach to a session
+  detach                      Detach from current session (or ctrl+\)
+  list                        List active sessions
+  kill <name>                 Kill a session and all attached clients
+  help                        Show this help message
+```
 
 ### examples
 
@@ -32,10 +38,8 @@ zmx attach build make -j8   # run a build, reattach to check progress
 zmx attach mux dvtm         # run a multiplexer inside zmx
 ```
 
-## todo
-
-- [ ] Integrate with `libghostty` to restore terminal state on re-attach
-- [ ] Binary distribution (e.g. pkg managers)
+> [!IMPORTANT]
+> Press `ctrl+\` to detach from the session.
 
 ## shell prompt
 
@@ -55,6 +59,40 @@ function fish_prompt --description 'Write out the prompt'
   _original_fish_prompt
 end
 ```
+
+### bash
+
+todo.
+
+### zsh
+
+todo.
+
+## socket file location
+
+Each session gets its own unix socket file.  Right now, the default location is `/tmp/zmx`.  At the moment this is not configurable.
+
+## debugging
+
+We store global logs for cli commands in `/tmp/zmx/logs/zmx.log`.  We store session-specific logs in `/tmp/zmx/logs/{session_name}.log`.  These logs rotate to `.old` after 5MB.  At the moment this is not configurable.
+
+## a note on configuration
+
+At this point, nothing is configurable and we aren't convinced they should ever be configurable.  Configuration adds complexity and it forces maintainers to support users changing the default behavior.  This is a burden.  For example, if we allow changing the detach key shortcut then we need to debug all the different incantations people come up with which can be very tricky in a terminal environment.  We have figured out how to support `ctrl+\` because we think this is a great option.  Tread lightly when submitting PRs to add configuration to this tool.  Having said that, we will always entertain configuration ideas.
+
+## a smol contract
+
+- Write programs that do one thing and do it well.
+- Write programs that behave the way most users expect them to behave.
+- Write programs that a single person can maintain.
+- Write programs that compose with other smol tools.
+- Write programs that can be finished.
+
+## todo
+
+- QA
+- Integrate with `libghostty` to restore terminal state on re-attach
+- Binary distribution (e.g. pkg managers)
 
 ## prior art
 
