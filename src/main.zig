@@ -345,6 +345,10 @@ fn attach(daemon: *Daemon) !void {
             defer daemon.alloc.free(session_log_path);
             try log_system.init(daemon.alloc, session_log_path);
 
+            errdefer {
+                posix.close(server_sock_fd);
+                dir.deleteFile(daemon.session_name) catch {};
+            }
             const pty_fd = try spawnPty(daemon);
             defer {
                 posix.close(pty_fd);
