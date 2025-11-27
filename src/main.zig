@@ -315,8 +315,8 @@ fn attach(daemon: *Daemon) !void {
     if (exists) {
         const fd = sessionConnect(daemon.socket_path) catch |err| switch (err) {
             error.ConnectionRefused => blk: {
-                std.log.warn("stale socket found, cleaning up fname={s}", .{daemon.socket_path});
-                try dir.deleteFile(daemon.socket_path);
+                std.log.warn("stale socket found, cleaning up fname={s}", .{daemon.session_name});
+                try dir.deleteFile(daemon.session_name);
                 should_create = true;
                 break :blk -1;
             },
