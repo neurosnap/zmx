@@ -10,9 +10,9 @@ session persistence for terminal processes
 - Native terminal scrollback
 - Manage shell sessions
 - Multiple clients can connect to the same session
-- Each session creates its own unix socket file `/tmp/zmx/`
-- Re-attaching to a session restores previous terminal state and output
 - The `daemon` and client processes communicate via a unix socket
+- Each session creates its own unix socket file `/tmp/zmx/*`
+- Re-attaching to a session restores previous terminal state and output
 - This project does **NOT** provide windows, tabs, or window splits
 - Works on mac and linux
 
@@ -70,15 +70,15 @@ todo.
 
 ## socket file location
 
-Each session gets its own unix socket file.  Right now, the default location is `/tmp/zmx`.  At the moment this is not configurable.
+Each session gets its own unix socket file. Right now, the default location is `/tmp/zmx`. At the moment this is not configurable.
 
 ## debugging
 
-We store global logs for cli commands in `/tmp/zmx/logs/zmx.log`.  We store session-specific logs in `/tmp/zmx/logs/{session_name}.log`.  These logs rotate to `.old` after 5MB.  At the moment this is not configurable.
+We store global logs for cli commands in `/tmp/zmx/logs/zmx.log`. We store session-specific logs in `/tmp/zmx/logs/{session_name}.log`. These logs rotate to `.old` after 5MB. At the moment this is not configurable.
 
 ## a note on configuration
 
-At this point, nothing is configurable and we aren't convinced they should ever be configurable.  Configuration adds complexity and it forces maintainers to support users changing the default behavior.  This is a burden.  For example, if we allow changing the detach key shortcut then we need to debug all the different incantations people come up with which can be very tricky in a terminal environment.  We have figured out how to support `ctrl+\` because we think this is a great option.  Tread lightly when submitting PRs to add configuration to this tool.  Having said that, we will always entertain configuration ideas.
+At this point, nothing is configurable and we aren't convinced they should ever be configurable. Configuration adds complexity and it forces maintainers to support users changing the default behavior. This is a burden. For example, if we allow changing the detach key shortcut then we need to debug all the different incantations people come up with which can be very tricky in a terminal environment. We have figured out how to support `ctrl+\` because we think this is a great option. Tread lightly when submitting PRs to add configuration to this tool. Having said that, we will always entertain configuration ideas.
 
 ## a smol contract
 
