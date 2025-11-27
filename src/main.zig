@@ -407,6 +407,7 @@ fn attach(daemon: *Daemon) !void {
 fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
     // use c_allocator to avoid "reached unreachable code" panic in DebugAllocator when forking
     const alloc = std.heap.c_allocator;
+    defer posix.close(client_sock_fd);
 
     var poll_fds = try std.ArrayList(posix.pollfd).initCapacity(alloc, 2);
     defer poll_fds.deinit(alloc);
