@@ -817,6 +817,7 @@ fn createSocket(fname: []const u8) !i32 {
     // SOCK.STREAM: Reliable, bidirectional communication
     // SOCK.NONBLOCK: Set socket to non-blocking
     const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC, 0);
+    errdefer posix.close(fd);
 
     var unix_addr = try std.net.Address.initUnix(fname);
     try posix.bind(fd, &unix_addr.any, unix_addr.getOsSockLen());
