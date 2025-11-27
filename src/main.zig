@@ -347,6 +347,7 @@ fn attach(daemon: *Daemon) !void {
 
             const pty_fd = try spawnPty(daemon);
             defer {
+                posix.close(pty_fd);
                 posix.close(server_sock_fd);
                 std.log.info("deleting socket file session_name={s}", .{daemon.session_name});
                 dir.deleteFile(daemon.session_name) catch |err| {
