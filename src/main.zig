@@ -40,6 +40,29 @@ const c = switch (builtin.os.tag) {
     }),
 };
 
+var sigwinch_received: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+
+fn handleSigwinch(_: i32, _: *const posix.siginfo_t, _: ?*anyopaque) callconv(.c) void {
+    sigwinch_received.store(true, .release);
+}
+
+fn setupSigwinchHandler() void {
+    const act: posix.Sigaction = .{
+        .handler = .{ .sigaction = handleSigwinch },
+        .mask = posix.sigemptyset(),
+        .flags = posix.SA.SIGINFO,
+    };
+    posix.sigaction(posix.SIG.WINCH, &act, null);
+}
+
+fn getTerminalSize() ?ipc.Resize {
+    var ws: c.struct_winsize = undefined;
+    if (c.ioctl(posix.STDOUT_FILENO, c.TIOCGWINSZ, &ws) == 0) {
+        return .{ .rows = ws.ws_row, .cols = ws.ws_col };
+    }
+    return null;
+}
+
 const Client = struct {
     alloc: std.mem.Allocator,
     socket_fd: i32,
@@ -415,6 +438,13 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
     const alloc = std.heap.c_allocator;
     defer posix.close(client_sock_fd);
 
+    setupSigwinchHandler();
+
+    // Send initial terminal size
+    if (getTerminalSize()) |size| {
+        ipc.send(client_sock_fd, .Resize, std.mem.asBytes(&size)) catch {};
+    }
+
     var poll_fds = try std.ArrayList(posix.pollfd).initCapacity(alloc, 2);
     defer poll_fds.deinit(alloc);
 
@@ -431,6 +461,16 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
     _ = try posix.fcntl(stdin_fd, posix.F.SETFL, flags | posix.SOCK.NONBLOCK);
 
     while (true) {
+        // Check for pending SIGWINCH
+        if (sigwinch_received.swap(false, .acq_rel)) {
+            if (getTerminalSize()) |size| {
+                ipc.send(client_sock_fd, .Resize, std.mem.asBytes(&size)) catch |err| switch (err) {
+                    error.BrokenPipe, error.ConnectionResetByPeer => return,
+                    else => return err,
+                };
+            }
+        }
+
         poll_fds.clearRetainingCapacity();
 
         try poll_fds.append(alloc, .{
@@ -454,6 +494,7 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
         }
 
         _ = posix.poll(poll_fds.items, -1) catch |err| {
+            if (err == error.Interrupted) continue; // EINTR from signal, loop again
             return err;
         };
 
