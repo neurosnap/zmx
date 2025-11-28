@@ -90,9 +90,9 @@ At this point, nothing is configurable and we aren't convinced they should ever 
 
 ## todo
 
-- QA
-- Integrate with `libghostty` to restore terminal state on re-attach
-- Binary distribution (e.g. pkg managers)
+- `bug`: unix socket files not always getting removed properly
+- `bug`: remove log files when closing session
+- `feat`: binary distribution (e.g. `aur`, `ppa`, `apk`, `brew`)
 
 ## prior art
 
