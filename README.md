@@ -17,7 +17,7 @@ session persistence for terminal processes
 
 - The `daemon` and client processes communicate via a unix socket
 - Each session creates its own unix socket file `/tmp/zmx/*`
-- Restoring terminal sessions uses `libghostty-vt`
+- We restore terminal state and output using `libghostty-vt`
 
 ## usage
 
@@ -81,7 +81,7 @@ We store global logs for cli commands in `/tmp/zmx/logs/zmx.log`. We store sessi
 
 ## a note on configuration
 
-At this point, nothing is configurable.  We are evaluating what is necessary to be able to configure and what should not.  Every configuration option is a burden for us maintainers.
+At this point, nothing is configurable.  We are evaluating what should be configurable and what should not.  Every configuration option is a burden for us maintainers.  For example, being able to change the default detach shortcut is difficult in a terminal environment.
 
 ## a smol contract
 
