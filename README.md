@@ -154,6 +154,7 @@ At this point, nothing is configurable.  We are evaluating what should be config
 
 - `bug`: unix socket files not always getting removed properly
 - `bug`: remove log files when closing session
+- `bug`: send resize event when a client first sends stdin
 - `feat`: binary distribution (e.g. `aur`, `ppa`, `apk`, `brew`)
 
 ## prior art
