@@ -2,6 +2,8 @@
 
 session persistence for terminal processes
 
+Reason for this tool: [You might not need `tmux`](https://bower.sh/you-might-not-need-tmux)
+
 ## features
 
 - Persist terminal shell sessions (pty processes)
@@ -70,6 +72,61 @@ todo.
 ### zsh
 
 todo.
+
+## philosophy
+
+The entire argument for `zmx` instead of something like `tmux` that has windows, panes, splits, etc. is that job should be handled by your os window manager.  By using something like `tmux` you now have redundent functionality in your dev stack: a tiling manager for your os windows and a tiling manager for your terminal windows.
+
+Instead, we focus this tool specifically on session persistence and defer window management to your os wm.
+
+## ssh workflow
+
+Using `zmx` with `ssh` is a first-class citizen.  Instead of sshing into your remote system with a single terminal and have `n` tmux pandes, you open `n` number of terminals open and ssh into your remote system `n` number of times.  This might sound like a downgrade, but there are tools to make this a delightful workflow.
+
+First, create an ssh config entry for your remote dev server:
+
+```bash
+Host = d.*
+    HostName 192.168.1.xxx
+
+    RemoteCommand zmx attach %k
+    RequestTTY yes
+    ControlPath ~/.ssh/cm-%r@%h:%p
+    ControlMaster auto
+    ControlPersist 10m
+```
+
+Now you can spawn as many terminal sessions as you'd like:
+
+```bash
+ssh d.term
+ssh d.irc
+ssh d.pico
+ssh d.dotfiles
+```
+
+This will create or attach to each session and since we are using `ControlMaster` the same `ssh` connection is reused for near-instant connection times.
+
+Now you can use the [`autossh`](https://linux.die.net/man/1/autossh) tool to make your ssh connections auto-reconnect.  For example, if you have a laptop and close/open your laptop lid it will automatically reconnect all your ssh connections:
+
+```bash
+autossh -M 0 d.term
+```
+
+Or create an `alias`/`abbr`:
+
+```fish
+abbr -a ash "autossh -M 0"
+```
+
+```bash
+ash d.term
+ash d.irc
+ash d.pico
+ash d.dotifles
+```
+
+Wow!  Now you can setup all your os tiling windows how you like them for your project and have as many windows as you'd like, almost replicating exactly what `tmux` used to do with a slightly different workflow.
 
 ## socket file location
 
