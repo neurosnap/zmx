@@ -6,15 +6,18 @@ session persistence for terminal processes
 
 - Persist terminal shell sessions (pty processes)
 - Ability to attach and detach from a shell session without killing it
-- Supports all the terminal features that the client's terminal emulator supports
 - Native terminal scrollback
 - Manage shell sessions
 - Multiple clients can connect to the same session
+- Re-attaching to a session restores previous terminal state and output
+- Works on mac and linux
+- This project does **NOT** provide windows, tabs, or window splits
+
+## impl
+
 - The `daemon` and client processes communicate via a unix socket
 - Each session creates its own unix socket file `/tmp/zmx/*`
-- Re-attaching to a session restores previous terminal state and output
-- This project does **NOT** provide windows, tabs, or window splits
-- Works on mac and linux
+- Restoring terminal sessions uses `libghostty-vt`
 
 ## usage
 
@@ -78,7 +81,7 @@ We store global logs for cli commands in `/tmp/zmx/logs/zmx.log`. We store sessi
 
 ## a note on configuration
 
-At this point, nothing is configurable and we aren't convinced they should ever be configurable. Configuration adds complexity and it forces maintainers to support users changing the default behavior. This is a burden. For example, if we allow changing the detach key shortcut then we need to debug all the different incantations people come up with which can be very tricky in a terminal environment. We have figured out how to support `ctrl+\` because we think this is a great option. Tread lightly when submitting PRs to add configuration to this tool. Having said that, we will always entertain configuration ideas.
+At this point, nothing is configurable.  We are evaluating what is necessary to be able to configure and what should not.  Every configuration option is a burden for us maintainers.
 
 ## a smol contract
 
