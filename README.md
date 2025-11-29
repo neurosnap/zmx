@@ -1,3 +1,5 @@
+![logo](./logo.png)
+
 # zmx
 
 session persistence for terminal processes
