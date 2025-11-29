@@ -28,11 +28,11 @@ session persistence for terminal processes
 Usage: zmx <command> [args]
 
 Commands:
-  attach <name> [command...]  Create or attach to a session
-  detach                      Detach all clients from current session  (ctrl+\ for current client)
-  list                        List active sessions
-  kill <name>                 Kill a session and all attached clients
-  help                        Show this help message
+  [a]ttach <name> [command...]  Create or attach to a session
+  [d]etach                      Detach all clients from current session  (ctrl+\ for current client)
+  [l]ist                        List active sessions
+  [k]ill <name>                 Kill a session and all attached clients
+  [h]elp                        Show this help message
 ```
 
 ### examples

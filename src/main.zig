@@ -134,19 +134,19 @@ pub fn main() !void {
         return list(&cfg);
     };
 
-    if (std.mem.eql(u8, cmd, "help")) {
+    if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "h")) {
         return help();
-    } else if (std.mem.eql(u8, cmd, "list")) {
+    } else if (std.mem.eql(u8, cmd, "list") or std.mem.eql(u8, cmd, "l")) {
         return list(&cfg);
-    } else if (std.mem.eql(u8, cmd, "detach")) {
+    } else if (std.mem.eql(u8, cmd, "detach") or std.mem.eql(u8, cmd, "d")) {
         return detachAll(&cfg);
-    } else if (std.mem.eql(u8, cmd, "kill")) {
+    } else if (std.mem.eql(u8, cmd, "kill") or std.mem.eql(u8, cmd, "k")) {
         const session_name = args.next() orelse {
             std.log.err("session name required", .{});
             return;
         };
         return kill(&cfg, session_name);
-    } else if (std.mem.eql(u8, cmd, "attach")) {
+    } else if (std.mem.eql(u8, cmd, "attach") or std.mem.eql(u8, cmd, "a")) {
         const session_name = args.next() orelse {
             std.log.err("session name required", .{});
             return;
@@ -188,11 +188,11 @@ fn help() !void {
         \\Usage: zmx <command> [args]
         \\
         \\Commands:
-        \\  attach <name> [command...]  Create or attach to a session
-        \\  detach                      Detach all clients from current session (ctrl+\ for current client)
-        \\  list                        List active sessions
-        \\  kill <name>                 Kill a session and all attached clients
-        \\  help                        Show this help message
+        \\  [a]ttach <name> [command...]  Create or attach to a session
+        \\  [d]etach                      Detach all clients from current session (ctrl+\ for current client)
+        \\  [l]ist                        List active sessions
+        \\  [k]ill <name>                 Kill a session and all attached clients
+        \\  [h]elp                        Show this help message
         \\
     ;
     try std.fs.File.stdout().writeAll(help_text);
