@@ -23,6 +23,17 @@ Reason for this tool: [You might not need `tmux`](https://bower.sh/you-might-not
 - Each session creates its own unix socket file `/tmp/zmx/*`
 - We restore terminal state and output using `libghostty-vt`
 
+## install
+
+- Requires zig `v0.15`
+- Clone the repo
+- Run build cmd
+
+```bash
+zig build -Doptimize=ReleaseSafe --prefix ~/.local
+# be sure to add ~/.local/bin to your PATH
+```
+
 ## usage
 
 > [!IMPORTANT]
