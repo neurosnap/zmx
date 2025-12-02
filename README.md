@@ -94,9 +94,9 @@ Instead, we focus this tool specifically on session persistence and defer window
 
 ## ssh workflow
 
-Using `zmx` with `ssh` is a first-class citizen.  Instead of sshing into your remote system with a single terminal and have `n` tmux pandes, you open `n` number of terminals open and ssh into your remote system `n` number of times.  This might sound like a downgrade, but there are tools to make this a delightful workflow.
+Using `zmx` with `ssh` is a first-class citizen.  Instead of `ssh`ing into your remote system with a single terminal and `n` tmux panes, you open `n` terminals and run `ssh` for all of them.  This might sound tedious, but there are tools to make this a delightful workflow.
 
-First, create an ssh config entry for your remote dev server:
+First, create an `ssh` config entry for your remote dev server:
 
 ```bash
 Host = d.*
@@ -118,18 +118,18 @@ ssh d.pico
 ssh d.dotfiles
 ```
 
-This will create or attach to each session and since we are using `ControlMaster` the same `ssh` connection is reused for near-instant connection times.
+This will create or attach to each session and since we are using `ControlMaster` the same `ssh` connection is reused for every call to `ssh` for near-instant connection times.
 
 Now you can use the [`autossh`](https://linux.die.net/man/1/autossh) tool to make your ssh connections auto-reconnect.  For example, if you have a laptop and close/open your laptop lid it will automatically reconnect all your ssh connections:
 
 ```bash
-autossh -M 0 d.term
+autossh -M 0 -q d.term
 ```
 
 Or create an `alias`/`abbr`:
 
 ```fish
-abbr -a ash "autossh -M 0"
+abbr -a ash "autossh -M 0 -q"
 ```
 
 ```bash
@@ -139,7 +139,7 @@ ash d.pico
 ash d.dotifles
 ```
 
-Wow!  Now you can setup all your os tiling windows how you like them for your project and have as many windows as you'd like, almost replicating exactly what `tmux` used to do with a slightly different workflow.
+Wow!  Now you can setup all your os tiling windows how you like them for your project and have as many windows as you'd like, almost replicating exactly what `tmux` does but with native windows, tabs, splits, and scrollback!  It also has the added benefit of supporting all the terminal features your emulator supports, no longer restricted by what `tmux` supports.
 
 ## socket file location
 
