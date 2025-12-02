@@ -11,7 +11,6 @@ Reason for this tool: [You might not need `tmux`](https://bower.sh/you-might-not
 - Persist terminal shell sessions (pty processes)
 - Ability to attach and detach from a shell session without killing it
 - Native terminal scrollback
-- Manage shell sessions
 - Multiple clients can connect to the same session
 - Re-attaching to a session restores previous terminal state and output
 - Works on mac and linux
@@ -55,7 +54,7 @@ zmx attach mux dvtm         # run a multiplexer inside zmx
 
 ## shell prompt
 
-When you attach to a zmx session, we don't provide any indication that you are inside zmx. We do provide an environment variable `ZMX_SESSION` which contains the session name.
+When you attach to a zmx session, we don't provide any indication that you are inside `zmx`. We do provide an environment variable `ZMX_SESSION` which contains the session name.
 
 We recommend checking for that env var inside your prompt and displaying some indication there.
 
@@ -82,7 +81,7 @@ todo.
 
 ## philosophy
 
-The entire argument for `zmx` instead of something like `tmux` that has windows, panes, splits, etc. is that job should be handled by your os window manager.  By using something like `tmux` you now have redundent functionality in your dev stack: a tiling manager for your os windows and a tiling manager for your terminal windows.
+The entire argument for `zmx` instead of something like `tmux` that has windows, panes, splits, etc. is that job should be handled by your os window manager.  By using something like `tmux` you now have redundent functionality in your dev stack: a tiling manager for your os windows and a tiling manager for your terminal windows.  Further, in order to use modern terminal features, your terminal emulator **and** `tmux` need to have support for them.  This holds back the terminal enthusiast community and feature development.
 
 Instead, we focus this tool specifically on session persistence and defer window management to your os wm.
 
@@ -170,20 +169,20 @@ At this point, nothing is configurable.  We are evaluating what should be config
 
 ### libghostty-vt
 
-We use libghostty-vt to restore the previous state of the terminal when a client re-attaches to a session.
+We use `libghostty-vt` to restore the previous state of the terminal when a client re-attaches to a session.
 
 How it works:
 
 - user creates session `zmx attach term`
 - user interacts with terminal stdin
 - stdin gets sent to pty via daemon
-- daemon sends pty output to client *and* ghostty-vt
-- ghostty-vt holds terminal state and scrollback
+- daemon sends pty output to client *and* `ghostty-vt`
+- `ghostty-vt` holds terminal state and scrollback
 - user disconnects
 - user re-attaches to session
-- ghostty-vt sends terminal snapshot to client stdout
+- `ghostty-vt` sends terminal snapshot to client stdout
 
-In this way, ghostty-vt doesn't sit in the middle of an active terminal session, it simply receives all the same data the client receives so it can re-hydrate clients that connect to the session.  This enables users to pick up where they left off as if they didn't disconnect from the terminal session at all.
+In this way, `ghostty-vt` doesn't sit in the middle of an active terminal session, it simply receives all the same data the client receives so it can re-hydrate clients that connect to the session.  This enables users to pick up where they left off as if they didn't disconnect from the terminal session at all.  It also has the added benefit of being very fast, the only thing sitting in-between you and your PTY is a unix socket file.
 
 ## prior art
 
