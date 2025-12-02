@@ -17,12 +17,6 @@ Reason for this tool: [You might not need `tmux`](https://bower.sh/you-might-not
 - Works on mac and linux
 - This project does **NOT** provide windows, tabs, or window splits
 
-## impl
-
-- The `daemon` and client processes communicate via a unix socket
-- Each session creates its own unix socket file `/tmp/zmx/*`
-- We restore terminal state and output using `libghostty-vt`
-
 ## install
 
 - Requires zig `v0.15`
@@ -167,6 +161,29 @@ At this point, nothing is configurable.  We are evaluating what should be config
 - `bug`: remove log files when closing session
 - `bug`: send resize event when a client first sends stdin
 - `feat`: binary distribution (e.g. `aur`, `ppa`, `apk`, `brew`)
+
+## impl
+
+- The `daemon` and client processes communicate via a unix socket
+- Each session creates its own unix socket file `/tmp/zmx/*`
+- We restore terminal state and output using `libghostty-vt`
+
+### libghostty-vt
+
+We use libghostty-vt to restore the previous state of the terminal when a client re-attaches to a session.
+
+How it works:
+
+- user creates session `zmx attach term`
+- user interacts with terminal stdin
+- stdin gets sent to pty via daemon
+- daemon sends pty output to client *and* ghostty-vt
+- ghostty-vt holds terminal state and scrollback
+- user disconnects
+- user re-attaches to session
+- ghostty-vt sends terminal snapshot to client stdout
+
+In this way, ghostty-vt doesn't sit in the middle of an active terminal session, it simply receives all the same data the client receives so it can re-hydrate clients that connect to the session.  This enables users to pick up where they left off as if they didn't disconnect from the terminal session at all.
 
 ## prior art
 
