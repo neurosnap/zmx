@@ -14,7 +14,7 @@ Reason for this tool: [You might not need `tmux`](https://bower.sh/you-might-not
 - Multiple clients can connect to the same session
 - Re-attaching to a session restores previous terminal state and output
 - Works on mac and linux
-- This project does **NOT** provide windows, tabs, or window splits
+- This project does **NOT** provide windows, tabs, or splits
 
 ## install
 
@@ -81,9 +81,9 @@ todo.
 
 ## philosophy
 
-The entire argument for `zmx` instead of something like `tmux` that has windows, panes, splits, etc. is that job should be handled by your os window manager.  By using something like `tmux` you now have redundent functionality in your dev stack: a tiling manager for your os windows and a tiling manager for your terminal windows.  Further, in order to use modern terminal features, your terminal emulator **and** `tmux` need to have support for them.  This holds back the terminal enthusiast community and feature development.
+The entire argument for `zmx` instead of something like `tmux` that has windows, panes, splits, etc. is that job should be handled by your os window manager.  By using something like `tmux` you now have redundent functionality in your dev stack: a window manager for your os and a window manager for your terminal.  Further, in order to use modern terminal features, your terminal emulator **and** `tmux` need to have support for them.  This holds back the terminal enthusiast community and feature development.
 
-Instead, we focus this tool specifically on session persistence and defer window management to your os wm.
+Instead, this tool specifically focuses on session persistence and defers window management to your os wm.
 
 ## ssh workflow
 
@@ -164,6 +164,7 @@ At this point, nothing is configurable.  We are evaluating what should be config
 ## impl
 
 - The `daemon` and client processes communicate via a unix socket
+- Both `daemon` and `client` loops leverage `poll()`
 - Each session creates its own unix socket file `/tmp/zmx/*`
 - We restore terminal state and output using `libghostty-vt`
 
@@ -182,7 +183,7 @@ How it works:
 - user re-attaches to session
 - `ghostty-vt` sends terminal snapshot to client stdout
 
-In this way, `ghostty-vt` doesn't sit in the middle of an active terminal session, it simply receives all the same data the client receives so it can re-hydrate clients that connect to the session.  This enables users to pick up where they left off as if they didn't disconnect from the terminal session at all.  It also has the added benefit of being very fast, the only thing sitting in-between you and your PTY is a unix socket file.
+In this way, `ghostty-vt` doesn't sit in the middle of an active terminal session, it simply receives all the same data the client receives so it can re-hydrate clients that connect to the session.  This enables users to pick up where they left off as if they didn't disconnect from the terminal session at all.  It also has the added benefit of being very fast, the only thing sitting in-between you and your PTY is a unix socket.
 
 ## prior art
 
