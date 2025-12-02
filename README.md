@@ -204,3 +204,9 @@ The biggest advantage of this approach is that `shpool` does not break native sc
 You can find the source code at this repo: https://github.com/martanne/abduco
 
 abduco provides session management i.e. it allows programs to be run independently from its controlling terminal. That is programs can be detached - run in the background - and then later reattached. Together with dvtm it provides a simpler and cleaner alternative to tmux or screen.
+
+<hr />
+
+![pico.sh logo](https://pico.sh/logo.svg)
+
+sponsored by [pico.sh](https://pico.sh): The ultimate ssh powered services for developers 
