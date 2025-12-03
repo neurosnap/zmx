@@ -83,6 +83,7 @@ const Daemon = struct {
     running: bool,
     pid: i32,
     command: ?[]const []const u8 = null,
+    has_pty_output: bool = false,
 
     pub fn deinit(self: *Daemon) void {
         self.clients.deinit(self.alloc);
@@ -410,6 +411,10 @@ fn attach(daemon: *Daemon) !void {
 
     _ = c.tcsetattr(posix.STDIN_FILENO, c.TCSANOW, &raw_termios);
 
+    // Clear screen and move cursor to home before attaching
+    const clear_seq = "\x1b[2J\x1b[H";
+    _ = try posix.write(posix.STDOUT_FILENO, clear_seq);
+
     try clientLoop(daemon.cfg, client_sock);
 }
 
@@ -640,6 +645,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                 } else {
                     // Feed PTY output to terminal emulator for state tracking
                     try vt_stream.nextSlice(buf[0..n]);
+                    daemon.has_pty_output = true;
 
                     // Broadcast data to all clients
                     for (daemon.clients.items) |client| {
@@ -704,21 +710,23 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                                 try term.resize(daemon.alloc, resize.cols, resize.rows);
                                 std.log.debug("init resize rows={d} cols={d}", .{ resize.rows, resize.cols });
 
-                                // Send terminal state after resize
-                                var builder: std.Io.Writer.Allocating = .init(daemon.alloc);
-                                defer builder.deinit();
-                                var term_formatter = ghostty_vt.formatter.TerminalFormatter.init(&term, .vt);
-                                term_formatter.content = .{ .selection = null };
-                                term_formatter.extra = .all;
-                                term_formatter.format(&builder.writer) catch |err| {
-                                    std.log.warn("failed to format terminal state err={s}", .{@errorName(err)});
-                                };
-                                const term_output = builder.writer.buffered();
-                                if (term_output.len > 0) {
-                                    ipc.appendMessage(daemon.alloc, &client.write_buf, .Output, term_output) catch |err| {
-                                        std.log.warn("failed to buffer terminal state for client err={s}", .{@errorName(err)});
+                                // Only send terminal state if there's been PTY output (skip on first attach)
+                                if (daemon.has_pty_output) {
+                                    var builder: std.Io.Writer.Allocating = .init(daemon.alloc);
+                                    defer builder.deinit();
+                                    var term_formatter = ghostty_vt.formatter.TerminalFormatter.init(&term, .vt);
+                                    term_formatter.content = .{ .selection = null };
+                                    term_formatter.extra = .all;
+                                    term_formatter.format(&builder.writer) catch |err| {
+                                        std.log.warn("failed to format terminal state err={s}", .{@errorName(err)});
                                     };
-                                    client.has_pending_output = true;
+                                    const term_output = builder.writer.buffered();
+                                    if (term_output.len > 0) {
+                                        ipc.appendMessage(daemon.alloc, &client.write_buf, .Output, term_output) catch |err| {
+                                            std.log.warn("failed to buffer terminal state for client err={s}", .{@errorName(err)});
+                                        };
+                                        client.has_pending_output = true;
+                                    }
                                 }
                             }
                         },
