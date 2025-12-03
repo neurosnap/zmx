@@ -385,12 +385,12 @@ fn attach(daemon: *Daemon) !void {
     var orig_termios: c.termios = undefined;
     _ = c.tcgetattr(posix.STDIN_FILENO, &orig_termios);
 
-    // restore stdin fd to its original state and exit alternate buffer after exiting.
+    // restore stdin fd to its original state after exiting.
     // Use TCSAFLUSH to discard any unread input, preventing stale input after detach.
     defer {
         _ = c.tcsetattr(posix.STDIN_FILENO, c.TCSAFLUSH, &orig_termios);
-        // Restore normal buffer and show cursor
-        const restore_seq = "\x1b[?25h\x1b[?1049l";
+        // Clear screen and show cursor on detach
+        const restore_seq = "\x1b[?25h\x1b[2J\x1b[H";
         _ = posix.write(posix.STDOUT_FILENO, restore_seq) catch {};
     }
 
@@ -409,11 +409,6 @@ fn attach(daemon: *Daemon) !void {
     raw_termios.c_cc[c.VTIME] = 0; // Read timeout: no timeout, return immediately
 
     _ = c.tcsetattr(posix.STDIN_FILENO, c.TCSANOW, &raw_termios);
-
-    // Switch to alternate screen buffer and home cursor
-    // This prevents session output from polluting the terminal after detach
-    const alt_buffer_seq = "\x1b[?1049h\x1b[H";
-    _ = try posix.write(posix.STDOUT_FILENO, alt_buffer_seq);
 
     try clientLoop(daemon.cfg, client_sock);
 }
