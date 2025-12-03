@@ -60,6 +60,7 @@ const Client = struct {
 const Cfg = struct {
     socket_dir: []const u8 = "/tmp/zmx",
     log_dir: []const u8 = "/tmp/zmx/logs",
+    max_scrollback: usize = 10_000_000,
 
     pub fn mkdir(self: *Cfg) !void {
         std.fs.makeDirAbsolute(self.socket_dir) catch |err| switch (err) {
@@ -576,6 +577,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
     var term = try ghostty_vt.Terminal.init(daemon.alloc, .{
         .cols = init_size.cols,
         .rows = init_size.rows,
+        .max_scrollback = daemon.cfg.max_scrollback,
     });
     defer term.deinit(daemon.alloc);
     var vt_stream = term.vtStream();
