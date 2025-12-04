@@ -771,6 +771,9 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                         },
                         .Kill => {
                             std.log.info("kill received session={s}", .{daemon.session_name});
+                            posix.kill(daemon.pid, posix.SIG.TERM) catch |err| {
+                                std.log.warn("failed to send SIGTERM to pty child err={s}", .{@errorName(err)});
+                            };
                             daemon.shutdown();
                             should_exit = true;
                             break :clients_loop;
