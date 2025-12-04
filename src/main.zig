@@ -9,6 +9,7 @@ var log_system = log.LogSystem{};
 
 pub const std_options: std.Options = .{
     .logFn = zmxLogFn,
+    .log_level = .debug,
 };
 
 fn zmxLogFn(
@@ -210,6 +211,8 @@ fn list(cfg: *Cfg) !void {
     defer dir.close();
     var iter = dir.iterate();
     var hasSessions = false;
+    var buf: [4096]u8 = undefined;
+    var w = std.fs.File.stdout().writer(&buf);
     while (try iter.next()) |entry| {
         const exists = sessionExists(dir, entry.name) catch continue;
         if (exists) {
@@ -217,50 +220,22 @@ fn list(cfg: *Cfg) !void {
             const socket_path = try getSocketPath(alloc, cfg.socket_dir, entry.name);
             defer alloc.free(socket_path);
 
-            const fd = sessionConnect(socket_path) catch |err| {
-                var msg_buf: [256]u8 = undefined;
-                const msg = try std.fmt.bufPrint(&msg_buf, "could not connect to session {s}: {s}\n", .{ entry.name, @errorName(err) });
-                try std.fs.File.stdout().writeAll(msg);
+            const result = probeSession(alloc, socket_path) catch |err| {
+                w.interface.print("session_name={s}\tstatus={s}\t(cleaning up)\n", .{ entry.name, @errorName(err) }) catch {};
+                w.interface.flush() catch {};
+                cleanupStaleSocket(dir, entry.name);
                 continue;
             };
-            defer posix.close(fd);
+            defer posix.close(result.fd);
 
-            try ipc.send(fd, .Info, "");
-
-            var sb = try ipc.SocketBuffer.init(alloc);
-            defer sb.deinit();
-
-            var info: ?ipc.Info = null;
-            read_loop: while (true) {
-                const n = try sb.read(fd);
-                if (n == 0) break; // EOF
-
-                while (sb.next()) |msg| {
-                    if (msg.header.tag == .Info) {
-                        if (msg.payload.len == @sizeOf(ipc.Info)) {
-                            info = std.mem.bytesToValue(ipc.Info, msg.payload[0..@sizeOf(ipc.Info)]);
-                            break :read_loop;
-                        }
-                    }
-                }
-            }
-
-            if (info) |i| {
-                var msg_buf: [256]u8 = undefined;
-                const msg = try std.fmt.bufPrint(&msg_buf, "session_name={s}\tpid={d}\tclients={d}\n", .{ entry.name, i.pid, i.clients_len });
-                try std.fs.File.stdout().writeAll(msg);
-            } else {
-                var msg_buf: [256]u8 = undefined;
-                const msg = try std.fmt.bufPrint(&msg_buf, "session_name={s}\tpid=?\tclients=?\n", .{entry.name});
-                try std.fs.File.stdout().writeAll(msg);
-            }
+            try w.interface.print("session_name={s}\tpid={d}\tclients={d}\n", .{ entry.name, result.info.pid, result.info.clients_len });
+            try w.interface.flush();
         }
     }
 
     if (!hasSessions) {
-        var msg_buf: [256]u8 = undefined;
-        const msg = try std.fmt.bufPrint(&msg_buf, "no sessions found in {s}\n", .{cfg.socket_dir});
-        try std.fs.File.stdout().writeAll(msg);
+        try w.interface.print("no sessions found in {s}\n", .{cfg.socket_dir});
+        try w.interface.flush();
     }
 }
 
@@ -277,11 +252,18 @@ fn detachAll(cfg: *Cfg) !void {
     };
     defer alloc.free(session_name);
 
+    var dir = try std.fs.openDirAbsolute(cfg.socket_dir, .{});
+    defer dir.close();
+
     const socket_path = try getSocketPath(alloc, cfg.socket_dir, session_name);
     defer alloc.free(socket_path);
-    const client_sock_fd = try sessionConnect(socket_path);
-    defer posix.close(client_sock_fd);
-    ipc.send(client_sock_fd, .DetachAll, "") catch |err| switch (err) {
+    const result = probeSession(alloc, socket_path) catch |err| {
+        std.log.err("session unresponsive: {s}", .{@errorName(err)});
+        cleanupStaleSocket(dir, session_name);
+        return;
+    };
+    defer posix.close(result.fd);
+    ipc.send(result.fd, .DetachAll, "") catch |err| switch (err) {
         error.BrokenPipe, error.ConnectionResetByPeer => return,
         else => return err,
     };
@@ -298,13 +280,22 @@ fn kill(cfg: *Cfg, session_name: []const u8) !void {
     const exists = try sessionExists(dir, session_name);
     if (!exists) {
         std.log.err("cannot kill session because it does not exist session_name={s}", .{session_name});
+        return;
     }
 
     const socket_path = try getSocketPath(alloc, cfg.socket_dir, session_name);
     defer alloc.free(socket_path);
-    const client_sock_fd = try sessionConnect(socket_path);
-    defer posix.close(client_sock_fd);
-    ipc.send(client_sock_fd, .Kill, "") catch |err| switch (err) {
+    const result = probeSession(alloc, socket_path) catch |err| {
+        std.log.err("session unresponsive: {s}", .{@errorName(err)});
+        cleanupStaleSocket(dir, session_name);
+        var buf: [4096]u8 = undefined;
+        var w = std.fs.File.stdout().writer(&buf);
+        w.interface.print("cleaned up stale session {s}\n", .{session_name}) catch {};
+        w.interface.flush() catch {};
+        return;
+    };
+    defer posix.close(result.fd);
+    ipc.send(result.fd, .Kill, "") catch |err| switch (err) {
         error.BrokenPipe, error.ConnectionResetByPeer => return,
         else => return err,
     };
@@ -323,20 +314,14 @@ fn attach(daemon: *Daemon) !void {
     var should_create = !exists;
 
     if (exists) {
-        const fd = sessionConnect(daemon.socket_path) catch |err| switch (err) {
-            error.ConnectionRefused => blk: {
-                std.log.warn("stale socket found, cleaning up fname={s}", .{daemon.session_name});
-                try dir.deleteFile(daemon.session_name);
-                should_create = true;
-                break :blk -1;
-            },
-            else => return err,
-        };
-        if (fd != -1) {
-            posix.close(fd);
+        if (probeSession(daemon.alloc, daemon.socket_path)) |result| {
+            posix.close(result.fd);
             if (daemon.command != null) {
                 std.log.warn("session already exists, ignoring command session={s}", .{daemon.session_name});
             }
+        } else |_| {
+            cleanupStaleSocket(dir, daemon.session_name);
+            should_create = true;
         }
     }
 
@@ -876,6 +861,59 @@ fn sessionConnect(fname: []const u8) !i32 {
     errdefer posix.close(socket_fd);
     try posix.connect(socket_fd, &unix_addr.any, unix_addr.getOsSockLen());
     return socket_fd;
+}
+
+const SessionProbeError = error{
+    Timeout,
+    ConnectionRefused,
+    Unexpected,
+};
+
+const SessionProbeResult = struct {
+    fd: i32,
+    info: ipc.Info,
+};
+
+fn probeSession(alloc: std.mem.Allocator, socket_path: []const u8) SessionProbeError!SessionProbeResult {
+    const timeout_ms = 1000;
+    const fd = sessionConnect(socket_path) catch |err| switch (err) {
+        error.ConnectionRefused => return error.ConnectionRefused,
+        else => return error.Unexpected,
+    };
+    errdefer posix.close(fd);
+
+    ipc.send(fd, .Info, "") catch return error.Unexpected;
+
+    var poll_fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
+    const poll_result = posix.poll(&poll_fds, timeout_ms) catch return error.Unexpected;
+    if (poll_result == 0) {
+        return error.Timeout;
+    }
+
+    var sb = ipc.SocketBuffer.init(alloc) catch return error.Unexpected;
+    defer sb.deinit();
+
+    const n = sb.read(fd) catch return error.Unexpected;
+    if (n == 0) return error.Unexpected;
+
+    while (sb.next()) |msg| {
+        if (msg.header.tag == .Info) {
+            if (msg.payload.len == @sizeOf(ipc.Info)) {
+                return .{
+                    .fd = fd,
+                    .info = std.mem.bytesToValue(ipc.Info, msg.payload[0..@sizeOf(ipc.Info)]),
+                };
+            }
+        }
+    }
+    return error.Unexpected;
+}
+
+fn cleanupStaleSocket(dir: std.fs.Dir, session_name: []const u8) void {
+    std.log.warn("stale socket found, cleaning up session={s}", .{session_name});
+    dir.deleteFile(session_name) catch |err| {
+        std.log.warn("failed to delete stale socket err={s}", .{@errorName(err)});
+    };
 }
 
 fn sessionExists(dir: std.fs.Dir, name: []const u8) !bool {
