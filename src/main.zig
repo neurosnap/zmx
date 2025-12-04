@@ -136,7 +136,7 @@ pub fn main() !void {
         return list(&cfg);
     };
 
-    if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "h")) {
+    if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "h") or std.mem.eql(u8, cmd, "-h")) {
         return help();
     } else if (std.mem.eql(u8, cmd, "list") or std.mem.eql(u8, cmd, "l")) {
         return list(&cfg);
@@ -144,14 +144,12 @@ pub fn main() !void {
         return detachAll(&cfg);
     } else if (std.mem.eql(u8, cmd, "kill") or std.mem.eql(u8, cmd, "k")) {
         const session_name = args.next() orelse {
-            std.log.err("session name required", .{});
-            return;
+            return error.SessionNameRequired;
         };
         return kill(&cfg, session_name);
     } else if (std.mem.eql(u8, cmd, "attach") or std.mem.eql(u8, cmd, "a")) {
         const session_name = args.next() orelse {
-            std.log.err("session name required", .{});
-            return;
+            return error.SessionNameRequired;
         };
 
         var command_args: std.ArrayList([]const u8) = .empty;
@@ -179,7 +177,7 @@ pub fn main() !void {
         std.log.info("socket path={s}", .{daemon.socket_path});
         return attach(&daemon);
     } else {
-        std.log.err("unknown cmd={s}", .{cmd});
+        return help();
     }
 }
 
@@ -197,7 +195,10 @@ fn help() !void {
         \\  [h]elp                        Show this help message
         \\
     ;
-    try std.fs.File.stdout().writeAll(help_text);
+    var buf: [4096]u8 = undefined;
+    var w = std.fs.File.stdout().writer(&buf);
+    try w.interface.print(help_text, .{});
+    try w.interface.flush();
 }
 
 fn list(cfg: *Cfg) !void {
