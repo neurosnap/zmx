@@ -718,7 +718,15 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                                     defer builder.deinit();
                                     var term_formatter = ghostty_vt.formatter.TerminalFormatter.init(&term, .vt);
                                     term_formatter.content = .{ .selection = null };
-                                    term_formatter.extra = .all;
+                                    term_formatter.extra = .{
+                                        .palette = false, // Don't override host terminal's palette
+                                        .modes = true,
+                                        .scrolling_region = true,
+                                        .tabstops = true,
+                                        .pwd = true,
+                                        .keyboard = true,
+                                        .screen = .all,
+                                    };
                                     term_formatter.format(&builder.writer) catch |err| {
                                         std.log.warn("failed to format terminal state err={s}", .{@errorName(err)});
                                     };
