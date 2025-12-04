@@ -478,6 +478,7 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
 
             if (n_opt) |n| {
                 if (n > 0) {
+                    std.log.debug("stdin recv n={d} bytes={x}", .{ n, buf[0..n] });
                     // Check for extended escape sequence for Ctrl+\ (ESC [ 92 ; 5 u)
                     // This is sent by some terminals (like ghostty/kitty) in CSI u mode
                     const esc_seq = "\x1b[92;5u";
