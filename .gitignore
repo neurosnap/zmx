@@ -10,3 +10,8 @@ zig_std_src/
 ghostty_src/
 prior_art/
 .beads/
+
+# Nix
+result
+result-*
+.direnv/
