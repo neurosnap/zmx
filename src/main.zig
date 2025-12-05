@@ -478,10 +478,10 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
 
             if (n_opt) |n| {
                 if (n > 0) {
-                    // Check for extended escape sequence for Ctrl+\ (ESC [ 92 ; 5 u)
-                    // This is sent by some terminals (like ghostty/kitty) in CSI u mode
-                    const esc_seq = "\x1b[92;5u";
-                    if (std.mem.indexOf(u8, buf[0..n], esc_seq) != null) {
+                    // Check for Kitty keyboard protocol escape sequence for Ctrl+\
+                    // Format: CSI 92 ; <modifiers> u  where modifiers has Ctrl bit (bit 2) set
+                    // Examples: \e[92;5u (basic), \e[92;133u (with event flags)
+                    if (isKittyCtrlBackslash(buf[0..n])) {
                         ipc.send(client_sock_fd, .Detach, "") catch |err| switch (err) {
                             error.BrokenPipe, error.ConnectionResetByPeer => return,
                             else => return err,
@@ -968,4 +968,19 @@ fn getTerminalSize(fd: i32) ipc.Resize {
         return .{ .rows = ws.ws_row, .cols = ws.ws_col };
     }
     return .{ .rows = 24, .cols = 80 };
+}
+
+/// Detects Kitty keyboard protocol escape sequence for Ctrl+\
+/// Common sequences: \e[92;5u (basic), \e[92;133u (with event flags)
+fn isKittyCtrlBackslash(buf: []const u8) bool {
+    return std.mem.indexOf(u8, buf, "\x1b[92;5u") != null or
+        std.mem.indexOf(u8, buf, "\x1b[92;133u") != null;
+}
+
+test "isKittyCtrlBackslash" {
+    try std.testing.expect(isKittyCtrlBackslash("\x1b[92;5u"));
+    try std.testing.expect(isKittyCtrlBackslash("\x1b[92;133u"));
+    try std.testing.expect(!isKittyCtrlBackslash("\x1b[92;1u"));
+    try std.testing.expect(!isKittyCtrlBackslash("\x1b[93;5u"));
+    try std.testing.expect(!isKittyCtrlBackslash("garbage"));
 }
