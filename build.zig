@@ -1,8 +1,20 @@
 const std = @import("std");
 
+const linux_targets: []const std.Target.Query = &.{
+    .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu },
+    .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu },
+};
+
+const macos_targets: []const std.Target.Query = &.{
+    .{ .cpu_arch = .x86_64, .os_tag = .macos },
+    .{ .cpu_arch = .aarch64, .os_tag = .macos },
+};
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const version = b.option([]const u8, "version", "Version string for release") orelse
+        @as([]const u8, @import("build.zig.zon").version);
 
     const run_step = b.step("run", "Run the app");
     const test_step = b.step("test", "Run unit tests");
@@ -70,4 +82,42 @@ pub fn build(b: *std.Build) void {
     // If you copy this into your `build.zig`, make sure to rename 'foo'
     const check = b.step("check", "Check if foo compiles");
     check.dependOn(&exe_check.step);
+
+    // Release step - macOS can cross-compile to Linux, but Linux cannot cross-compile to macOS (needs SDK)
+    const native_os = @import("builtin").os.tag;
+    const release_targets = if (native_os == .macos) linux_targets ++ macos_targets else linux_targets;
+    const release_step = b.step("release", "Build release binaries (macOS builds all, Linux builds Linux only)");
+    for (release_targets) |release_target| {
+        const resolved = b.resolveTargetQuery(release_target);
+        const release_mod = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = resolved,
+            .optimize = .ReleaseSafe,
+        });
+
+        if (b.lazyDependency("ghostty", .{
+            .target = resolved,
+            .optimize = .ReleaseSafe,
+        })) |dep| {
+            release_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
+        }
+
+        const release_exe = b.addExecutable(.{
+            .name = "zmx",
+            .root_module = release_mod,
+        });
+
+        const os_name = @tagName(release_target.os_tag orelse .linux);
+        const arch_name = @tagName(release_target.cpu_arch orelse .x86_64);
+        const tarball_name = b.fmt("zmx-{s}-{s}-{s}.tar.gz", .{ version, os_name, arch_name });
+
+        const tar = b.addSystemCommand(&.{ "tar", "-czf" });
+        const tarball = tar.addOutputFileArg(tarball_name);
+        tar.addArg("-C");
+        tar.addDirectoryArg(release_exe.getEmittedBinDirectory());
+        tar.addArg("zmx");
+
+        const install_tar = b.addInstallFile(tarball, b.fmt("dist/{s}", .{tarball_name}));
+        release_step.dependOn(&install_tar.step);
+    }
 }
