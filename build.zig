@@ -115,8 +115,17 @@ pub fn build(b: *std.Build) void {
         const arch_name = @tagName(release_target.cpu_arch orelse .x86_64);
         const tarball_name = b.fmt("zmx-{s}-{s}-{s}.tar.gz", .{ version, os_name, arch_name });
 
-        const tar = b.addSystemCommand(&.{ "tar", "--format=ustar", "-czf" });
+        const tar = b.addSystemCommand(&.{ "tar", "-czf" });
         tar.setEnvironmentVariable("COPYFILE_DISABLE", "1"); // Prevent macOS ._* files
+
+        // Strip extended attributes on macOS before creating tarball
+        if (native_os == .macos) {
+            const strip_xattr = b.addSystemCommand(&.{"xattr"});
+            strip_xattr.addArg("-cr");
+            strip_xattr.addDirectoryArg(release_exe.getEmittedBinDirectory());
+            tar.step.dependOn(&strip_xattr.step);
+        }
+
         const tarball = tar.addOutputFileArg(tarball_name);
         tar.addArg("-C");
         tar.addDirectoryArg(release_exe.getEmittedBinDirectory());
