@@ -42,6 +42,8 @@ pub fn build(b: *std.Build) void {
         .name = "zmx",
         .root_module = exe_mod,
     });
+    exe.linkLibC();
+
     b.installArtifact(exe);
 
     // Run
@@ -75,6 +77,7 @@ pub fn build(b: *std.Build) void {
         .name = "zmx",
         .root_module = exe_mod,
     });
+    exe_check.linkLibC();
     // There is no `b.installArtifact(exe_check);` here.
 
     // Finally we add the "check" step which will be detected
@@ -106,6 +109,7 @@ pub fn build(b: *std.Build) void {
             .name = "zmx",
             .root_module = release_mod,
         });
+        release_exe.linkLibC();
 
         const os_name = @tagName(release_target.os_tag orelse .linux);
         const arch_name = @tagName(release_target.cpu_arch orelse .x86_64);

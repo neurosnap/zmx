@@ -24,7 +24,7 @@ fn zmxLogFn(
 const c = switch (builtin.os.tag) {
     .macos => @cImport({
         @cInclude("sys/ioctl.h"); // ioctl and constants
-        @cInclude("util.h"); // openpty()
+        @cInclude("termios.h");
         @cInclude("stdlib.h");
         @cInclude("unistd.h");
     }),
@@ -41,6 +41,14 @@ const c = switch (builtin.os.tag) {
         @cInclude("unistd.h");
     }),
 };
+
+// Manually declare forkpty for macOS since util.h is not available during cross-compilation
+const forkpty = if (builtin.os.tag == .macos)
+    struct {
+        extern "c" fn forkpty(master_fd: *c_int, name: ?[*:0]u8, termp: ?*const c.struct_termios, winp: ?*const c.struct_winsize) c_int;
+    }.forkpty
+else
+    c.forkpty;
 
 var sigwinch_received: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
@@ -815,7 +823,7 @@ fn spawnPty(daemon: *Daemon) !c_int {
     };
 
     var master_fd: c_int = undefined;
-    const pid = c.forkpty(&master_fd, null, null, &ws);
+    const pid = forkpty(&master_fd, null, null, &ws);
     if (pid < 0) {
         return error.ForkPtyFailed;
     }
