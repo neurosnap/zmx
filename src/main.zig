@@ -1,9 +1,12 @@
 const std = @import("std");
 const posix = std.posix;
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 const ghostty_vt = @import("ghostty-vt");
 const ipc = @import("ipc.zig");
 const log = @import("log.zig");
+
+pub const version = build_options.version;
 
 var log_system = log.LogSystem{};
 
@@ -145,7 +148,9 @@ pub fn main() !void {
         return list(&cfg);
     };
 
-    if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "h") or std.mem.eql(u8, cmd, "-h")) {
+    if (std.mem.eql(u8, cmd, "version") or std.mem.eql(u8, cmd, "v") or std.mem.eql(u8, cmd, "-v") or std.mem.eql(u8, cmd, "--version")) {
+        return printVersion();
+    } else if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "h") or std.mem.eql(u8, cmd, "-h")) {
         return help();
     } else if (std.mem.eql(u8, cmd, "list") or std.mem.eql(u8, cmd, "l")) {
         return list(&cfg);
@@ -190,6 +195,13 @@ pub fn main() !void {
     }
 }
 
+fn printVersion() !void {
+    var buf: [256]u8 = undefined;
+    var w = std.fs.File.stdout().writer(&buf);
+    try w.interface.print("zmx {s}\n", .{version});
+    try w.interface.flush();
+}
+
 fn help() !void {
     const help_text =
         \\zmx - session persistence for terminal processes
@@ -201,6 +213,7 @@ fn help() !void {
         \\  [d]etach                      Detach all clients from current session (ctrl+\ for current client)
         \\  [l]ist                        List active sessions
         \\  [k]ill <name>                 Kill a session and all attached clients
+        \\  [v]ersion                     Show version information
         \\  [h]elp                        Show this help message
         \\
     ;
