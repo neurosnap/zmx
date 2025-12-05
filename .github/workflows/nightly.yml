@@ -1,0 +1,100 @@
+name: Nightly Build
+
+on:
+  schedule:
+    - cron: "0 0 * * *" # midnight UTC
+  workflow_dispatch: # Allow manual triggering
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-linux-musl
+            runner: ubuntu-latest
+            ext: ""
+          - target: aarch64-linux-musl
+            runner: ubuntu-latest
+            ext: ""
+          - target: x86_64-macos-none
+            runner: macos-latest
+            ext: ""
+          - target: aarch64-macos-none
+            runner: macos-latest
+            ext: ""
+    steps:
+      - name: Fix AppArmor for Nix/Zig
+        if: runner.os == 'Linux'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Nix
+        uses: DeterminateSystems/nix-installer-action@v21
+      - name: Setup Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v13
+
+      - name: Build zmx
+        run: |
+          GIT_HASH=$(git rev-parse --short HEAD)
+
+          nix develop -c zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe -Dversion=nightly-${GIT_HASH}
+
+      - name: Prepare zmx binary
+        id: prepare
+        run: |
+          BIN_NAME="zmx"
+          SRC_PATH="zig-out/bin/${BIN_NAME}${{ matrix.ext }}"
+          DEST_NAME="${BIN_NAME}-${{ matrix.target }}${{ matrix.ext }}"
+
+          mv "$SRC_PATH" "$DEST_NAME"
+          echo "artifact_name=$DEST_NAME" >> $GITHUB_OUTPUT
+
+      # Upload to GitHub Actions Temporary Storage
+      - name: Upload zmx binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: ${{ steps.prepare.outputs.artifact_name }}
+          retention-days: 1
+
+  publish-nightly:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download zmx binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Update zmx nightly release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 1. Delete the old release and tag (if they exist)
+          gh release delete nightly --cleanup-tag --yes || true
+
+          # 2. Create the new nightly release and upload files
+          gh release create nightly \
+              --prerelease \
+              --title "Nightly Build" \
+              --notes "Automatic nightly build from commit $GITHUB_SHA." \
+              --target $GITHUB_SHA \
+              artifacts/*
