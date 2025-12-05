@@ -122,7 +122,13 @@ pub fn build(b: *std.Build) void {
         tar.addDirectoryArg(release_exe.getEmittedBinDirectory());
         tar.addArg("zmx");
 
+        const shasum = b.addSystemCommand(&.{ "shasum", "-a", "256" });
+        shasum.addFileArg(tarball);
+        const shasum_output = shasum.captureStdOut();
+
         const install_tar = b.addInstallFile(tarball, b.fmt("dist/{s}", .{tarball_name}));
+        const install_sha = b.addInstallFile(shasum_output, b.fmt("dist/{s}.sha256", .{tarball_name}));
         release_step.dependOn(&install_tar.step);
+        release_step.dependOn(&install_sha.step);
     }
 }
