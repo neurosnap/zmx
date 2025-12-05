@@ -13,7 +13,7 @@ pub const LogSystem = struct {
         self.path = try alloc.dupe(u8, path);
 
         const file = std.fs.openFileAbsolute(path, .{ .mode = .read_write }) catch |err| switch (err) {
-            error.FileNotFound => try std.fs.createFileAbsolute(path, .{ .read = true }),
+            error.FileNotFound => try std.fs.createFileAbsolute(path, .{ .read = true, .mode = 0o640 }),
             else => return err,
         };
 
@@ -82,7 +82,7 @@ pub const LogSystem = struct {
             else => return err,
         };
 
-        self.file = try std.fs.createFileAbsolute(self.path, .{ .truncate = true, .read = true });
+        self.file = try std.fs.createFileAbsolute(self.path, .{ .truncate = true, .read = true, .mode = 0o640 });
         self.current_size = 0;
     }
 };

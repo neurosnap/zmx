@@ -146,15 +146,18 @@ Wow! Now you can setup all your os tiling windows how you like them for your pro
 
 ## socket file location
 
-Each session gets its own unix socket file. Right now, the default location is `/tmp/zmx`. At the moment this is not configurable.
+Each session gets its own unix socket file. Right now, the default location is `/tmp/zmx-{uid}`.  You can configure this using environment variables:
+
+- `TMPDIR` => overrides `/tmp`
+- `ZMX_DIR` => overrides `/tmp/zmx-{uid}`
 
 ## debugging
 
-We store global logs for cli commands in `/tmp/zmx/logs/zmx.log`. We store session-specific logs in `/tmp/zmx/logs/{session_name}.log`. These logs rotate to `.old` after 5MB. At the moment this is not configurable.
+We store global logs for cli commands in `/tmp/zmx-{uid}/logs/zmx.log`. We store session-specific logs in `/tmp/zmx-{uid}/logs/{session_name}.log`. These logs rotate to `.old` after 5MB.
 
 ## a note on configuration
 
-At this point, nothing is configurable. We are evaluating what should be configurable and what should not. Every configuration option is a burden for us maintainers. For example, being able to change the default detach shortcut is difficult in a terminal environment.
+We are evaluating what should be configurable and what should not. Every configuration option is a burden for us maintainers. For example, being able to change the default detach shortcut is difficult in a terminal environment.
 
 ## a smol contract
 
@@ -175,7 +178,7 @@ At this point, nothing is configurable. We are evaluating what should be configu
 
 - The `daemon` and client processes communicate via a unix socket
 - Both `daemon` and `client` loops leverage `poll()`
-- Each session creates its own unix socket file `/tmp/zmx/*`
+- Each session creates its own unix socket file
 - We restore terminal state and output using `libghostty-vt`
 
 ### libghostty-vt

@@ -67,17 +67,47 @@ const Client = struct {
 };
 
 const Cfg = struct {
-    socket_dir: []const u8 = "/tmp/zmx",
-    log_dir: []const u8 = "/tmp/zmx/logs",
+    socket_dir: []const u8,
+    log_dir: []const u8,
     max_scrollback: usize = 10_000_000,
 
+    pub fn init(alloc: std.mem.Allocator) !Cfg {
+        const tmpdir = posix.getenv("TMPDIR") orelse "/tmp";
+        const uid = posix.getuid();
+
+        var socket_dir: []const u8 = "";
+        if (posix.getenv("ZMX_DIR")) |zmxdir| {
+            socket_dir = try alloc.dupe(u8, zmxdir);
+        } else {
+            socket_dir = try std.fmt.allocPrint(alloc, "{s}/zmx-{d}", .{ tmpdir, uid });
+        }
+        errdefer alloc.free(socket_dir);
+
+        const log_dir = try std.fmt.allocPrint(alloc, "{s}/logs", .{socket_dir});
+        errdefer alloc.free(log_dir);
+
+        var cfg = Cfg{
+            .socket_dir = socket_dir,
+            .log_dir = log_dir,
+        };
+
+        try cfg.mkdir();
+
+        return cfg;
+    }
+
+    pub fn deinit(self: *Cfg, alloc: std.mem.Allocator) void {
+        if (self.socket_dir.len > 0) alloc.free(self.socket_dir);
+        if (self.log_dir.len > 0) alloc.free(self.log_dir);
+    }
+
     pub fn mkdir(self: *Cfg) !void {
-        std.fs.makeDirAbsolute(self.socket_dir) catch |err| switch (err) {
+        posix.mkdirat(posix.AT.FDCWD, self.socket_dir, 0o750) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
 
-        std.fs.makeDirAbsolute(self.log_dir) catch |err| switch (err) {
+        posix.mkdirat(posix.AT.FDCWD, self.log_dir, 0o750) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
@@ -133,8 +163,8 @@ pub fn main() !void {
     defer args.deinit();
     _ = args.skip(); // skip program name
 
-    var cfg = Cfg{};
-    try cfg.mkdir();
+    var cfg = try Cfg.init(alloc);
+    defer cfg.deinit(alloc);
 
     const log_path = try std.fs.path.join(alloc, &.{ cfg.log_dir, "zmx.log" });
     defer alloc.free(log_path);
