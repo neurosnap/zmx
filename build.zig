@@ -21,6 +21,7 @@ pub fn build(b: *std.Build) void {
 
     const options = b.addOptions();
     options.addOption([]const u8, "version", version);
+    options.addOption([]const u8, "ghostty_version", @import("build.zig.zon").dependencies.ghostty.hash);
 
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -146,3 +147,5 @@ pub fn build(b: *std.Build) void {
     upload_step.dependOn(&rsync_docs.step);
     upload_step.dependOn(&rsync_dist.step);
 }
+
+
