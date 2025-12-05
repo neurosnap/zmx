@@ -69,6 +69,8 @@ We recommend checking for that env var inside your prompt and displaying some in
 
 ### fish
 
+Place this file in `~/.config/fish/config.fish`:
+
 ```fish
 functions -c fish_prompt _original_fish_prompt 2>/dev/null
 
