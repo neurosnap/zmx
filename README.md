@@ -18,6 +18,15 @@ Reason for this tool: [You might not need `tmux`](https://bower.sh/you-might-not
 
 ## install
 
+### binaries
+
+- https://erock-zmx.pgs.sh/zmx-0.0.2-linux-aarch64.tar.gz
+- https://erock-zmx.pgs.sh/zmx-0.0.2-linux-x86_64.tar.gz
+- https://erock-zmx.pgs.sh/zmx-0.0.2-macos-aarch64.tar.gz
+- https://erock-zmx.pgs.sh/zmx-0.0.2-macos-x86_64.tar.gz
+
+### src
+
 - Requires zig `v0.15`
 - Clone the repo
 - Run build cmd
