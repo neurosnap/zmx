@@ -131,4 +131,13 @@ pub fn build(b: *std.Build) void {
         release_step.dependOn(&install_tar.step);
         release_step.dependOn(&install_sha.step);
     }
+
+    // Upload step - rsync docs and dist to pgs.sh
+    const upload_step = b.step("upload", "Upload docs and dist to pgs.sh:/zmx");
+
+    const rsync_docs = b.addSystemCommand(&.{ "rsync", "-rv", "docs/", "pgs.sh:/zmx" });
+    const rsync_dist = b.addSystemCommand(&.{ "rsync", "-rv", "zig-out/dist/", "pgs.sh:/zmx/a" });
+
+    upload_step.dependOn(&rsync_docs.step);
+    upload_step.dependOn(&rsync_dist.step);
 }
