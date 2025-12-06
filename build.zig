@@ -1,8 +1,8 @@
 const std = @import("std");
 
 const linux_targets: []const std.Target.Query = &.{
-    .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu },
-    .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu },
+    .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .musl },
+    .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .musl },
 };
 
 const macos_targets: []const std.Target.Query = &.{
@@ -19,11 +19,15 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     const test_step = b.step("test", "Run unit tests");
 
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", version);
+
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
+    exe_mod.addOptions("build_options", options);
 
     // You'll want to use a lazy dependency here so that ghostty is only
     // downloaded if you actually need it.
@@ -97,6 +101,7 @@ pub fn build(b: *std.Build) void {
             .target = resolved,
             .optimize = .ReleaseSafe,
         });
+        release_mod.addOptions("build_options", options);
 
         if (b.lazyDependency("ghostty", .{
             .target = resolved,
