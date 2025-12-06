@@ -2,13 +2,66 @@
 <html>
   <head>
     <title>zmx - session persistence for terminal processes</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="keywords" content="pico, pico.sh, hacker, labs, services">
+    <meta name="description" content="session persistence for terminal processes">
+    <link rel="stylesheet" href="https://pico.sh/smol.css">
   </head>
-  <body>
+  <body class="container" style="max-width: 35rem;">
+    <nav style="padding: 1.3rem;">
+      <div class="flex flex-wrap items-center justify-center gap-2" style="margin-right: 20px;">
+        <div class="group-h" style="gap: 0.25rem;">
+          <svg width="22" height="22" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <line x1="18" y1="83.0002" x2="84" y2="83.0002" stroke="white" stroke-width="12" stroke-linecap="round"/>
+            <line x1="18" y1="16" x2="84" y2="16" stroke="white" stroke-width="12" stroke-linecap="round"/>
+            <path d="M83 16.8901L18 83.0731" stroke="white" stroke-width="12" stroke-linecap="round"/>
+            <line x1="6" y1="-6" x2="100.118" y2="-6" transform="matrix(-0.706762 -0.707452 0.716069 -0.698029 93 83.0735)" stroke="white" stroke-width="12" stroke-linecap="round"/>
+          </svg>
+          <a href="/" class="link-alt">
+            zmx
+          </a>
+        </div>
+        <a href="https://github.com/neurosnap/zmx" class="link-alt">
+          src
+        </a>
+        <a href="https://bower.sh/?tag=zmx" class="link-alt">
+          blog
+        </a>
+        <a href="https://web.libera.chat/gamja?autojoin=#pico.sh" class="link-alt">
+          irc
+        </a>
+      </div>
+    </nav>
+
+    <div class="text-center my-4">
+      <h1 class="text-2xl">zmx</h1>
+      <div>session persistence for terminal processes</div>
+    </div>
+
+    <h2 class="text-lg">features</h2>
+    <ul>
+      <li>Persist terminal shell sessions (pty processes)</li>
+      <li>Ability to attach and detach from a shell session without killing it</li>
+      <li>Native terminal scrollback</li>
+      <li>Mlitiple clients can connect to the same session</li>
+      <li>Re-attaching to a session restores previous terminal state and output</li>
+      <li>Works on mac and linux</li>
+      <li>This project does NOT provide windows, tabs, or splits</li>
+    </ul>
+
+    <h2 class="text-lg">install</h2>
     <ul>
       <li><a href="/a/zmx-0.0.2-linux-aarch64.tar.gz" download>zmx-0.0.2-linux-aarch64.tar.gz</a></li>
       <li><a href="/a/zmx-0.0.2-linux-x86_64.tar.gz" download>zmx-0.0.2-linux-x86_64.tar.gz</a></li>
       <li><a href="/a/zmx-0.0.2-macos-aarch64.tar.gz" download>zmx-0.0.2-macos-aarch64.tar.gz</a></li>
       <li><a href="/a/zmx-0.0.2-macos-x86_64.tar.gz" download>zmx-0.0.2-macos-x86_64.tar.gz</a></li>
+    </ul>
+
+    <h2 class="text-lg">posts</h2>
+    <ul>
+      <li><a href="https://bower.sh/zmx-session-persistence">zmx - session persistence for terminal processes</a></li>
+      <li><a href="https://bower.sh/you-might-not-need-tmux">You might not need tmux</a></li>
     </ul>
   </body>
 </html>
