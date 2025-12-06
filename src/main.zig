@@ -67,17 +67,44 @@ const Client = struct {
 };
 
 const Cfg = struct {
-    socket_dir: []const u8 = "/tmp/zmx",
-    log_dir: []const u8 = "/tmp/zmx/logs",
+    alloc: std.mem.Allocator = undefined,
+    socket_dir: []const u8 = "",
+    log_dir: []const u8 = "",
     max_scrollback: usize = 10_000_000,
 
+    pub fn init(alloc: std.mem.Allocator) !Cfg {
+        const tmpdir = posix.getenv("TMPDIR") orelse "/tmp";
+        const uid = posix.getuid();
+
+        const socket_dir = try std.fmt.allocPrint(alloc, "{s}/zmx-{d}", .{ tmpdir, uid });
+        errdefer alloc.free(socket_dir);
+
+        const log_dir = try std.fmt.allocPrint(alloc, "{s}/logs", .{socket_dir});
+        errdefer alloc.free(log_dir);
+
+        var cfg = Cfg{
+            .alloc = alloc,
+            .socket_dir = socket_dir,
+            .log_dir = log_dir,
+        };
+
+        try cfg.mkdir();
+
+        return cfg;
+    }
+
+    pub fn deinit(self: *Cfg) void {
+        if (self.socket_dir.len > 0) self.alloc.free(self.socket_dir);
+        if (self.log_dir.len > 0) self.alloc.free(self.log_dir);
+    }
+
     pub fn mkdir(self: *Cfg) !void {
-        std.fs.makeDirAbsolute(self.socket_dir) catch |err| switch (err) {
+        posix.mkdirat(posix.AT.FDCWD, self.socket_dir, 0o750) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
 
-        std.fs.makeDirAbsolute(self.log_dir) catch |err| switch (err) {
+        posix.mkdirat(posix.AT.FDCWD, self.log_dir, 0o750) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
@@ -133,8 +160,8 @@ pub fn main() !void {
     defer args.deinit();
     _ = args.skip(); // skip program name
 
-    var cfg = Cfg{};
-    try cfg.mkdir();
+    var cfg = try Cfg.init(alloc);
+    defer cfg.deinit();
 
     const log_path = try std.fs.path.join(alloc, &.{ cfg.log_dir, "zmx.log" });
     defer alloc.free(log_path);
