@@ -315,6 +315,10 @@ fn kill(cfg: *Cfg, session_name: []const u8) !void {
 }
 
 fn attach(daemon: *Daemon) !void {
+    if (std.posix.getenv("ZMX_SESSION")) |_| {
+        return error.CannotAttachToSessionInSession;
+    }
+
     var dir = try std.fs.openDirAbsolute(daemon.cfg.socket_dir, .{});
     defer dir.close();
 
