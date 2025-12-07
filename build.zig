@@ -138,11 +138,13 @@ pub fn build(b: *std.Build) void {
         tarball_steps.append(b.allocator, &install_tar.step) catch @panic("OOM tracking tarball steps");
     }
 
-    // Emit a Homebrew formula template at zig-out/dist/homebrew_formula.rb with current shasums.
+    // Emit the Homebrew formula directly into Formula/zmx.rb with current shasums.
     const brew_script =
         \\import hashlib, pathlib, sys
         \\version = sys.argv[1]
-        \\base = pathlib.Path("zig-out/dist")
+        \\dest = pathlib.Path(sys.argv[2])
+        \\dist = pathlib.Path("zig-out/dist")
+        \\dest.parent.mkdir(parents=True, exist_ok=True)
         \\
         \\pairs = {
         \\    "macos-aarch64": ("macos", "arm"),
@@ -154,7 +156,7 @@ pub fn build(b: *std.Build) void {
         \\shas = {}
         \\
         \\for name in sorted(urls):
-        \\    path = base / pathlib.Path(urls[name]).name
+        \\    path = dist / pathlib.Path(urls[name]).name
         \\    data = path.read_bytes()
         \\    shas[name] = hashlib.sha256(data).hexdigest()
         \\
@@ -191,17 +193,16 @@ pub fn build(b: *std.Build) void {
         \\  end
         \\
         \\  test do
-        \\    assert_match \"Usage: zmx\", shell_output(\"#{bin}/zmx help\")
+        \\    assert_match \"Usage: zmx\", shell_output(\"#{{bin}}/zmx help\")
         \\  end
         \\end
         \\"""
         \\
-        \\target = base / "homebrew_formula.rb"
-        \\target.write_text(tpl)
-        \\print(f"wrote {target}")
+        \\dest.write_text(tpl)
+        \\print(f"wrote {dest}")
     ;
 
-    const brew_formula_cmd = b.addSystemCommand(&.{ "python3", "-c", brew_script, version });
+    const brew_formula_cmd = b.addSystemCommand(&.{ "python3", "-c", brew_script, version, b.path("Formula/zmx.rb").getPath(b) });
     for (tarball_steps.items) |step_ptr| brew_formula_cmd.step.dependOn(step_ptr);
     release_step.dependOn(&brew_formula_cmd.step);
 
