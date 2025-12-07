@@ -39,69 +39,70 @@ pub fn build(b: *std.Build) void {
 
     // Exe
     const exe = b.addExecutable(.{
-        const brew_script = b.fmt(
-            \\import hashlib, pathlib, sys
-            \\version = "{s}"
-            \\base = pathlib.Path("zig-out/dist")
-            \\
-            \\pairs = {
-            \\    "macos-aarch64": ("macos", "arm"),
-            \\    "macos-x86_64": ("macos", "intel"),
-            \\    "linux-aarch64": ("linux", "arm"),
-            \\    "linux-x86_64": ("linux", "intel"),
-            \\}
-            \\urls = {k: f"https://zmx.sh/a/zmx-{version}-{k}.tar.gz" for k in pairs}
-            \\shas = {}
-            \\
-            \\for name in sorted(urls):
-            \\    path = base / pathlib.Path(urls[name]).name
-            \\    data = path.read_bytes()
-            \\    shas[name] = hashlib.sha256(data).hexdigest()
-            \\
-            \\tpl = f"""class Zmx < Formula
-            \\  desc \"Session persistence for terminal processes\"
-            \\  homepage \"https://github.com/neurosnap/zmx\"
-            \\  version \"{version}\"
-            \\  license \"MIT\"
-            \\
-            \\  on_macos do
-            \\    on_arm do
-            \\      url \"{urls['macos-aarch64']}\"
-            \\      sha256 \"{shas['macos-aarch64']}\"
-            \\    end
-            \\    on_intel do
-            \\      url \"{urls['macos-x86_64']}\"
-            \\      sha256 \"{shas['macos-x86_64']}\"
-            \\    end
-            \\  end
-            \\
-            \\  on_linux do
-            \\    on_arm do
-            \\      url \"{urls['linux-aarch64']}\"
-            \\      sha256 \"{shas['linux-aarch64']}\"
-            \\    end
-            \\    on_intel do
-            \\      url \"{urls['linux-x86_64']}\"
-            \\      sha256 \"{shas['linux-x86_64']}\"
-            \\    end
-            \\  end
-            \\
-            \\  def install
-            \\    bin.install \"zmx\"
-            \\  end
-            \\
-            \\  test do
-            \\    assert_match \"Usage: zmx\", shell_output(\"#{bin}/zmx help\")
-            \\  end
-            \\end
-            \\"""
-            \\
-            \\target = base / "homebrew_formula.rb"
-            \\target.write_text(tpl)
-            \\print(f"wrote {target}")
-            ,
-            .{version},
-        );
+        .name = "zmx",
+        .root_module = exe_mod,
+    });
+    exe.linkLibC();
+
+    b.installArtifact(exe);
+
+    // Run
+    const run_cmd = b.addRunArtifact(exe);
+    run_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_cmd.addArgs(args);
+    run_step.dependOn(&run_cmd.step);
+
+    // Test
+    const exe_unit_tests = b.addTest(.{
+        .root_module = exe_mod,
+    });
+    const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
+    test_step.dependOn(&run_exe_unit_tests.step);
+
+    const integration_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const integration_tests = b.addTest(.{
+        .root_module = integration_test_mod,
+    });
+    const run_integration_tests = b.addRunArtifact(integration_tests);
+    test_step.dependOn(&run_integration_tests.step);
+
+    // This is where the interesting part begins.
+    // As you can see we are re-defining the same executable but
+    // we're binding it to a dedicated build step.
+    const exe_check = b.addExecutable(.{
+        .name = "zmx",
+        .root_module = exe_mod,
+    });
+    exe_check.linkLibC();
+    // There is no `b.installArtifact(exe_check);` here.
+
+    // Finally we add the "check" step which will be detected
+    // by ZLS and automatically enable Build-On-Save.
+    // If you copy this into your `build.zig`, make sure to rename 'foo'
+    const check = b.step("check", "Check if foo compiles");
+    check.dependOn(&exe_check.step);
+
+    // Release step - macOS can cross-compile to Linux, but Linux cannot cross-compile to macOS (needs SDK)
+    const native_os = @import("builtin").os.tag;
+    const release_targets = if (native_os == .macos) linux_targets ++ macos_targets else linux_targets;
+    const release_step = b.step("release", "Build release binaries (macOS builds all, Linux builds Linux only)");
+
+    // Track built tarballs so we can emit a Homebrew formula with fresh shasums.
+    var tarball_steps = std.ArrayListUnmanaged(*std.Build.Step){};
+
+    for (release_targets) |release_target| {
+        const resolved = b.resolveTargetQuery(release_target);
+        const release_mod = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = resolved,
+            .optimize = .ReleaseSafe,
+        });
+
+        if (b.lazyDependency("ghostty", .{
             .target = resolved,
             .optimize = .ReleaseSafe,
         })) |dep| {
@@ -134,10 +135,10 @@ pub fn build(b: *std.Build) void {
         release_step.dependOn(&install_tar.step);
         release_step.dependOn(&install_sha.step);
 
-        tarball_steps.append(&install_tar.step) catch @panic("OOM tracking tarball steps");
+        tarball_steps.append(b.allocator, &install_tar.step) catch @panic("OOM tracking tarball steps");
     }
 
-    // Generate a Homebrew formula template under zig-out/dist/homebrew_formula.rb with current shasums.
+    // Emit a Homebrew formula template at zig-out/dist/homebrew_formula.rb with current shasums.
     const brew_script =
         \\import hashlib, pathlib, sys
         \\version = sys.argv[1]
@@ -198,7 +199,7 @@ pub fn build(b: *std.Build) void {
         \\target = base / "homebrew_formula.rb"
         \\target.write_text(tpl)
         \\print(f"wrote {target}")
-        ;
+    ;
 
     const brew_formula_cmd = b.addSystemCommand(&.{ "python3", "-c", brew_script, version });
     for (tarball_steps.items) |step_ptr| brew_formula_cmd.step.dependOn(step_ptr);
