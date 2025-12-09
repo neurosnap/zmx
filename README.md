@@ -232,14 +232,12 @@ dtach is a program written in C that emulates the detach feature of screen, whic
 
 | Feature                        | zmx | shpool | abduco | dtach | tmux |
 | ------------------------------ | --- | ------ | ------ | ----- | ---- |
-| Daemon per session             | ✓   | ✗      | ✓      | ✓     | ✗    |
-| Multiple clients per session   | ✓   | ✗      | ✓      | ✓     | ✓    |
+| 1:1 Terminal emulator features | ✓   | ✓      | ✓      | ✓     | ✗    |
 | Terminal state restore         | ✓   | ✓      | ✗      | ✗     | ✓    |
+| Window management              | ✗   | ✗      | ✗      | ✗     | ✓    |
+| Multiple clients per session   | ✓   | ✗      | ✓      | ✓     | ✓    |
 | Native scrollback              | ✓   | ✓      | ✓      | ✓     | ✗    |
 | Configurable detach key        | ✗   | ✓      | ✓      | ✓     | ✓    |
 | Auto-daemonize                 | ✓   | ✓      | ✓      | ✓     | ✓    |
+| Daemon per session             | ✓   | ✗      | ✓      | ✓     | ✗    |
 | Session listing                | ✓   | ✓      | ✓      | ✗     | ✓    |
-| Window management              | ✗   | ✗      | ✗      | ✗     | ✓    |
-| Native find, replace           | ✓   | ✓      | ✓      | ✓     | ✗    |
-| Custom find, replace           | ✗   | ✗      | ✗      | ✗     | ✓    |
-| 1:1 Terminal emulator features | ✓   | ✓      | ✓      | ✓     | ✗    |
