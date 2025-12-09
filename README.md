@@ -38,7 +38,8 @@ zig build -Doptimize=ReleaseSafe --prefix ~/.local
 
 ## usage
 
-> [!IMPORTANT] Press `ctrl+\` to detach from the session.
+> [!IMPORTANT]
+> Press `ctrl+\` to detach from the session.
 
 ```
 Usage: zmx <command> [args]
@@ -147,7 +148,7 @@ Wow! Now you can setup all your os tiling windows how you like them for your pro
 
 ## socket file location
 
-Each session gets its own unix socket file. Right now, the default location is `/tmp/zmx-{uid}`.  You can configure this using environment variables:
+Each session gets its own unix socket file. Right now, the default location is `/tmp/zmx-{uid}`. You can configure this using environment variables:
 
 - `TMPDIR` => overrides `/tmp`
 - `ZMX_DIR` => overrides `/tmp/zmx-{uid}`
@@ -229,12 +230,16 @@ dtach is a program written in C that emulates the detach feature of screen, whic
 
 ## comparison
 
-| Feature                      | zmx | shpool | abduco | dtach |
-| ---------------------------- | --- | ------ | ------ | ----- |
-| Daemon per session           | ✓   | ✗      | ✓      | ✓     |
-| Multiple clients per session | ✓   | ✗      | ✓      | ✓     |
-| Terminal state restore       | ✓   | ✓      | ✗      | ✗     |
-| Native scrollback            | ✓   | ✓      | ✓      | ✓     |
-| Configurable detach key      | ✗   | ✓      | ✓      | ✓     |
-| Auto-daemonize               | ✓   | ✓      | ✓      | ✓     |
-| Session listing              | ✓   | ✓      | ✓      | ✗     |
+| Feature                        | zmx | shpool | abduco | dtach | tmux |
+| ------------------------------ | --- | ------ | ------ | ----- | ---- |
+| Daemon per session             | ✓   | ✗      | ✓      | ✓     | ✗    |
+| Multiple clients per session   | ✓   | ✗      | ✓      | ✓     | ✓    |
+| Terminal state restore         | ✓   | ✓      | ✗      | ✗     | ✓    |
+| Native scrollback              | ✓   | ✓      | ✓      | ✓     | ✗    |
+| Configurable detach key        | ✗   | ✓      | ✓      | ✓     | ✓    |
+| Auto-daemonize                 | ✓   | ✓      | ✓      | ✓     | ✓    |
+| Session listing                | ✓   | ✓      | ✓      | ✗     | ✓    |
+| Window management              | ✗   | ✗      | ✗      | ✗     | ✓    |
+| Native find, replace           | ✓   | ✓      | ✓      | ✓     | ✗    |
+| Custom find, replace           | ✗   | ✗      | ✗      | ✗     | ✓    |
+| 1:1 Terminal emulator features | ✓   | ✓      | ✓      | ✓     | ✗    |
