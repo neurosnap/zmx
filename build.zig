@@ -121,7 +121,7 @@ pub fn build(b: *std.Build) void {
         const arch_name = @tagName(release_target.cpu_arch orelse .x86_64);
         const tarball_name = b.fmt("zmx-{s}-{s}-{s}.tar.gz", .{ version, os_name, arch_name });
 
-        const tar = b.addSystemCommand(&.{ "tar", "--no-xattrs", "--no-mac-metadata", "-czf" });
+        const tar = b.addSystemCommand(&.{ "tar", "--no-xattrs", "-czf" });
 
         const tarball = tar.addOutputFileArg(tarball_name);
         tar.addArg("-C");
