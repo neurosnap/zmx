@@ -38,8 +38,7 @@ zig build -Doptimize=ReleaseSafe --prefix ~/.local
 
 ## usage
 
-> [!IMPORTANT]
-> Press `ctrl+\` to detach from the session.
+> [!IMPORTANT] Press `ctrl+\` to detach from the session.
 
 ```
 Usage: zmx <command> [args]
@@ -92,13 +91,13 @@ todo.
 
 ## philosophy
 
-The entire argument for `zmx` instead of something like `tmux` that has windows, panes, splits, etc. is that job should be handled by your os window manager.  By using something like `tmux` you now have redundent functionality in your dev stack: a window manager for your os and a window manager for your terminal.  Further, in order to use modern terminal features, your terminal emulator **and** `tmux` need to have support for them.  This holds back the terminal enthusiast community and feature development.
+The entire argument for `zmx` instead of something like `tmux` that has windows, panes, splits, etc. is that job should be handled by your os window manager. By using something like `tmux` you now have redundent functionality in your dev stack: a window manager for your os and a window manager for your terminal. Further, in order to use modern terminal features, your terminal emulator **and** `tmux` need to have support for them. This holds back the terminal enthusiast community and feature development.
 
 Instead, this tool specifically focuses on session persistence and defers window management to your os wm.
 
 ## ssh workflow
 
-Using `zmx` with `ssh` is a first-class citizen.  Instead of `ssh`ing into your remote system with a single terminal and `n` tmux panes, you open `n` terminals and run `ssh` for all of them.  This might sound tedious, but there are tools to make this a delightful workflow.
+Using `zmx` with `ssh` is a first-class citizen. Instead of `ssh`ing into your remote system with a single terminal and `n` tmux panes, you open `n` terminals and run `ssh` for all of them. This might sound tedious, but there are tools to make this a delightful workflow.
 
 First, create an `ssh` config entry for your remote dev server:
 
@@ -124,7 +123,7 @@ ssh d.dotfiles
 
 This will create or attach to each session and since we are using `ControlMaster` the same `ssh` connection is reused for every call to `ssh` for near-instant connection times.
 
-Now you can use the [`autossh`](https://linux.die.net/man/1/autossh) tool to make your ssh connections auto-reconnect.  For example, if you have a laptop and close/open your laptop lid it will automatically reconnect all your ssh connections:
+Now you can use the [`autossh`](https://linux.die.net/man/1/autossh) tool to make your ssh connections auto-reconnect. For example, if you have a laptop and close/open your laptop lid it will automatically reconnect all your ssh connections:
 
 ```bash
 autossh -M 0 -q d.term
@@ -143,7 +142,7 @@ ash d.pico
 ash d.dotifles
 ```
 
-Wow!  Now you can setup all your os tiling windows how you like them for your project and have as many windows as you'd like, almost replicating exactly what `tmux` does but with native windows, tabs, splits, and scrollback!  It also has the added benefit of supporting all the terminal features your emulator supports, no longer restricted by what `tmux` supports.
+Wow! Now you can setup all your os tiling windows how you like them for your project and have as many windows as you'd like, almost replicating exactly what `tmux` does but with native windows, tabs, splits, and scrollback! It also has the added benefit of supporting all the terminal features your emulator supports, no longer restricted by what `tmux` supports.
 
 ## socket file location
 
@@ -155,7 +154,7 @@ We store global logs for cli commands in `/tmp/zmx/logs/zmx.log`. We store sessi
 
 ## a note on configuration
 
-At this point, nothing is configurable.  We are evaluating what should be configurable and what should not.  Every configuration option is a burden for us maintainers.  For example, being able to change the default detach shortcut is difficult in a terminal environment.
+At this point, nothing is configurable. We are evaluating what should be configurable and what should not. Every configuration option is a burden for us maintainers. For example, being able to change the default detach shortcut is difficult in a terminal environment.
 
 ## a smol contract
 
@@ -194,7 +193,7 @@ How it works:
 - user re-attaches to session
 - `ghostty-vt` sends terminal snapshot to client stdout
 
-In this way, `ghostty-vt` doesn't sit in the middle of an active terminal session, it simply receives all the same data the client receives so it can re-hydrate clients that connect to the session.  This enables users to pick up where they left off as if they didn't disconnect from the terminal session at all.  It also has the added benefit of being very fast, the only thing sitting in-between you and your PTY is a unix socket.
+In this way, `ghostty-vt` doesn't sit in the middle of an active terminal session, it simply receives all the same data the client receives so it can re-hydrate clients that connect to the session. This enables users to pick up where they left off as if they didn't disconnect from the terminal session at all. It also has the added benefit of being very fast, the only thing sitting in-between you and your PTY is a unix socket.
 
 ## prior art
 
@@ -215,3 +214,23 @@ The biggest advantage of this approach is that `shpool` does not break native sc
 You can find the source code at this repo: https://github.com/martanne/abduco
 
 abduco provides session management i.e. it allows programs to be run independently from its controlling terminal. That is programs can be detached - run in the background - and then later reattached. Together with dvtm it provides a simpler and cleaner alternative to tmux or screen.
+
+### dtach
+
+You can find the source code at this repo: https://github.com/crigler/dtach
+
+A simple program that emulates the detach feature of screen.
+
+dtach is a program written in C that emulates the detach feature of screen, which allows a program to be executed in an environment that is protected from the controlling terminal. For instance, the program under the control of dtach would not be affected by the terminal being disconnected for some reason.
+
+## comparison
+
+| Feature                      | zmx | shpool | abduco | dtach |
+| ---------------------------- | --- | ------ | ------ | ----- |
+| Daemon per session           | ✓   | ✗      | ✓      | ✓     |
+| Multiple clients per session | ✓   | ✗      | ✓      | ✓     |
+| Terminal state restore       | ✓   | ✓      | ✗      | ✗     |
+| Native scrollback            | ✓   | ✓      | ✓      | ✓     |
+| Configurable detach key      | ✗   | ✓      | ✓      | ✓     |
+| Auto-daemonize               | ✓   | ✓      | ✓      | ✓     |
+| Session listing              | ✓   | ✓      | ✓      | ✗     |
