@@ -169,13 +169,6 @@ We are evaluating what should be configurable and what should not. Every configu
 - Write programs that compose with other smol tools.
 - Write programs that can be finished.
 
-## todo
-
-- `bug`: unix socket files not always getting removed properly
-- `bug`: remove log files when closing session
-- `bug`: send resize event when a client first sends stdin
-- `feat`: binary distribution (e.g. `aur`, `ppa`, `apk`, `brew`)
-
 ## impl
 
 - The `daemon` and client processes communicate via a unix socket
