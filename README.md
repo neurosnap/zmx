@@ -96,7 +96,12 @@ todo.
 
 ### zsh
 
-todo.
+Place this in `.zshrc`, update current `$PROMPT/$PS1` to `BASE_PROMPT`
+
+```zsh
+BASE_PROMPT=$PS1/$PROMPT
+PROMPT="${ZMX_SESSION:+[$ZMX_SESSION]} $BASE_PROMPT"
+```
 
 ## philosophy
 
