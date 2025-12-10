@@ -1,5 +1,7 @@
 # Changelog
 
+Use spec: https://common-changelog.org/
+
 ## v0.1.0 - 2025-12-09
 
 ### Changed
