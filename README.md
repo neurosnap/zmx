@@ -25,6 +25,13 @@ Reason for this tool: [You might not need `tmux`](https://bower.sh/you-might-not
 - https://zmx.sh/a/zmx-0.1.0-macos-aarch64.tar.gz
 - https://zmx.sh/a/zmx-0.1.0-macos-x86_64.tar.gz
 
+### homebrew
+
+```bash
+brew tap neurosnap/tap
+brew install zmx
+```
+
 ### src
 
 - Requires zig `v0.15`
