@@ -1020,7 +1020,7 @@ fn setupSigwinchHandler() void {
 
 fn getTerminalSize(fd: i32) ipc.Resize {
     var ws: c.struct_winsize = undefined;
-    if (c.ioctl(fd, c.TIOCGWINSZ, &ws) == 0) {
+    if (c.ioctl(fd, c.TIOCGWINSZ, &ws) == 0 and ws.ws_row > 0 and ws.ws_col > 0) {
         return .{ .rows = ws.ws_row, .cols = ws.ws_col };
     }
     return .{ .rows = 24, .cols = 80 };
