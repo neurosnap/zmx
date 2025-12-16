@@ -752,6 +752,12 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                                 };
                                 _ = c.ioctl(pty_fd, c.TIOCSWINSZ, &ws);
                                 try term.resize(daemon.alloc, resize.cols, resize.rows);
+
+                                // Force SIGWINCH to PTY foreground process group on re-attach
+                                var pgrp: posix.pid_t = 0;
+                                if (c.ioctl(pty_fd, c.TIOCGPGRP, &pgrp) == 0 and pgrp > 0) {
+                                    posix.kill(-pgrp, posix.SIG.WINCH) catch {};
+                                }
                                 std.log.debug("init resize rows={d} cols={d}", .{ resize.rows, resize.cols });
 
                                 // Only send terminal state if there's been PTY output (skip on first attach)
