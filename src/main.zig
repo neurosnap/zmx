@@ -254,6 +254,18 @@ fn help() !void {
     try w.interface.flush();
 }
 
+const SessionEntry = struct {
+    name: []const u8,
+    pid: ?i32,
+    clients_len: ?usize,
+    is_error: bool,
+    error_name: ?[]const u8,
+
+    fn lessThan(_: void, a: SessionEntry, b: SessionEntry) bool {
+        return std.mem.order(u8, a.name, b.name) == .lt;
+    }
+};
+
 fn list(cfg: *Cfg) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -262,31 +274,63 @@ fn list(cfg: *Cfg) !void {
     var dir = try std.fs.openDirAbsolute(cfg.socket_dir, .{ .iterate = true });
     defer dir.close();
     var iter = dir.iterate();
-    var hasSessions = false;
     var buf: [4096]u8 = undefined;
     var w = std.fs.File.stdout().writer(&buf);
+
+    var sessions = try std.ArrayList(SessionEntry).initCapacity(alloc, 16);
+    defer {
+        for (sessions.items) |session| {
+            alloc.free(session.name);
+        }
+        sessions.deinit(alloc);
+    }
+
     while (try iter.next()) |entry| {
         const exists = sessionExists(dir, entry.name) catch continue;
         if (exists) {
-            hasSessions = true;
+            const name = try alloc.dupe(u8, entry.name);
+            errdefer alloc.free(name);
+
             const socket_path = try getSocketPath(alloc, cfg.socket_dir, entry.name);
             defer alloc.free(socket_path);
 
             const result = probeSession(alloc, socket_path) catch |err| {
-                w.interface.print("session_name={s}\tstatus={s}\t(cleaning up)\n", .{ entry.name, @errorName(err) }) catch {};
-                w.interface.flush() catch {};
+                try sessions.append(alloc, .{
+                    .name = name,
+                    .pid = null,
+                    .clients_len = null,
+                    .is_error = true,
+                    .error_name = @errorName(err),
+                });
                 cleanupStaleSocket(dir, entry.name);
                 continue;
             };
-            defer posix.close(result.fd);
+            posix.close(result.fd);
 
-            try w.interface.print("session_name={s}\tpid={d}\tclients={d}\n", .{ entry.name, result.info.pid, result.info.clients_len });
-            try w.interface.flush();
+            try sessions.append(alloc, .{
+                .name = name,
+                .pid = result.info.pid,
+                .clients_len = result.info.clients_len,
+                .is_error = false,
+                .error_name = null,
+            });
         }
     }
 
-    if (!hasSessions) {
+    if (sessions.items.len == 0) {
         try w.interface.print("no sessions found in {s}\n", .{cfg.socket_dir});
+        try w.interface.flush();
+        return;
+    }
+
+    std.mem.sort(SessionEntry, sessions.items, {}, SessionEntry.lessThan);
+
+    for (sessions.items) |session| {
+        if (session.is_error) {
+            try w.interface.print("session_name={s}\tstatus={s}\t(cleaning up)\n", .{ session.name, session.error_name.? });
+        } else {
+            try w.interface.print("session_name={s}\tpid={d}\tclients={d}\n", .{ session.name, session.pid.?, session.clients_len.? });
+        }
         try w.interface.flush();
     }
 }
