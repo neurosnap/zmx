@@ -2,6 +2,17 @@
 
 Use spec: https://common-changelog.org/
 
+## v0.1.1 - 2025-12-16
+
+### Changed
+
+- `zmx list`: sort by session name
+
+### Fixed
+
+- Send SIGWINCH to PTY on re-attach
+- Use default terminal size if cols and rows are 0
+
 ## v0.1.0 - 2025-12-09
 
 ### Changed
