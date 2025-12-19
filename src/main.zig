@@ -532,6 +532,9 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
 
     const stdin_fd = posix.STDIN_FILENO;
 
+    // Prefix key state for ctrl+b + <key> bindings
+    var prefix_active = false;
+
     // Make stdin non-blocking
     const flags = try posix.fcntl(stdin_fd, posix.F.GETFL, 0);
     _ = try posix.fcntl(stdin_fd, posix.F.SETFL, flags | posix.SOCK.NONBLOCK);
@@ -583,14 +586,28 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
 
             if (n_opt) |n| {
                 if (n > 0) {
-                    // Check for Kitty keyboard protocol escape sequence for Ctrl+\
-                    // Format: CSI 92 ; <modifiers> u  where modifiers has Ctrl bit (bit 2) set
-                    // Examples: \e[92;5u (basic), \e[92;133u (with event flags)
+                    // Check for Kitty keyboard protocol escape sequences
                     if (isKittyCtrlBackslash(buf[0..n])) {
                         ipc.send(client_sock_fd, .Detach, "") catch |err| switch (err) {
                             error.BrokenPipe, error.ConnectionResetByPeer => return,
                             else => return err,
                         };
+                        prefix_active = false;
+                        continue;
+                    }
+
+                    if (isKittyCtrlB(buf[0..n])) {
+                        prefix_active = true;
+                        continue;
+                    }
+
+                    // Handle prefix mode for Kitty 'd' key
+                    if (prefix_active and isKittyKey(buf[0..n], 'd')) {
+                        ipc.send(client_sock_fd, .Detach, "") catch |err| switch (err) {
+                            error.BrokenPipe, error.ConnectionResetByPeer => return,
+                            else => return err,
+                        };
+                        prefix_active = false;
                         continue;
                     }
 
@@ -601,6 +618,36 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
                                 error.BrokenPipe, error.ConnectionResetByPeer => return,
                                 else => return err,
                             };
+                            prefix_active = false;
+                        } else if (buf[i] == 0x02) { // Ctrl+B
+                            if (prefix_active) {
+                                // Double ctrl+b sends literal ctrl+b
+                                ipc.send(client_sock_fd, .Input, &[_]u8{0x02}) catch |err| switch (err) {
+                                    error.BrokenPipe, error.ConnectionResetByPeer => return,
+                                    else => return err,
+                                };
+                                prefix_active = false;
+                            } else {
+                                prefix_active = true;
+                            }
+                        } else if (prefix_active) {
+                            if (buf[i] == 'd') {
+                                ipc.send(client_sock_fd, .Detach, "") catch |err| switch (err) {
+                                    error.BrokenPipe, error.ConnectionResetByPeer => return,
+                                    else => return err,
+                                };
+                            } else {
+                                // Unknown prefix command, forward both ctrl+b and this key
+                                ipc.send(client_sock_fd, .Input, &[_]u8{0x02}) catch |err| switch (err) {
+                                    error.BrokenPipe, error.ConnectionResetByPeer => return,
+                                    else => return err,
+                                };
+                                ipc.send(client_sock_fd, .Input, buf[i .. i + 1]) catch |err| switch (err) {
+                                    error.BrokenPipe, error.ConnectionResetByPeer => return,
+                                    else => return err,
+                                };
+                            }
+                            prefix_active = false;
                         } else {
                             const payload = buf[i .. i + 1];
                             ipc.send(client_sock_fd, .Input, payload) catch |err| switch (err) {
@@ -1089,4 +1136,31 @@ test "isKittyCtrlBackslash" {
     try std.testing.expect(!isKittyCtrlBackslash("\x1b[92;1u"));
     try std.testing.expect(!isKittyCtrlBackslash("\x1b[93;5u"));
     try std.testing.expect(!isKittyCtrlBackslash("garbage"));
+}
+
+fn isKittyCtrlB(buf: []const u8) bool {
+    return std.mem.indexOf(u8, buf, "\x1b[98;5u") != null or
+        std.mem.indexOf(u8, buf, "\x1b[98;133u") != null;
+}
+
+test "isKittyCtrlB" {
+    try std.testing.expect(isKittyCtrlB("\x1b[98;5u"));
+    try std.testing.expect(isKittyCtrlB("\x1b[98;133u"));
+    try std.testing.expect(!isKittyCtrlB("\x1b[98;1u"));
+    try std.testing.expect(!isKittyCtrlB("\x1b[99;5u"));
+    try std.testing.expect(!isKittyCtrlB("garbage"));
+}
+
+fn isKittyKey(buf: []const u8, key: u8) bool {
+    var expected: [16]u8 = undefined;
+    const seq = std.fmt.bufPrint(&expected, "\x1b[{d}u", .{key}) catch return false;
+
+    return std.mem.indexOf(u8, buf, seq) != null;
+}
+
+test "isKittyKey" {
+    try std.testing.expect(isKittyKey("\x1b[100u", 'd'));
+    try std.testing.expect(!isKittyKey("\x1b[100;5u", 'd'));
+    try std.testing.expect(!isKittyKey("\x1b[101u", 'd'));
+    try std.testing.expect(!isKittyKey("d", 'd'));
 }
