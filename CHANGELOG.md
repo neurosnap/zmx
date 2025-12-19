@@ -8,6 +8,15 @@ Use spec: https://common-changelog.org/
 
 - Use `XDG_RUNTIME_DIR` environment variable for socket directory (takes precedence over `TMPDIR` and `/tmp`)
 
+### Changed
+
+- Use `ctrl+b + d` to detach from session instead of `ctrl+\`
+- Updated `ghostty-vt` to latest HEAD
+
+### Fixed
+
+- Restore mouse terminal modes on detach
+
 ## v0.1.1 - 2025-12-16
 
 ### Changed

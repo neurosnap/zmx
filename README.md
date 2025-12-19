@@ -46,14 +46,14 @@ zig build -Doptimize=ReleaseSafe --prefix ~/.local
 ## usage
 
 > [!IMPORTANT]
-> Press `ctrl+\` to detach from the session.
+> Press `ctrl+b + d` to detach from the session. (deprecated: `ctrl+\`)
 
 ```
 Usage: zmx <command> [args]
 
 Commands:
   [a]ttach <name> [command...]  Create or attach to a session
-  [d]etach                      Detach all clients from current session  (ctrl+\ for current client)
+  [d]etach                      Detach all clients from current session  (ctrl+b + d for current client)
   [l]ist                        List active sessions
   [k]ill <name>                 Kill a session and all attached clients
   [v]ersion                     Show version information
@@ -163,9 +163,9 @@ Wow! Now you can setup all your os tiling windows how you like them for your pro
 Each session gets its own unix socket file. The default location depends on your environment variables (checked in priority order):
 
 1. `ZMX_DIR` => uses exact path (e.g., `/custom/path`)
-2. `XDG_RUNTIME_DIR` => uses `{XDG_RUNTIME_DIR}/zmx` (recommended on Linux, typically results in `/run/user/{uid}/zmx`)
-3. `TMPDIR` => uses `{TMPDIR}/zmx-{uid}` (appends uid for multi-user safety)
-4. `/tmp` => uses `/tmp/zmx-{uid}` (default fallback, appends uid for multi-user safety)
+1. `XDG_RUNTIME_DIR` => uses `{XDG_RUNTIME_DIR}/zmx` (recommended on Linux, typically results in `/run/user/{uid}/zmx`)
+1. `TMPDIR` => uses `{TMPDIR}/zmx-{uid}` (appends uid for multi-user safety)
+1. `/tmp` => uses `/tmp/zmx-{uid}` (default fallback, appends uid for multi-user safety)
 
 ## debugging
 
