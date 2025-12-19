@@ -672,74 +672,67 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
 
             if (n_opt) |n| {
                 if (n > 0) {
-                    // Check for Kitty keyboard protocol escape sequences
-                    if (isKittyCtrlBackslash(buf[0..n])) {
-                        ipc.send(client_sock_fd, .Detach, "") catch |err| switch (err) {
-                            error.BrokenPipe, error.ConnectionResetByPeer => return,
-                            else => return err,
-                        };
-                        prefix_active = false;
-                        continue;
-                    }
-
-                    if (isKittyCtrlB(buf[0..n])) {
-                        prefix_active = true;
-                        continue;
-                    }
-
-                    // Handle prefix mode for Kitty 'd' key
-                    if (prefix_active and isKittyKey(buf[0..n], 'd')) {
-                        ipc.send(client_sock_fd, .Detach, "") catch |err| switch (err) {
-                            error.BrokenPipe, error.ConnectionResetByPeer => return,
-                            else => return err,
-                        };
-                        prefix_active = false;
-                        continue;
-                    }
-
-                    var i: usize = 0;
-                    while (i < n) : (i += 1) {
-                        if (buf[i] == 0x1C) { // Ctrl+\ (File Separator)
+                    // Check for Kitty keyboard protocol sequences first
+                    switch (parseStdinInput(buf[0..n], &prefix_active)) {
+                        .detach => {
                             ipc.send(client_sock_fd, .Detach, "") catch |err| switch (err) {
                                 error.BrokenPipe, error.ConnectionResetByPeer => return,
                                 else => return err,
                             };
-                            prefix_active = false;
-                        } else if (buf[i] == 0x02) { // Ctrl+B
-                            if (prefix_active) {
-                                // Double ctrl+b sends literal ctrl+b
-                                ipc.send(client_sock_fd, .Input, &[_]u8{0x02}) catch |err| switch (err) {
-                                    error.BrokenPipe, error.ConnectionResetByPeer => return,
-                                    else => return err,
-                                };
-                                prefix_active = false;
-                            } else {
-                                prefix_active = true;
-                            }
-                        } else if (prefix_active) {
-                            if (buf[i] == 'd') {
+                            continue;
+                        },
+                        .send => |data| {
+                            ipc.send(client_sock_fd, .Input, data) catch |err| switch (err) {
+                                error.BrokenPipe, error.ConnectionResetByPeer => return,
+                                else => return err,
+                            };
+                            continue;
+                        },
+                        .activate_prefix => continue,
+                        .none => {},
+                    }
+
+                    // Process byte-by-byte for non-Kitty input
+                    var i: usize = 0;
+                    while (i < n) : (i += 1) {
+                        const action = parseStdinByte(buf[i], prefix_active);
+                        switch (action) {
+                            .detach => {
                                 ipc.send(client_sock_fd, .Detach, "") catch |err| switch (err) {
                                     error.BrokenPipe, error.ConnectionResetByPeer => return,
                                     else => return err,
                                 };
-                            } else {
-                                // Unknown prefix command, forward both ctrl+b and this key
-                                ipc.send(client_sock_fd, .Input, &[_]u8{0x02}) catch |err| switch (err) {
+                                prefix_active = false;
+                            },
+                            .send => |data| {
+                                ipc.send(client_sock_fd, .Input, data) catch |err| switch (err) {
                                     error.BrokenPipe, error.ConnectionResetByPeer => return,
                                     else => return err,
                                 };
-                                ipc.send(client_sock_fd, .Input, buf[i .. i + 1]) catch |err| switch (err) {
-                                    error.BrokenPipe, error.ConnectionResetByPeer => return,
-                                    else => return err,
-                                };
-                            }
-                            prefix_active = false;
-                        } else {
-                            const payload = buf[i .. i + 1];
-                            ipc.send(client_sock_fd, .Input, payload) catch |err| switch (err) {
-                                error.BrokenPipe, error.ConnectionResetByPeer => return,
-                                else => return err,
-                            };
+                                prefix_active = false;
+                            },
+                            .activate_prefix => {
+                                prefix_active = true;
+                            },
+                            .none => {
+                                if (prefix_active) {
+                                    // Unknown prefix command, forward both ctrl+b and this key
+                                    ipc.send(client_sock_fd, .Input, &[_]u8{0x02}) catch |err| switch (err) {
+                                        error.BrokenPipe, error.ConnectionResetByPeer => return,
+                                        else => return err,
+                                    };
+                                    ipc.send(client_sock_fd, .Input, buf[i .. i + 1]) catch |err| switch (err) {
+                                        error.BrokenPipe, error.ConnectionResetByPeer => return,
+                                        else => return err,
+                                    };
+                                    prefix_active = false;
+                                } else {
+                                    ipc.send(client_sock_fd, .Input, buf[i .. i + 1]) catch |err| switch (err) {
+                                        error.BrokenPipe, error.ConnectionResetByPeer => return,
+                                        else => return err,
+                                    };
+                                }
+                            },
                         }
                     }
                 } else {
@@ -1069,6 +1062,53 @@ fn probeSession(alloc: std.mem.Allocator, socket_path: []const u8) SessionProbeE
         }
     }
     return error.Unexpected;
+}
+
+const InputAction = union(enum) {
+    send: []const u8,
+    detach,
+    activate_prefix,
+    none,
+};
+
+fn parseStdinByte(byte: u8, prefix_active: bool) InputAction {
+    if (byte == 0x1C) { // Ctrl+\ (File Separator)
+        return .detach;
+    } else if (byte == 0x02) { // Ctrl+B
+        if (prefix_active) {
+            return .{ .send = &[_]u8{0x02} };
+        } else {
+            return .activate_prefix;
+        }
+    } else if (prefix_active) {
+        if (byte == 'd') {
+            return .detach;
+        } else {
+            return .none; // Unknown prefix command - caller handles forwarding
+        }
+    }
+    return .none; // Regular byte - caller handles forwarding
+}
+
+fn parseStdinInput(buf: []const u8, prefix_active: *bool) InputAction {
+    // Check for Kitty keyboard protocol escape sequences first
+    if (isKittyCtrlBackslash(buf)) {
+        prefix_active.* = false;
+        return .detach;
+    }
+
+    if (isKittyCtrlB(buf)) {
+        prefix_active.* = true;
+        return .activate_prefix;
+    }
+
+    // Handle prefix mode for Kitty 'd' key
+    if (prefix_active.* and isKittyKey(buf, 'd')) {
+        prefix_active.* = false;
+        return .detach;
+    }
+
+    return .none; // Not a special sequence
 }
 
 fn cleanupStaleSocket(dir: std.fs.Dir, session_name: []const u8) void {
