@@ -79,12 +79,12 @@ const Cfg = struct {
         const tmpdir = posix.getenv("TMPDIR") orelse "/tmp";
         const uid = posix.getuid();
 
-        var socket_dir: []const u8 = "";
-        if (posix.getenv("ZMX_DIR")) |zmxdir| {
-            socket_dir = try alloc.dupe(u8, zmxdir);
-        } else {
-            socket_dir = try std.fmt.allocPrint(alloc, "{s}/zmx-{d}", .{ tmpdir, uid });
-        }
+        const socket_dir: []const u8 = if (posix.getenv("ZMX_DIR")) |zmxdir|
+            try alloc.dupe(u8, zmxdir)
+        else if (posix.getenv("XDG_RUNTIME_DIR")) |xdg_runtime|
+            try std.fmt.allocPrint(alloc, "{s}/zmx", .{xdg_runtime})
+        else
+            try std.fmt.allocPrint(alloc, "{s}/zmx-{d}", .{ tmpdir, uid });
         errdefer alloc.free(socket_dir);
 
         const log_dir = try std.fmt.allocPrint(alloc, "{s}/logs", .{socket_dir});
