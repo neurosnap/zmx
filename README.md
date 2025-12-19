@@ -160,10 +160,12 @@ Wow! Now you can setup all your os tiling windows how you like them for your pro
 
 ## socket file location
 
-Each session gets its own unix socket file. Right now, the default location is `/tmp/zmx-{uid}`. You can configure this using environment variables:
+Each session gets its own unix socket file. The default location depends on your environment variables (checked in priority order):
 
-- `TMPDIR` => overrides `/tmp`
-- `ZMX_DIR` => overrides `/tmp/zmx-{uid}`
+1. `ZMX_DIR` => uses exact path (e.g., `/custom/path`)
+2. `XDG_RUNTIME_DIR` => uses `{XDG_RUNTIME_DIR}/zmx` (recommended on Linux, typically results in `/run/user/{uid}/zmx`)
+3. `TMPDIR` => uses `{TMPDIR}/zmx-{uid}` (appends uid for multi-user safety)
+4. `/tmp` => uses `/tmp/zmx-{uid}` (default fallback, appends uid for multi-user safety)
 
 ## debugging
 

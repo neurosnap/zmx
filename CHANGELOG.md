@@ -2,6 +2,12 @@
 
 Use spec: https://common-changelog.org/
 
+## Unreleased
+
+### Added
+
+- Use `XDG_RUNTIME_DIR` environment variable for socket directory (takes precedence over `TMPDIR` and `/tmp`)
+
 ## v0.1.1 - 2025-12-16
 
 ### Changed
