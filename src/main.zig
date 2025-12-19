@@ -157,6 +157,92 @@ const Daemon = struct {
         }
         return false;
     }
+
+    pub fn handleInput(self: *Daemon, pty_fd: i32, payload: []const u8) !void {
+        _ = self;
+        if (payload.len > 0) {
+            _ = try posix.write(pty_fd, payload);
+        }
+    }
+
+    pub fn handleInit(
+        self: *Daemon,
+        client: *Client,
+        pty_fd: i32,
+        term: *ghostty_vt.Terminal,
+        payload: []const u8,
+    ) !void {
+        if (payload.len != @sizeOf(ipc.Resize)) return;
+
+        const resize = std.mem.bytesToValue(ipc.Resize, payload);
+        var ws: c.struct_winsize = .{
+            .ws_row = resize.rows,
+            .ws_col = resize.cols,
+            .ws_xpixel = 0,
+            .ws_ypixel = 0,
+        };
+        _ = c.ioctl(pty_fd, c.TIOCSWINSZ, &ws);
+        try term.resize(self.alloc, resize.cols, resize.rows);
+
+        std.log.debug("init resize rows={d} cols={d}", .{ resize.rows, resize.cols });
+
+        if (self.has_pty_output) {
+            if (serializeTerminalState(self.alloc, term)) |term_output| {
+                defer self.alloc.free(term_output);
+                ipc.appendMessage(self.alloc, &client.write_buf, .Output, term_output) catch |err| {
+                    std.log.warn("failed to buffer terminal state for client err={s}", .{@errorName(err)});
+                };
+                client.has_pending_output = true;
+            }
+        }
+    }
+
+    pub fn handleResize(self: *Daemon, pty_fd: i32, term: *ghostty_vt.Terminal, payload: []const u8) !void {
+        if (payload.len != @sizeOf(ipc.Resize)) return;
+
+        const resize = std.mem.bytesToValue(ipc.Resize, payload);
+        var ws: c.struct_winsize = .{
+            .ws_row = resize.rows,
+            .ws_col = resize.cols,
+            .ws_xpixel = 0,
+            .ws_ypixel = 0,
+        };
+        _ = c.ioctl(pty_fd, c.TIOCSWINSZ, &ws);
+        try term.resize(self.alloc, resize.cols, resize.rows);
+        std.log.debug("resize rows={d} cols={d}", .{ resize.rows, resize.cols });
+    }
+
+    pub fn handleDetach(self: *Daemon, client: *Client, i: usize) void {
+        std.log.info("client detach fd={d}", .{client.socket_fd});
+        _ = self.closeClient(client, i, false);
+    }
+
+    pub fn handleDetachAll(self: *Daemon) void {
+        std.log.info("detach all clients={d}", .{self.clients.items.len});
+        for (self.clients.items) |client_to_close| {
+            client_to_close.deinit();
+            self.alloc.destroy(client_to_close);
+        }
+        self.clients.clearRetainingCapacity();
+    }
+
+    pub fn handleKill(self: *Daemon) void {
+        std.log.info("kill received session={s}", .{self.session_name});
+        posix.kill(self.pid, posix.SIG.TERM) catch |err| {
+            std.log.warn("failed to send SIGTERM to pty child err={s}", .{@errorName(err)});
+        };
+        self.shutdown();
+    }
+
+    pub fn handleInfo(self: *Daemon, client: *Client) !void {
+        const clients_len = self.clients.items.len - 1;
+        const info = ipc.Info{
+            .clients_len = clients_len,
+            .pid = self.pid,
+        };
+        try ipc.appendMessage(self.alloc, &client.write_buf, .Info, std.mem.asBytes(&info));
+        client.has_pending_output = true;
+    }
 };
 
 pub fn main() !void {
@@ -832,101 +918,24 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
 
                 while (client.read_buf.next()) |msg| {
                     switch (msg.header.tag) {
-                        .Input => {
-                            if (msg.payload.len > 0) {
-                                _ = try posix.write(pty_fd, msg.payload);
-                            }
-                        },
-                        .Init => {
-                            if (msg.payload.len == @sizeOf(ipc.Resize)) {
-                                const resize = std.mem.bytesToValue(ipc.Resize, msg.payload);
-                                var ws: c.struct_winsize = .{
-                                    .ws_row = resize.rows,
-                                    .ws_col = resize.cols,
-                                    .ws_xpixel = 0,
-                                    .ws_ypixel = 0,
-                                };
-                                _ = c.ioctl(pty_fd, c.TIOCSWINSZ, &ws);
-                                try term.resize(daemon.alloc, resize.cols, resize.rows);
-
-                                std.log.debug("init resize rows={d} cols={d}", .{ resize.rows, resize.cols });
-
-                                // Only send terminal state if there's been PTY output (skip on first attach)
-                                if (daemon.has_pty_output) {
-                                    var builder: std.Io.Writer.Allocating = .init(daemon.alloc);
-                                    defer builder.deinit();
-                                    var term_formatter = ghostty_vt.formatter.TerminalFormatter.init(&term, .vt);
-                                    term_formatter.content = .{ .selection = null };
-                                    term_formatter.extra = .{
-                                        .palette = false, // Don't override host terminal's palette
-                                        .modes = true,
-                                        .scrolling_region = true,
-                                        .tabstops = true,
-                                        .pwd = true,
-                                        .keyboard = true,
-                                        .screen = .all,
-                                    };
-                                    term_formatter.format(&builder.writer) catch |err| {
-                                        std.log.warn("failed to format terminal state err={s}", .{@errorName(err)});
-                                    };
-                                    const term_output = builder.writer.buffered();
-                                    if (term_output.len > 0) {
-                                        ipc.appendMessage(daemon.alloc, &client.write_buf, .Output, term_output) catch |err| {
-                                            std.log.warn("failed to buffer terminal state for client err={s}", .{@errorName(err)});
-                                        };
-                                        client.has_pending_output = true;
-                                    }
-                                }
-                            }
-                        },
-                        .Resize => {
-                            if (msg.payload.len == @sizeOf(ipc.Resize)) {
-                                const resize = std.mem.bytesToValue(ipc.Resize, msg.payload);
-                                var ws: c.struct_winsize = .{
-                                    .ws_row = resize.rows,
-                                    .ws_col = resize.cols,
-                                    .ws_xpixel = 0,
-                                    .ws_ypixel = 0,
-                                };
-                                _ = c.ioctl(pty_fd, c.TIOCSWINSZ, &ws);
-                                try term.resize(daemon.alloc, resize.cols, resize.rows);
-                                std.log.debug("resize rows={d} cols={d}", .{ resize.rows, resize.cols });
-                            }
-                        },
+                        .Input => try daemon.handleInput(pty_fd, msg.payload),
+                        .Init => try daemon.handleInit(client, pty_fd, &term, msg.payload),
+                        .Resize => try daemon.handleResize(pty_fd, &term, msg.payload),
                         .Detach => {
-                            std.log.info("client detach fd={d}", .{client.socket_fd});
-                            _ = daemon.closeClient(client, i, false);
+                            daemon.handleDetach(client, i);
                             break :clients_loop;
                         },
                         .DetachAll => {
-                            std.log.info("detach all clients={d}", .{daemon.clients.items.len});
-                            for (daemon.clients.items) |client_to_close| {
-                                client_to_close.deinit();
-                                daemon.alloc.destroy(client_to_close);
-                            }
-                            daemon.clients.clearRetainingCapacity();
+                            daemon.handleDetachAll();
                             break :clients_loop;
                         },
                         .Kill => {
-                            std.log.info("kill received session={s}", .{daemon.session_name});
-                            posix.kill(daemon.pid, posix.SIG.TERM) catch |err| {
-                                std.log.warn("failed to send SIGTERM to pty child err={s}", .{@errorName(err)});
-                            };
-                            daemon.shutdown();
+                            daemon.handleKill();
                             should_exit = true;
                             break :clients_loop;
                         },
-                        .Info => {
-                            // subtract current client since it's just fetching info
-                            const clients_len = daemon.clients.items.len - 1;
-                            const info = ipc.Info{
-                                .clients_len = clients_len,
-                                .pid = daemon.pid,
-                            };
-                            try ipc.appendMessage(daemon.alloc, &client.write_buf, .Info, std.mem.asBytes(&info));
-                            client.has_pending_output = true;
-                        },
-                        .Output => {}, // Clients shouldn't send output
+                        .Info => try daemon.handleInfo(client),
+                        .Output => {},
                     }
                 }
             }
@@ -1136,6 +1145,36 @@ test "isKittyCtrlBackslash" {
     try std.testing.expect(!isKittyCtrlBackslash("\x1b[92;1u"));
     try std.testing.expect(!isKittyCtrlBackslash("\x1b[93;5u"));
     try std.testing.expect(!isKittyCtrlBackslash("garbage"));
+}
+
+fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Terminal) ?[]const u8 {
+    var builder: std.Io.Writer.Allocating = .init(alloc);
+    defer builder.deinit();
+
+    var term_formatter = ghostty_vt.formatter.TerminalFormatter.init(term, .vt);
+    term_formatter.content = .{ .selection = null };
+    term_formatter.extra = .{
+        .palette = false,
+        .modes = true,
+        .scrolling_region = true,
+        .tabstops = true,
+        .pwd = true,
+        .keyboard = true,
+        .screen = .all,
+    };
+
+    term_formatter.format(&builder.writer) catch |err| {
+        std.log.warn("failed to format terminal state err={s}", .{@errorName(err)});
+        return null;
+    };
+
+    const output = builder.writer.buffered();
+    if (output.len == 0) return null;
+
+    return alloc.dupe(u8, output) catch |err| {
+        std.log.warn("failed to allocate terminal state err={s}", .{@errorName(err)});
+        return null;
+    };
 }
 
 fn isKittyCtrlB(buf: []const u8) bool {
