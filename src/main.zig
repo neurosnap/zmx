@@ -477,8 +477,13 @@ fn attach(daemon: *Daemon) !void {
     // Use TCSAFLUSH to discard any unread input, preventing stale input after detach.
     defer {
         _ = c.tcsetattr(posix.STDIN_FILENO, c.TCSAFLUSH, &orig_termios);
-        // Clear screen and show cursor on detach
-        const restore_seq = "\x1b[?25h\x1b[2J\x1b[H";
+        // Reset terminal modes on detach:
+        // - Mouse: 1000=basic, 1002=button-event, 1003=any-event, 1006=SGR extended
+        // - 2004=bracketed paste, 1004=focus events, 1049=alt screen
+        // - 25h=show cursor, 2J=clear screen, H=cursor home
+        const restore_seq = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l" ++
+            "\x1b[?2004l\x1b[?1004l\x1b[?1049l" ++
+            "\x1b[?25h\x1b[2J\x1b[H";
         _ = posix.write(posix.STDOUT_FILENO, restore_seq) catch {};
     }
 
