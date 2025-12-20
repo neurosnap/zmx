@@ -10,12 +10,13 @@ Use spec: https://common-changelog.org/
 
 ### Changed
 
-- Use `ctrl+b + d` to detach from session instead of `ctrl+\`
+- Use `ctrl+b + d` to detach from session instead of `ctrl+\` (deprecated)
 - Updated `ghostty-vt` to latest HEAD
 
 ### Fixed
 
 - Restore mouse terminal modes on detach
+- Restore correct cursor position on re-attach
 
 ## v0.1.1 - 2025-12-16
 
