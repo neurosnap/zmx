@@ -175,6 +175,22 @@ const Daemon = struct {
         if (payload.len != @sizeOf(ipc.Resize)) return;
 
         const resize = std.mem.bytesToValue(ipc.Resize, payload);
+
+        // Serialize terminal state BEFORE resize to capture correct cursor position.
+        // Resizing triggers reflow which can move the cursor, and the shell's
+        // SIGWINCH-triggered redraw will run after our snapshot is sent.
+        if (self.has_pty_output) {
+            const cursor = &term.screens.active.cursor;
+            std.log.debug("cursor before serialize: x={d} y={d} pending_wrap={}", .{ cursor.x, cursor.y, cursor.pending_wrap });
+            if (serializeTerminalState(self.alloc, term)) |term_output| {
+                defer self.alloc.free(term_output);
+                ipc.appendMessage(self.alloc, &client.write_buf, .Output, term_output) catch |err| {
+                    std.log.warn("failed to buffer terminal state for client err={s}", .{@errorName(err)});
+                };
+                client.has_pending_output = true;
+            }
+        }
+
         var ws: c.struct_winsize = .{
             .ws_row = resize.rows,
             .ws_col = resize.cols,
@@ -185,16 +201,6 @@ const Daemon = struct {
         try term.resize(self.alloc, resize.cols, resize.rows);
 
         std.log.debug("init resize rows={d} cols={d}", .{ resize.rows, resize.cols });
-
-        if (self.has_pty_output) {
-            if (serializeTerminalState(self.alloc, term)) |term_output| {
-                defer self.alloc.free(term_output);
-                ipc.appendMessage(self.alloc, &client.write_buf, .Output, term_output) catch |err| {
-                    std.log.warn("failed to buffer terminal state for client err={s}", .{@errorName(err)});
-                };
-                client.has_pending_output = true;
-            }
-        }
     }
 
     pub fn handleResize(self: *Daemon, pty_fd: i32, term: *ghostty_vt.Terminal, payload: []const u8) !void {
@@ -1197,7 +1203,7 @@ fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Terminal) 
         .palette = false,
         .modes = true,
         .scrolling_region = true,
-        .tabstops = true,
+        .tabstops = false, // tabstop restoration moves cursor after CUP, corrupting position
         .pwd = true,
         .keyboard = true,
         .screen = .all,
