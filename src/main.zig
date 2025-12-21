@@ -128,6 +128,7 @@ const Daemon = struct {
     pid: i32,
     command: ?[]const []const u8 = null,
     has_pty_output: bool = false,
+    has_had_client: bool = false,
 
     pub fn deinit(self: *Daemon) void {
         self.clients.deinit(self.alloc);
@@ -179,10 +180,13 @@ const Daemon = struct {
         // Serialize terminal state BEFORE resize to capture correct cursor position.
         // Resizing triggers reflow which can move the cursor, and the shell's
         // SIGWINCH-triggered redraw will run after our snapshot is sent.
-        if (self.has_pty_output) {
+        // Only serialize on re-attach (has_had_client), not first attach, to avoid
+        // interfering with shell initialization (DA1 queries, etc.)
+        if (self.has_pty_output and self.has_had_client) {
             const cursor = &term.screens.active.cursor;
             std.log.debug("cursor before serialize: x={d} y={d} pending_wrap={}", .{ cursor.x, cursor.y, cursor.pending_wrap });
             if (serializeTerminalState(self.alloc, term)) |term_output| {
+                std.log.debug("serialize terminal state", .{});
                 defer self.alloc.free(term_output);
                 ipc.appendMessage(self.alloc, &client.write_buf, .Output, term_output) catch |err| {
                     std.log.warn("failed to buffer terminal state for client err={s}", .{@errorName(err)});
@@ -199,6 +203,9 @@ const Daemon = struct {
         };
         _ = c.ioctl(pty_fd, c.TIOCSWINSZ, &ws);
         try term.resize(self.alloc, resize.cols, resize.rows);
+
+        // Mark that we've had a client init, so subsequent clients get terminal state
+        self.has_had_client = true;
 
         std.log.debug("init resize rows={d} cols={d}", .{ resize.rows, resize.cols });
     }
