@@ -177,6 +177,15 @@ const Daemon = struct {
 
         const resize = std.mem.bytesToValue(ipc.Resize, payload);
 
+        var ws: c.struct_winsize = .{
+            .ws_row = resize.rows,
+            .ws_col = resize.cols,
+            .ws_xpixel = 0,
+            .ws_ypixel = 0,
+        };
+        _ = c.ioctl(pty_fd, c.TIOCSWINSZ, &ws);
+        try term.resize(self.alloc, resize.cols, resize.rows);
+
         // Serialize terminal state BEFORE resize to capture correct cursor position.
         // Resizing triggers reflow which can move the cursor, and the shell's
         // SIGWINCH-triggered redraw will run after our snapshot is sent.
@@ -194,15 +203,6 @@ const Daemon = struct {
                 client.has_pending_output = true;
             }
         }
-
-        var ws: c.struct_winsize = .{
-            .ws_row = resize.rows,
-            .ws_col = resize.cols,
-            .ws_xpixel = 0,
-            .ws_ypixel = 0,
-        };
-        _ = c.ioctl(pty_fd, c.TIOCSWINSZ, &ws);
-        try term.resize(self.alloc, resize.cols, resize.rows);
 
         // Mark that we've had a client init, so subsequent clients get terminal state
         self.has_had_client = true;
