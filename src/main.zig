@@ -616,11 +616,19 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
 
     setupSigwinchHandler();
 
-    // Send init message with terminal size
-    const size = getTerminalSize(posix.STDOUT_FILENO);
-    ipc.send(client_sock_fd, .Init, std.mem.asBytes(&size)) catch {};
+    // Make socket non-blocking to avoid blocking on writes
+    const sock_flags = try posix.fcntl(client_sock_fd, posix.F.GETFL, 0);
+    _ = try posix.fcntl(client_sock_fd, posix.F.SETFL, sock_flags | posix.SOCK.NONBLOCK);
 
-    var poll_fds = try std.ArrayList(posix.pollfd).initCapacity(alloc, 2);
+    // Buffer for outgoing socket writes
+    var sock_write_buf = try std.ArrayList(u8).initCapacity(alloc, 4096);
+    defer sock_write_buf.deinit(alloc);
+
+    // Send init message with terminal size (buffered)
+    const size = getTerminalSize(posix.STDOUT_FILENO);
+    try ipc.appendMessage(alloc, &sock_write_buf, .Init, std.mem.asBytes(&size));
+
+    var poll_fds = try std.ArrayList(posix.pollfd).initCapacity(alloc, 4);
     defer poll_fds.deinit(alloc);
 
     var read_buf = try ipc.SocketBuffer.init(alloc);
@@ -642,10 +650,7 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
         // Check for pending SIGWINCH
         if (sigwinch_received.swap(false, .acq_rel)) {
             const next_size = getTerminalSize(posix.STDOUT_FILENO);
-            ipc.send(client_sock_fd, .Resize, std.mem.asBytes(&next_size)) catch |err| switch (err) {
-                error.BrokenPipe, error.ConnectionResetByPeer => return,
-                else => return err,
-            };
+            try ipc.appendMessage(alloc, &sock_write_buf, .Resize, std.mem.asBytes(&next_size));
         }
 
         poll_fds.clearRetainingCapacity();
@@ -656,9 +661,14 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
             .revents = 0,
         });
 
+        // Poll socket for read, and also for write if we have pending data
+        var sock_events: i16 = posix.POLL.IN;
+        if (sock_write_buf.items.len > 0) {
+            sock_events |= posix.POLL.OUT;
+        }
         try poll_fds.append(alloc, .{
             .fd = client_sock_fd,
-            .events = posix.POLL.IN,
+            .events = sock_events,
             .revents = 0,
         });
 
@@ -688,17 +698,11 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
                     // Check for Kitty keyboard protocol sequences first
                     switch (parseStdinInput(buf[0..n], &prefix_active)) {
                         .detach => {
-                            ipc.send(client_sock_fd, .Detach, "") catch |err| switch (err) {
-                                error.BrokenPipe, error.ConnectionResetByPeer => return,
-                                else => return err,
-                            };
+                            try ipc.appendMessage(alloc, &sock_write_buf, .Detach, "");
                             continue;
                         },
                         .send => |data| {
-                            ipc.send(client_sock_fd, .Input, data) catch |err| switch (err) {
-                                error.BrokenPipe, error.ConnectionResetByPeer => return,
-                                else => return err,
-                            };
+                            try ipc.appendMessage(alloc, &sock_write_buf, .Input, data);
                             continue;
                         },
                         .activate_prefix => continue,
@@ -711,17 +715,11 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
                         const action = parseStdinByte(buf[i], prefix_active);
                         switch (action) {
                             .detach => {
-                                ipc.send(client_sock_fd, .Detach, "") catch |err| switch (err) {
-                                    error.BrokenPipe, error.ConnectionResetByPeer => return,
-                                    else => return err,
-                                };
+                                try ipc.appendMessage(alloc, &sock_write_buf, .Detach, "");
                                 prefix_active = false;
                             },
                             .send => |data| {
-                                ipc.send(client_sock_fd, .Input, data) catch |err| switch (err) {
-                                    error.BrokenPipe, error.ConnectionResetByPeer => return,
-                                    else => return err,
-                                };
+                                try ipc.appendMessage(alloc, &sock_write_buf, .Input, data);
                                 prefix_active = false;
                             },
                             .activate_prefix => {
@@ -730,20 +728,11 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
                             .none => {
                                 if (prefix_active) {
                                     // Unknown prefix command, forward both ctrl+b and this key
-                                    ipc.send(client_sock_fd, .Input, &[_]u8{0x02}) catch |err| switch (err) {
-                                        error.BrokenPipe, error.ConnectionResetByPeer => return,
-                                        else => return err,
-                                    };
-                                    ipc.send(client_sock_fd, .Input, buf[i .. i + 1]) catch |err| switch (err) {
-                                        error.BrokenPipe, error.ConnectionResetByPeer => return,
-                                        else => return err,
-                                    };
+                                    try ipc.appendMessage(alloc, &sock_write_buf, .Input, &[_]u8{0x02});
+                                    try ipc.appendMessage(alloc, &sock_write_buf, .Input, buf[i .. i + 1]);
                                     prefix_active = false;
                                 } else {
-                                    ipc.send(client_sock_fd, .Input, buf[i .. i + 1]) catch |err| switch (err) {
-                                        error.BrokenPipe, error.ConnectionResetByPeer => return,
-                                        else => return err,
-                                    };
+                                    try ipc.appendMessage(alloc, &sock_write_buf, .Input, buf[i .. i + 1]);
                                 }
                             },
                         }
@@ -755,7 +744,7 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
             }
         }
 
-        // Handle socket -> stdout (Output)
+        // Handle socket read (incoming Output messages from daemon)
         if (poll_fds.items[1].revents & posix.POLL.IN != 0) {
             const n = read_buf.read(client_sock_fd) catch |err| {
                 if (err == error.WouldBlock) continue;
@@ -777,6 +766,22 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
                         }
                     },
                     else => {},
+                }
+            }
+        }
+
+        // Handle socket write (flush buffered messages to daemon)
+        if (poll_fds.items[1].revents & posix.POLL.OUT != 0) {
+            if (sock_write_buf.items.len > 0) {
+                const n = posix.write(client_sock_fd, sock_write_buf.items) catch |err| blk: {
+                    if (err == error.WouldBlock) break :blk 0;
+                    if (err == error.ConnectionResetByPeer or err == error.BrokenPipe) {
+                        return;
+                    }
+                    return err;
+                };
+                if (n > 0) {
+                    try sock_write_buf.replaceRange(alloc, 0, n, &[_]u8{});
                 }
             }
         }
