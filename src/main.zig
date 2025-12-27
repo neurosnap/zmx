@@ -356,7 +356,7 @@ fn help() !void {
         \\
         \\Commands:
         \\  [a]ttach <name> [command...]  Create or attach to a session
-        \\  [d]etach                      Detach all clients from current session (ctrl+b + d for current client)
+        \\  [d]etach                      Detach all clients from current session (ctrl+\ for current client)
         \\  [l]ist                        List active sessions
         \\  [k]ill <name>                 Kill a session and all attached clients
         \\  [hi]story <name>              Output session scrollback as plain text
