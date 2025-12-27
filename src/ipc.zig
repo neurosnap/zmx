@@ -10,6 +10,7 @@ pub const Tag = enum(u8) {
     Kill = 5,
     Info = 6,
     Init = 7,
+    History = 8,
 };
 
 pub const Header = packed struct {

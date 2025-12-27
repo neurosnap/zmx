@@ -6,6 +6,7 @@ Use spec: https://common-changelog.org/
 
 ### Added
 
+- `zmx [hi]story` command which prints the session scrollback as plain text
 - Use `XDG_RUNTIME_DIR` environment variable for socket directory (takes precedence over `TMPDIR` and `/tmp`)
 
 ### Changed

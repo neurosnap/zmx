@@ -56,6 +56,7 @@ Commands:
   [d]etach                      Detach all clients from current session  (ctrl+b + d for current client)
   [l]ist                        List active sessions
   [k]ill <name>                 Kill a session and all attached clients
+  [hi]story <name>              Output session scrollback as plain text
   [v]ersion                     Show version information
   [h]elp                        Show this help message
 ```

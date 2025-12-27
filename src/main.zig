@@ -256,6 +256,17 @@ const Daemon = struct {
         try ipc.appendMessage(self.alloc, &client.write_buf, .Info, std.mem.asBytes(&info));
         client.has_pending_output = true;
     }
+
+    pub fn handleHistory(self: *Daemon, client: *Client, term: *ghostty_vt.Terminal) !void {
+        if (serializeTerminalPlainText(self.alloc, term)) |output| {
+            defer self.alloc.free(output);
+            try ipc.appendMessage(self.alloc, &client.write_buf, .History, output);
+            client.has_pending_output = true;
+        } else {
+            try ipc.appendMessage(self.alloc, &client.write_buf, .History, "");
+            client.has_pending_output = true;
+        }
+    }
 };
 
 pub fn main() !void {
@@ -291,6 +302,11 @@ pub fn main() !void {
             return error.SessionNameRequired;
         };
         return kill(&cfg, session_name);
+    } else if (std.mem.eql(u8, cmd, "history") or std.mem.eql(u8, cmd, "hi")) {
+        const session_name = args.next() orelse {
+            return error.SessionNameRequired;
+        };
+        return history(&cfg, session_name);
     } else if (std.mem.eql(u8, cmd, "attach") or std.mem.eql(u8, cmd, "a")) {
         const session_name = args.next() orelse {
             return error.SessionNameRequired;
@@ -343,6 +359,7 @@ fn help() !void {
         \\  [d]etach                      Detach all clients from current session (ctrl+b + d for current client)
         \\  [l]ist                        List active sessions
         \\  [k]ill <name>                 Kill a session and all attached clients
+        \\  [hi]story <name>              Output session scrollback as plain text
         \\  [v]ersion                     Show version information
         \\  [h]elp                        Show this help message
         \\
@@ -499,6 +516,57 @@ fn kill(cfg: *Cfg, session_name: []const u8) !void {
     var w = std.fs.File.stdout().writer(&buf);
     try w.interface.print("killed session {s}\n", .{session_name});
     try w.interface.flush();
+}
+
+fn history(cfg: *Cfg, session_name: []const u8) !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    var dir = try std.fs.openDirAbsolute(cfg.socket_dir, .{});
+    defer dir.close();
+
+    const exists = try sessionExists(dir, session_name);
+    if (!exists) {
+        std.log.err("session does not exist session_name={s}", .{session_name});
+        return;
+    }
+
+    const socket_path = try getSocketPath(alloc, cfg.socket_dir, session_name);
+    defer alloc.free(socket_path);
+    const result = probeSession(alloc, socket_path) catch |err| {
+        std.log.err("session unresponsive: {s}", .{@errorName(err)});
+        cleanupStaleSocket(dir, session_name);
+        return;
+    };
+    defer posix.close(result.fd);
+
+    ipc.send(result.fd, .History, "") catch |err| switch (err) {
+        error.BrokenPipe, error.ConnectionResetByPeer => return,
+        else => return err,
+    };
+
+    var sb = try ipc.SocketBuffer.init(alloc);
+    defer sb.deinit();
+
+    while (true) {
+        var poll_fds = [_]posix.pollfd{.{ .fd = result.fd, .events = posix.POLL.IN, .revents = 0 }};
+        const poll_result = posix.poll(&poll_fds, 5000) catch return;
+        if (poll_result == 0) {
+            std.log.err("timeout waiting for history response", .{});
+            return;
+        }
+
+        const n = sb.read(result.fd) catch return;
+        if (n == 0) return;
+
+        while (sb.next()) |msg| {
+            if (msg.header.tag == .History) {
+                _ = posix.write(posix.STDOUT_FILENO, msg.payload) catch return;
+                return;
+            }
+        }
+    }
 }
 
 fn attach(daemon: *Daemon) !void {
@@ -946,6 +1014,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                             break :clients_loop;
                         },
                         .Info => try daemon.handleInfo(client),
+                        .History => try daemon.handleHistory(client, &term),
                         .Output => {},
                     }
                 }
@@ -1231,6 +1300,28 @@ fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Terminal) 
 
     return alloc.dupe(u8, output) catch |err| {
         std.log.warn("failed to allocate terminal state err={s}", .{@errorName(err)});
+        return null;
+    };
+}
+
+fn serializeTerminalPlainText(alloc: std.mem.Allocator, term: *ghostty_vt.Terminal) ?[]const u8 {
+    var builder: std.Io.Writer.Allocating = .init(alloc);
+    defer builder.deinit();
+
+    var term_formatter = ghostty_vt.formatter.TerminalFormatter.init(term, .plain);
+    term_formatter.content = .{ .selection = null };
+    term_formatter.extra = .none;
+
+    term_formatter.format(&builder.writer) catch |err| {
+        std.log.warn("failed to format terminal plain text err={s}", .{@errorName(err)});
+        return null;
+    };
+
+    const output = builder.writer.buffered();
+    if (output.len == 0) return null;
+
+    return alloc.dupe(u8, output) catch |err| {
+        std.log.warn("failed to allocate terminal plain text err={s}", .{@errorName(err)});
         return null;
     };
 }
