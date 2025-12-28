@@ -11,7 +11,6 @@ Use spec: https://common-changelog.org/
 
 ### Changed
 
-- Use `ctrl+b + d` to detach from session instead of `ctrl+\` (deprecated)
 - Updated `ghostty-vt` to latest HEAD
 
 ### Fixed

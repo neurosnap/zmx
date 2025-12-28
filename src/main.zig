@@ -707,9 +707,6 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
 
     const stdin_fd = posix.STDIN_FILENO;
 
-    // Prefix key state for ctrl+b + <key> bindings
-    var prefix_active = false;
-
     // Make stdin non-blocking
     const flags = try posix.fcntl(stdin_fd, posix.F.GETFL, 0);
     _ = try posix.fcntl(stdin_fd, posix.F.SETFL, flags | posix.SOCK.NONBLOCK);
@@ -763,47 +760,11 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
 
             if (n_opt) |n| {
                 if (n > 0) {
-                    // Check for Kitty keyboard protocol sequences first
-                    switch (parseStdinInput(buf[0..n], &prefix_active)) {
-                        .detach => {
-                            try ipc.appendMessage(alloc, &sock_write_buf, .Detach, "");
-                            continue;
-                        },
-                        .send => |data| {
-                            try ipc.appendMessage(alloc, &sock_write_buf, .Input, data);
-                            continue;
-                        },
-                        .activate_prefix => continue,
-                        .none => {},
-                    }
-
-                    // Process byte-by-byte for non-Kitty input
-                    var i: usize = 0;
-                    while (i < n) : (i += 1) {
-                        const action = parseStdinByte(buf[i], prefix_active);
-                        switch (action) {
-                            .detach => {
-                                try ipc.appendMessage(alloc, &sock_write_buf, .Detach, "");
-                                prefix_active = false;
-                            },
-                            .send => |data| {
-                                try ipc.appendMessage(alloc, &sock_write_buf, .Input, data);
-                                prefix_active = false;
-                            },
-                            .activate_prefix => {
-                                prefix_active = true;
-                            },
-                            .none => {
-                                if (prefix_active) {
-                                    // Unknown prefix command, forward both ctrl+b and this key
-                                    try ipc.appendMessage(alloc, &sock_write_buf, .Input, &[_]u8{0x02});
-                                    try ipc.appendMessage(alloc, &sock_write_buf, .Input, buf[i .. i + 1]);
-                                    prefix_active = false;
-                                } else {
-                                    try ipc.appendMessage(alloc, &sock_write_buf, .Input, buf[i .. i + 1]);
-                                }
-                            },
-                        }
+                    // Check for detach sequences (ctrl+\ as first byte or Kitty escape sequence)
+                    if (buf[0] == 0x1C or isKittyCtrlBackslash(buf[0..n])) {
+                        try ipc.appendMessage(alloc, &sock_write_buf, .Detach, "");
+                    } else {
+                        try ipc.appendMessage(alloc, &sock_write_buf, .Input, buf[0..n]);
                     }
                 } else {
                     // EOF on stdin
@@ -1151,53 +1112,6 @@ fn probeSession(alloc: std.mem.Allocator, socket_path: []const u8) SessionProbeE
     return error.Unexpected;
 }
 
-const InputAction = union(enum) {
-    send: []const u8,
-    detach,
-    activate_prefix,
-    none,
-};
-
-fn parseStdinByte(byte: u8, prefix_active: bool) InputAction {
-    if (byte == 0x1C) { // Ctrl+\ (File Separator)
-        return .detach;
-    } else if (byte == 0x02) { // Ctrl+B
-        if (prefix_active) {
-            return .{ .send = &[_]u8{0x02} };
-        } else {
-            return .activate_prefix;
-        }
-    } else if (prefix_active) {
-        if (byte == 'd') {
-            return .detach;
-        } else {
-            return .none; // Unknown prefix command - caller handles forwarding
-        }
-    }
-    return .none; // Regular byte - caller handles forwarding
-}
-
-fn parseStdinInput(buf: []const u8, prefix_active: *bool) InputAction {
-    // Check for Kitty keyboard protocol escape sequences first
-    if (isKittyCtrlBackslash(buf)) {
-        prefix_active.* = false;
-        return .detach;
-    }
-
-    if (isKittyCtrlB(buf)) {
-        prefix_active.* = true;
-        return .activate_prefix;
-    }
-
-    // Handle prefix mode for Kitty 'd' key
-    if (prefix_active.* and isKittyKey(buf, 'd')) {
-        prefix_active.* = false;
-        return .detach;
-    }
-
-    return .none; // Not a special sequence
-}
-
 fn cleanupStaleSocket(dir: std.fs.Dir, session_name: []const u8) void {
     std.log.warn("stale socket found, cleaning up session={s}", .{session_name});
     dir.deleteFile(session_name) catch |err| {
@@ -1260,17 +1174,17 @@ fn getTerminalSize(fd: i32) ipc.Resize {
 }
 
 /// Detects Kitty keyboard protocol escape sequence for Ctrl+\
-/// Common sequences: \e[92;5u (basic), \e[92;133u (with event flags)
+/// 92 = backslash, 5 = ctrl modifier, :1 = key press event
 fn isKittyCtrlBackslash(buf: []const u8) bool {
     return std.mem.indexOf(u8, buf, "\x1b[92;5u") != null or
-        std.mem.indexOf(u8, buf, "\x1b[92;133u") != null;
+        std.mem.indexOf(u8, buf, "\x1b[92;5:1u") != null;
 }
 
 test "isKittyCtrlBackslash" {
     try std.testing.expect(isKittyCtrlBackslash("\x1b[92;5u"));
-    try std.testing.expect(isKittyCtrlBackslash("\x1b[92;133u"));
+    try std.testing.expect(isKittyCtrlBackslash("\x1b[92;5:1u"));
+    try std.testing.expect(!isKittyCtrlBackslash("\x1b[92;5:3u"));
     try std.testing.expect(!isKittyCtrlBackslash("\x1b[92;1u"));
-    try std.testing.expect(!isKittyCtrlBackslash("\x1b[93;5u"));
     try std.testing.expect(!isKittyCtrlBackslash("garbage"));
 }
 
@@ -1324,31 +1238,4 @@ fn serializeTerminalPlainText(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
         std.log.warn("failed to allocate terminal plain text err={s}", .{@errorName(err)});
         return null;
     };
-}
-
-fn isKittyCtrlB(buf: []const u8) bool {
-    return std.mem.indexOf(u8, buf, "\x1b[98;5u") != null or
-        std.mem.indexOf(u8, buf, "\x1b[98;133u") != null;
-}
-
-test "isKittyCtrlB" {
-    try std.testing.expect(isKittyCtrlB("\x1b[98;5u"));
-    try std.testing.expect(isKittyCtrlB("\x1b[98;133u"));
-    try std.testing.expect(!isKittyCtrlB("\x1b[98;1u"));
-    try std.testing.expect(!isKittyCtrlB("\x1b[99;5u"));
-    try std.testing.expect(!isKittyCtrlB("garbage"));
-}
-
-fn isKittyKey(buf: []const u8, key: u8) bool {
-    var expected: [16]u8 = undefined;
-    const seq = std.fmt.bufPrint(&expected, "\x1b[{d}u", .{key}) catch return false;
-
-    return std.mem.indexOf(u8, buf, seq) != null;
-}
-
-test "isKittyKey" {
-    try std.testing.expect(isKittyKey("\x1b[100u", 'd'));
-    try std.testing.expect(!isKittyKey("\x1b[100;5u", 'd'));
-    try std.testing.expect(!isKittyKey("\x1b[101u", 'd'));
-    try std.testing.expect(!isKittyKey("d", 'd'));
 }

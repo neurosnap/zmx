@@ -70,9 +70,13 @@ zmx attach build make -j8   # run a build, reattach to check progress
 zmx attach mux dvtm         # run a multiplexer inside zmx
 ```
 
+### detach
+
+While we try our best to support detaching from the terminal session using multiple mechanisms (e.g. shortcut, detach command) we find ourselves simply closing terminal windows when we want to detach from a `zmx` session.  Whenever you attach to a `zmx` session we make sure that it stays alive so explicitly detaching feels unnecessary unless for some reason you need to reuse the same exact terminal window.
+
 ## shell prompt
 
-When you attach to a zmx session, we don't provide any indication that you are inside `zmx`. We do provide an environment variable `ZMX_SESSION` which contains the session name.
+When you attach to a `zmx` session, we don't provide any indication that you are inside `zmx`. We do provide an environment variable `ZMX_SESSION` which contains the session name.
 
 We recommend checking for that env var inside your prompt and displaying some indication there.
 
@@ -106,13 +110,13 @@ PROMPT="${ZMX_SESSION:+[$ZMX_SESSION]} $BASE_PROMPT"
 
 ## philosophy
 
-The entire argument for `zmx` instead of something like `tmux` that has windows, panes, splits, etc. is that job should be handled by your os window manager. By using something like `tmux` you now have redundent functionality in your dev stack: a window manager for your os and a window manager for your terminal. Further, in order to use modern terminal features, your terminal emulator **and** `tmux` need to have support for them. This holds back the terminal enthusiast community and feature development.
+The entire argument for `zmx` instead of something like `tmux` that has windows, panes, splits, etc. is that job should be handled by your os window manager. By using something like `tmux` you now have redundant functionality in your dev stack: a window manager for your os and a window manager for your terminal. Further, in order to use modern terminal features, your terminal emulator **and** `tmux` need to have support for them. This holds back the terminal enthusiast community and feature development.
 
 Instead, this tool specifically focuses on session persistence and defers window management to your os wm.
 
 ## ssh workflow
 
-Using `zmx` with `ssh` is a first-class citizen. Instead of `ssh`ing into your remote system with a single terminal and `n` tmux panes, you open `n` terminals and run `ssh` for all of them. This might sound tedious, but there are tools to make this a delightful workflow.
+Using `zmx` with `ssh` is a first-class citizen. Instead of using `ssh` to remote into your system with a single terminal and `n` tmux panes, you open `n` terminals and run `ssh` for all of them. This might sound tedious, but there are tools to make this a delightful workflow.
 
 First, create an `ssh` config entry for your remote dev server:
 
