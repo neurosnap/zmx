@@ -695,10 +695,12 @@ fn attach(daemon: *Daemon) !void {
         // Reset terminal modes on detach:
         // - Mouse: 1000=basic, 1002=button-event, 1003=any-event, 1006=SGR extended
         // - 2004=bracketed paste, 1004=focus events, 1049=alt screen
-        // - 25h=show cursor, 2J=clear screen, H=cursor home
+        // - 25h=show cursor
+        // NOTE: We intentionally do NOT clear screen or home cursor here because we dont
+        // want to corrupt any programs that rely on it including ghostty's session restore.
         const restore_seq = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l" ++
             "\x1b[?2004l\x1b[?1004l\x1b[?1049l" ++
-            "\x1b[?25h\x1b[2J\x1b[H";
+            "\x1b[?25h";
         _ = posix.write(posix.STDOUT_FILENO, restore_seq) catch {};
     }
 
@@ -718,7 +720,8 @@ fn attach(daemon: *Daemon) !void {
 
     _ = c.tcsetattr(posix.STDIN_FILENO, c.TCSANOW, &raw_termios);
 
-    // Clear screen and move cursor to home before attaching
+    // Clear screen before attaching. This provides a clean slate before
+    // the session restore.
     const clear_seq = "\x1b[2J\x1b[H";
     _ = try posix.write(posix.STDOUT_FILENO, clear_seq);
 
