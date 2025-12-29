@@ -2,7 +2,7 @@
 
 Use spec: https://common-changelog.org/
 
-## Unreleased
+## v0.2.0 - 2025-12-29
 
 ### Added
 
