@@ -98,17 +98,14 @@ function fish_prompt --description 'Write out the prompt'
 end
 ```
 
-### bash
+### bash and zsh
 
-todo.
+Depending on the shell, place this in either `.bashrc` or `.zshrc`:
 
-### zsh
-
-Place this in `.zshrc`, update current `$PROMPT/$PS1` to `BASE_PROMPT`
-
-```zsh
-BASE_PROMPT=$PS1/$PROMPT
-PROMPT="${ZMX_SESSION:+[$ZMX_SESSION]} $BASE_PROMPT"
+```bash
+if [[ -n $ZMX_SESSION ]]; then
+  export PS1="[$ZMX_SESSION] ${PS1}"
+fi
 ```
 
 ## philosophy
