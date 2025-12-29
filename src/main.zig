@@ -267,6 +267,16 @@ const Daemon = struct {
             client.has_pending_output = true;
         }
     }
+
+    pub fn handleRun(self: *Daemon, client: *Client, pty_fd: i32, payload: []const u8) !void {
+        if (payload.len > 0) {
+            _ = try posix.write(pty_fd, payload);
+        }
+        try ipc.appendMessage(self.alloc, &client.write_buf, .Ack, "");
+        client.has_pending_output = true;
+        self.has_had_client = true;
+        std.log.debug("run command len={d}", .{payload.len});
+    }
 };
 
 pub fn main() !void {
@@ -336,6 +346,31 @@ pub fn main() !void {
         daemon.socket_path = try getSocketPath(alloc, cfg.socket_dir, session_name);
         std.log.info("socket path={s}", .{daemon.socket_path});
         return attach(&daemon);
+    } else if (std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "r")) {
+        const session_name = args.next() orelse {
+            return error.SessionNameRequired;
+        };
+
+        var command_args: std.ArrayList([]const u8) = .empty;
+        defer command_args.deinit(alloc);
+        while (args.next()) |arg| {
+            try command_args.append(alloc, arg);
+        }
+
+        const clients = try std.ArrayList(*Client).initCapacity(alloc, 10);
+        var daemon = Daemon{
+            .running = true,
+            .cfg = &cfg,
+            .alloc = alloc,
+            .clients = clients,
+            .session_name = session_name,
+            .socket_path = undefined,
+            .pid = undefined,
+            .command = null,
+        };
+        daemon.socket_path = try getSocketPath(alloc, cfg.socket_dir, session_name);
+        std.log.info("socket path={s}", .{daemon.socket_path});
+        return run(&daemon, command_args.items);
     } else {
         return help();
     }
@@ -355,7 +390,8 @@ fn help() !void {
         \\Usage: zmx <command> [args]
         \\
         \\Commands:
-        \\  [a]ttach <name> [command...]  Create or attach to a session
+        \\  [a]ttach <name> [command...]  Attach to session, creating session if needed
+        \\  [r]un <name> [command...]     Send command without attaching, creating session if needed
         \\  [d]etach                      Detach all clients from current session (ctrl+\ for current client)
         \\  [l]ist                        List active sessions
         \\  [k]ill <name>                 Kill a session and all attached clients
@@ -569,11 +605,12 @@ fn history(cfg: *Cfg, session_name: []const u8) !void {
     }
 }
 
-fn attach(daemon: *Daemon) !void {
-    if (std.posix.getenv("ZMX_SESSION")) |_| {
-        return error.CannotAttachToSessionInSession;
-    }
+const EnsureSessionResult = struct {
+    created: bool,
+    is_daemon: bool,
+};
 
+fn ensureSession(daemon: *Daemon) !EnsureSessionResult {
     var dir = try std.fs.openDirAbsolute(daemon.cfg.socket_dir, .{});
     defer dir.close();
 
@@ -597,7 +634,7 @@ fn attach(daemon: *Daemon) !void {
         const server_sock_fd = try createSocket(daemon.socket_path);
 
         const pid = try posix.fork();
-        if (pid == 0) { // child
+        if (pid == 0) { // child (daemon)
             _ = try posix.setsid();
 
             log_system.deinit();
@@ -621,14 +658,25 @@ fn attach(daemon: *Daemon) !void {
                 };
             }
             try daemonLoop(daemon, server_sock_fd, pty_fd);
-            // Reap PTY child to prevent zombie
             _ = posix.waitpid(daemon.pid, 0);
             daemon.deinit();
-            return;
+            return .{ .created = true, .is_daemon = true };
         }
         posix.close(server_sock_fd);
         std.Thread.sleep(10 * std.time.ns_per_ms);
+        return .{ .created = true, .is_daemon = false };
     }
+
+    return .{ .created = false, .is_daemon = false };
+}
+
+fn attach(daemon: *Daemon) !void {
+    if (std.posix.getenv("ZMX_SESSION")) |_| {
+        return error.CannotAttachToSessionInSession;
+    }
+
+    const result = try ensureSession(daemon);
+    if (result.is_daemon) return;
 
     const client_sock = try sessionConnect(daemon.socket_path);
     std.log.info("attached session={s}", .{daemon.session_name});
@@ -675,6 +723,107 @@ fn attach(daemon: *Daemon) !void {
     _ = try posix.write(posix.STDOUT_FILENO, clear_seq);
 
     try clientLoop(daemon.cfg, client_sock);
+}
+
+fn run(daemon: *Daemon, command_args: [][]const u8) !void {
+    const alloc = daemon.alloc;
+    var buf: [4096]u8 = undefined;
+    var w = std.fs.File.stdout().writer(&buf);
+
+    const result = try ensureSession(daemon);
+    if (result.is_daemon) return;
+
+    if (result.created) {
+        try w.interface.print("session \"{s}\" created\n", .{daemon.session_name});
+        try w.interface.flush();
+    }
+
+    var cmd_to_send: ?[]const u8 = null;
+    var allocated_cmd: ?[]u8 = null;
+    defer if (allocated_cmd) |cmd| alloc.free(cmd);
+
+    if (command_args.len > 0) {
+        var total_len: usize = 0;
+        for (command_args) |arg| {
+            total_len += arg.len + 1;
+        }
+
+        const cmd_buf = try alloc.alloc(u8, total_len);
+        allocated_cmd = cmd_buf;
+
+        var offset: usize = 0;
+        for (command_args, 0..) |arg, i| {
+            @memcpy(cmd_buf[offset .. offset + arg.len], arg);
+            offset += arg.len;
+            if (i < command_args.len - 1) {
+                cmd_buf[offset] = ' ';
+            } else {
+                cmd_buf[offset] = '\n';
+            }
+            offset += 1;
+        }
+        cmd_to_send = cmd_buf;
+    } else {
+        const stdin_fd = posix.STDIN_FILENO;
+        if (!std.posix.isatty(stdin_fd)) {
+            var stdin_buf = try std.ArrayList(u8).initCapacity(alloc, 4096);
+            defer stdin_buf.deinit(alloc);
+
+            while (true) {
+                var tmp: [4096]u8 = undefined;
+                const n = posix.read(stdin_fd, &tmp) catch |err| {
+                    if (err == error.WouldBlock) break;
+                    return err;
+                };
+                if (n == 0) break;
+                try stdin_buf.appendSlice(alloc, tmp[0..n]);
+            }
+
+            if (stdin_buf.items.len > 0) {
+                const needs_newline = stdin_buf.items[stdin_buf.items.len - 1] != '\n';
+                if (needs_newline) {
+                    try stdin_buf.append(alloc, '\n');
+                }
+                cmd_to_send = try alloc.dupe(u8, stdin_buf.items);
+                allocated_cmd = @constCast(cmd_to_send.?);
+            }
+        }
+    }
+
+    if (cmd_to_send == null) {
+        return error.CommandRequired;
+    }
+
+    const probe_result = probeSession(alloc, daemon.socket_path) catch |err| {
+        std.log.err("session not ready: {s}", .{@errorName(err)});
+        return error.SessionNotReady;
+    };
+    defer posix.close(probe_result.fd);
+
+    try ipc.send(probe_result.fd, .Run, cmd_to_send.?);
+
+    var poll_fds = [_]posix.pollfd{.{ .fd = probe_result.fd, .events = posix.POLL.IN, .revents = 0 }};
+    const poll_result = posix.poll(&poll_fds, 5000) catch return error.PollFailed;
+    if (poll_result == 0) {
+        std.log.err("timeout waiting for ack", .{});
+        return error.Timeout;
+    }
+
+    var sb = try ipc.SocketBuffer.init(alloc);
+    defer sb.deinit();
+
+    const n = sb.read(probe_result.fd) catch return error.ReadFailed;
+    if (n == 0) return error.ConnectionClosed;
+
+    while (sb.next()) |msg| {
+        if (msg.header.tag == .Ack) {
+            try w.interface.print("command sent\n", .{});
+            try w.interface.flush();
+            return;
+        }
+    }
+
+    return error.NoAckReceived;
 }
 
 fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
@@ -976,7 +1125,8 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                         },
                         .Info => try daemon.handleInfo(client),
                         .History => try daemon.handleHistory(client, &term),
-                        .Output => {},
+                        .Run => try daemon.handleRun(client, pty_fd, msg.payload),
+                        .Output, .Ack => {},
                     }
                 }
             }

@@ -13,6 +13,8 @@ Reason for this tool: [You might not need `tmux`](https://bower.sh/you-might-not
 - Native terminal scrollback
 - Multiple clients can connect to the same session
 - Re-attaching to a session restores previous terminal state and output
+- Send commands to a session without attaching to it
+- Print scrollback history of a terminal session in plain text
 - Works on mac and linux
 - This project does **NOT** provide windows, tabs, or splits
 
@@ -52,7 +54,8 @@ zig build -Doptimize=ReleaseSafe --prefix ~/.local
 Usage: zmx <command> [args]
 
 Commands:
-  [a]ttach <name> [command...]  Create or attach to a session
+  [a]ttach <name> [command...]  Attach to session, creating session if needed
+  [r]un <name> [command...]     Send command without attaching, creating session if needed
   [d]etach                      Detach all clients from current session  (ctrl+\ for current client)
   [l]ist                        List active sessions
   [k]ill <name>                 Kill a session and all attached clients
@@ -65,9 +68,13 @@ Commands:
 
 ```bash
 zmx attach dev              # start a shell session
-zmx attach dev nvim .       # start nvim in a persistent session
+zmx a dev nvim .            # start nvim in a persistent session
 zmx attach build make -j8   # run a build, reattach to check progress
 zmx attach mux dvtm         # run a multiplexer inside zmx
+
+zmx run dev cat README.md   # run the command without attaching to the session
+zmx r dev cat CHANGELOG.md  # alias
+echo "ls -lah" | zmx r dev  # use stdin to run the command
 ```
 
 ## shell prompt
