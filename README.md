@@ -177,7 +177,7 @@ Each session gets its own unix socket file. The default location depends on your
 
 ## debugging
 
-We store global logs for cli commands in `/tmp/zmx-{uid}/logs/zmx.log`. We store session-specific logs in `/tmp/zmx-{uid}/logs/{session_name}.log`. These logs rotate to `.old` after 5MB.
+We store global logs for cli commands in `{socket_dir}/logs/zmx.log`. We store session-specific logs in `{socket_dir}/logs/{session_name}.log`. Right now they are enabled by default and cannot be disabled. The idea here is to help with initial development until we reach a stable state.
 
 ## a note on configuration
 
