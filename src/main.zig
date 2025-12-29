@@ -76,7 +76,7 @@ const Cfg = struct {
     max_scrollback: usize = 10_000_000,
 
     pub fn init(alloc: std.mem.Allocator) !Cfg {
-        const tmpdir = posix.getenv("TMPDIR") orelse "/tmp";
+        const tmpdir = std.mem.trimRight(u8, posix.getenv("TMPDIR") orelse "/tmp", "/");
         const uid = posix.getuid();
 
         const socket_dir: []const u8 = if (posix.getenv("ZMX_DIR")) |zmxdir|
