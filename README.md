@@ -46,7 +46,7 @@ zig build -Doptimize=ReleaseSafe --prefix ~/.local
 ## usage
 
 > [!IMPORTANT]
-> Press `ctrl+\` to detach from the session.
+> We recommend closing the terminal window to detach from the session but you can also press `ctrl+\` or run `zmx detach`.
 
 ```
 Usage: zmx <command> [args]
@@ -69,10 +69,6 @@ zmx attach dev nvim .       # start nvim in a persistent session
 zmx attach build make -j8   # run a build, reattach to check progress
 zmx attach mux dvtm         # run a multiplexer inside zmx
 ```
-
-### detach
-
-While we try our best to support detaching from the terminal session using multiple mechanisms (e.g. shortcut, detach command) we find ourselves simply closing terminal windows when we want to detach from a `zmx` session.  Whenever you attach to a `zmx` session we make sure that it stays alive so explicitly detaching feels unnecessary unless for some reason you need to reuse the same exact terminal window.
 
 ## shell prompt
 
