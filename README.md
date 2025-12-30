@@ -108,6 +108,19 @@ if [[ -n $ZMX_SESSION ]]; then
 fi
 ```
 
+### oh-my-posh
+
+[oh-my-posh](https://ohmyposh.dev) is a popular shell themeing and prompt engine. This code will display an icon and session name as part of the prompt if (and only if) you have zmx active:
+
+```
+[[blocks.segments]]
+   template = '{{ if .Env.ZMX_SESSION }} {{ .Env.ZMX_SESSION }}{{ end }}'
+   foreground = 'p:orange'
+   background = 'p:black'
+   type = 'text'
+   style = 'plain'
+```
+
 ## philosophy
 
 The entire argument for `zmx` instead of something like `tmux` that has windows, panes, splits, etc. is that job should be handled by your os window manager. By using something like `tmux` you now have redundant functionality in your dev stack: a window manager for your os and a window manager for your terminal. Further, in order to use modern terminal features, your terminal emulator **and** `tmux` need to have support for them. This holds back the terminal enthusiast community and feature development.
