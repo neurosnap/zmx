@@ -188,6 +188,11 @@ We are evaluating what should be configurable and what should not. Every configu
 - Write programs that compose with other smol tools.
 - Write programs that can be finished.
 
+## known issues
+
+- Terminal state rehydration with nested `zmx` sessions through SSH: host A `zmx` -> SSH -> host B `zmx`
+  - Specifically cursor position gets corrupted
+
 ## impl
 
 - The `daemon` and client processes communicate via a unix socket
