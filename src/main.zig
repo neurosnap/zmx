@@ -5,6 +5,7 @@ const build_options = @import("build_options");
 const ghostty_vt = @import("ghostty-vt");
 const ipc = @import("ipc.zig");
 const log = @import("log.zig");
+const completions = @import("completions.zig");
 
 pub const version = build_options.version;
 pub const git_sha = build_options.git_sha;
@@ -349,6 +350,10 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, cmd, "list") or std.mem.eql(u8, cmd, "l")) {
         const short = if (args.next()) |arg| std.mem.eql(u8, arg, "--short") else false;
         return list(&cfg, short);
+    } else if (std.mem.eql(u8, cmd, "completions") or std.mem.eql(u8, cmd, "c")) {
+        const arg = args.next() orelse return;
+        const shell = completions.Shell.fromString(arg) orelse return;
+        return printCompletions(shell);
     } else if (std.mem.eql(u8, cmd, "detach") or std.mem.eql(u8, cmd, "d")) {
         return detachAll(&cfg);
     } else if (std.mem.eql(u8, cmd, "kill") or std.mem.eql(u8, cmd, "k")) {
@@ -452,6 +457,14 @@ fn printVersion() !void {
     try w.interface.flush();
 }
 
+fn printCompletions(shell: completions.Shell) !void {
+    const script = shell.getCompletionScript();
+    var buf: [8192]u8 = undefined;
+    var w = std.fs.File.stdout().writer(&buf);
+    try w.interface.print("{s}\n", .{script});
+    try w.interface.flush();
+}
+
 fn help() !void {
     const help_text =
         \\zmx - session persistence for terminal processes
@@ -463,6 +476,7 @@ fn help() !void {
         \\  [r]un <name> [command...]     Send command without attaching, creating session if needed
         \\  [d]etach                      Detach all clients from current session (ctrl+\ for current client)
         \\  [l]ist [--short]              List active sessions
+        \\  [c]ompletions <shell>         Completion scripts for shell integration
         \\  [k]ill <name>                 Kill a session and all attached clients
         \\  [hi]story <name> [--vt|--html] Output session scrollback (--vt or --html for escape sequences)
         \\  [v]ersion                     Show version information
