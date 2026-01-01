@@ -9,6 +9,7 @@ Use spec: https://common-changelog.org/
 - New flag `--vt` for `zmx [hi]story` which prints raw ansi escape codes for terminal session
 - New flag `--html` for `zmx [hi]story` which prints html representation of terminal session
 - New list flag `zmx [l]ist [--list]` that lists all session names with no extra information
+- New command `zmx [c]ompletions <shell>` that outputs auto-completion scripts for a given shell
 
 ### Fixed
 
