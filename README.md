@@ -57,7 +57,7 @@ Commands:
   [a]ttach <name> [command...]   Attach to session, creating session if needed
   [r]un <name> [command...]      Send command without attaching, creating session if needed
   [d]etach                       Detach all clients from current session  (ctrl+\ for current client)
-  [l]ist                         List active sessions
+  [l]ist [--short]               List active sessions
   [k]ill <name>                  Kill a session and all attached clients
   [hi]story <name> [--vt|--html] Output session scrollback (--vt or --html for escape sequences)
   [v]ersion                      Show version information
