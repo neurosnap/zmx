@@ -137,6 +137,39 @@ POWERLEVEL9K_RIGHT_PROMPT_ELEMENTS+=my_zmx_session
    style = 'plain'
 ```
 
+## shell completion
+
+Shell auto-completion for `zmx` commands and session names can be enabled using the `completions` subcommand. Once configured, you'll get auto-complete for both local `zmx` commands and sessions:
+
+```bash
+ssh remote-server zmx attach session-na<TAB>
+# <- auto-complete suggestions appear here
+```
+
+### zsh
+
+Add this to your `.zshrc` file:
+
+```zsh
+eval "$(zmx completions zsh)"
+```
+
+### bash
+
+Add this to your `.bashrc` file:
+
+```bash
+eval "$(zmx completions bash)"
+````
+
+### fish
+
+Add this to your `.config/fish/config.fish` file:
+
+```fish
+zmx completions fish | source
+````
+
 ## philosophy
 
 The entire argument for `zmx` instead of something like `tmux` that has windows, panes, splits, etc. is that job should be handled by your os window manager. By using something like `tmux` you now have redundant functionality in your dev stack: a window manager for your os and a window manager for your terminal. Further, in order to use modern terminal features, your terminal emulator **and** `tmux` need to have support for them. This holds back the terminal enthusiast community and feature development.
