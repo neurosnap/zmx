@@ -47,6 +47,8 @@ const bash_completions =
     \\    list)
     \\      COMPREPLY=($(compgen -W "--short" -- "$cur"))
     \\      ;;
+    \\    *)
+    \\      ;;
     \\  esac
     \\}
     \\

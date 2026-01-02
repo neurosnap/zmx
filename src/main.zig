@@ -476,7 +476,7 @@ fn help() !void {
         \\  [r]un <name> [command...]     Send command without attaching, creating session if needed
         \\  [d]etach                      Detach all clients from current session (ctrl+\ for current client)
         \\  [l]ist [--short]              List active sessions
-        \\  [c]ompletions <shell>         Completion scripts for shell integration
+        \\  [c]ompletions <shell>         Completion scripts for shell integration (bash, zsh, or fish)
         \\  [k]ill <name>                 Kill a session and all attached clients
         \\  [hi]story <name> [--vt|--html] Output session scrollback (--vt or --html for escape sequences)
         \\  [v]ersion                     Show version information
