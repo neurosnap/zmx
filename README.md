@@ -108,6 +108,21 @@ if [[ -n $ZMX_SESSION ]]; then
 fi
 ```
 
+### powerlevel10k zsh theme
+
+[powerlevel10k](https://github.com/romkatv/powerlevel10k) is a theme for zsh that overwrites the default prompt statusline.
+
+Place this in `.zshrc`:
+
+```bash
+function prompt_my_zmx_session() {
+  if [[ -n $ZMX_SESSION ]]; then
+    p10k segment -b '%k' -f '%f' -t "[$ZMX_SESSION]"
+  fi
+}
+POWERLEVEL9K_RIGHT_PROMPT_ELEMENTS+=my_zmx_session
+```
+
 ### oh-my-posh
 
 [oh-my-posh](https://ohmyposh.dev) is a popular shell themeing and prompt engine. This code will display an icon and session name as part of the prompt if (and only if) you have zmx active:
