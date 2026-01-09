@@ -1195,7 +1195,10 @@ fn spawnPty(daemon: *Daemon) !c_int {
             std.posix.exit(1);
         } else {
             const shell = std.posix.getenv("SHELL") orelse "/bin/sh";
-            const argv = [_:null]?[*:0]const u8{ shell, null };
+            // Use "-shellname" as argv[0] to signal login shell (traditional method)
+            var buf: [64]u8 = undefined;
+            const login_shell = try std.fmt.bufPrintZ(&buf, "-{s}", .{std.fs.path.basename(shell)});
+            const argv = [_:null]?[*:0]const u8{ login_shell, null };
             const err = std.posix.execveZ(shell, &argv, std.c.environ);
             std.log.err("execve failed: err={s}", .{@errorName(err)});
             std.posix.exit(1);
