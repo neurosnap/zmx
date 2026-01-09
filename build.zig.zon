@@ -33,8 +33,8 @@
     // internet connectivity.
     .dependencies = .{
         .ghostty = .{
-            .url = "git+https://github.com/neurosnap/ghostty.git#ea03c5c8a20ccb508f62d9da8ea54fb2d9a34729",
-            .hash = "ghostty-1.3.0-dev-5UdBCz0NPgTNWCHGZgknwhsxy46vUyNFakYSU9kwkUQO",
+            .url = "git+https://github.com/ghostty-org/ghostty.git?ref=HEAD#a692cb9e5fabfd337827cc99cd62e3ea90ab9c92",
+            .hash = "ghostty-1.3.0-dev-5UdBC6t6RATdaEoNBRRIcMy7CBVNE0ih4NsX7btHlQek",
         },
     },
     .paths = .{
