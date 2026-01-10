@@ -2,6 +2,18 @@
 
 Use spec: https://common-changelog.org/
 
+## Staged
+
+### Added
+
+- New flag `--vt` for `zmx [hi]story` which prints raw ansi escape codes for terminal session
+- New flag `--html` for `zmx [hi]story` which prints html representation of terminal session
+
+### Fixed
+
+- On restore, background colors for whitespace now properly filled
+- Spawn login shell instead of normal shell
+
 ## v0.2.0 - 2025-12-29
 
 ### Added
