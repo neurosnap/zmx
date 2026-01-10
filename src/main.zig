@@ -257,8 +257,12 @@ const Daemon = struct {
         client.has_pending_output = true;
     }
 
-    pub fn handleHistory(self: *Daemon, client: *Client, term: *ghostty_vt.Terminal) !void {
-        if (serializeTerminalPlainText(self.alloc, term)) |output| {
+    pub fn handleHistory(self: *Daemon, client: *Client, term: *ghostty_vt.Terminal, payload: []const u8) !void {
+        const format: HistoryFormat = if (payload.len > 0)
+            @enumFromInt(payload[0])
+        else
+            .plain;
+        if (serializeTerminal(self.alloc, term, format)) |output| {
             defer self.alloc.free(output);
             try ipc.appendMessage(self.alloc, &client.write_buf, .History, output);
             client.has_pending_output = true;
@@ -313,10 +317,21 @@ pub fn main() !void {
         };
         return kill(&cfg, session_name);
     } else if (std.mem.eql(u8, cmd, "history") or std.mem.eql(u8, cmd, "hi")) {
-        const session_name = args.next() orelse {
+        var session_name: ?[]const u8 = null;
+        var format: HistoryFormat = .plain;
+        while (args.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--vt")) {
+                format = .vt;
+            } else if (std.mem.eql(u8, arg, "--html")) {
+                format = .html;
+            } else if (session_name == null) {
+                session_name = arg;
+            }
+        }
+        if (session_name == null) {
             return error.SessionNameRequired;
-        };
-        return history(&cfg, session_name);
+        }
+        return history(&cfg, session_name.?, format);
     } else if (std.mem.eql(u8, cmd, "attach") or std.mem.eql(u8, cmd, "a")) {
         const session_name = args.next() orelse {
             return error.SessionNameRequired;
@@ -395,7 +410,7 @@ fn help() !void {
         \\  [d]etach                      Detach all clients from current session (ctrl+\ for current client)
         \\  [l]ist                        List active sessions
         \\  [k]ill <name>                 Kill a session and all attached clients
-        \\  [hi]story <name>              Output session scrollback as plain text
+        \\  [hi]story <name> [--vt|--html] Output session scrollback (--vt or --html for escape sequences)
         \\  [v]ersion                     Show version information
         \\  [h]elp                        Show this help message
         \\
@@ -554,7 +569,13 @@ fn kill(cfg: *Cfg, session_name: []const u8) !void {
     try w.interface.flush();
 }
 
-fn history(cfg: *Cfg, session_name: []const u8) !void {
+const HistoryFormat = enum(u8) {
+    plain = 0,
+    vt = 1,
+    html = 2,
+};
+
+fn history(cfg: *Cfg, session_name: []const u8, format: HistoryFormat) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
@@ -577,7 +598,8 @@ fn history(cfg: *Cfg, session_name: []const u8) !void {
     };
     defer posix.close(result.fd);
 
-    ipc.send(result.fd, .History, "") catch |err| switch (err) {
+    const format_byte = [_]u8{@intFromEnum(format)};
+    ipc.send(result.fd, .History, &format_byte) catch |err| switch (err) {
         error.BrokenPipe, error.ConnectionResetByPeer => return,
         else => return err,
     };
@@ -1127,7 +1149,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                             break :clients_loop;
                         },
                         .Info => try daemon.handleInfo(client),
-                        .History => try daemon.handleHistory(client, &term),
+                        .History => try daemon.handleHistory(client, &term, msg.payload),
                         .Run => try daemon.handleRun(client, pty_fd, msg.payload),
                         .Output, .Ack => {},
                     }
@@ -1374,16 +1396,33 @@ fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Terminal) 
     };
 }
 
-fn serializeTerminalPlainText(alloc: std.mem.Allocator, term: *ghostty_vt.Terminal) ?[]const u8 {
+fn serializeTerminal(alloc: std.mem.Allocator, term: *ghostty_vt.Terminal, format: HistoryFormat) ?[]const u8 {
     var builder: std.Io.Writer.Allocating = .init(alloc);
     defer builder.deinit();
 
-    var term_formatter = ghostty_vt.formatter.TerminalFormatter.init(term, .plain);
+    const opts: ghostty_vt.formatter.Options = switch (format) {
+        .plain => .plain,
+        .vt => .vt,
+        .html => .html,
+    };
+    var term_formatter = ghostty_vt.formatter.TerminalFormatter.init(term, opts);
     term_formatter.content = .{ .selection = null };
-    term_formatter.extra = .none;
+    term_formatter.extra = switch (format) {
+        .plain => .none,
+        .vt => .{
+            .palette = false,
+            .modes = true,
+            .scrolling_region = true,
+            .tabstops = false,
+            .pwd = true,
+            .keyboard = true,
+            .screen = .all,
+        },
+        .html => .styles,
+    };
 
     term_formatter.format(&builder.writer) catch |err| {
-        std.log.warn("failed to format terminal plain text err={s}", .{@errorName(err)});
+        std.log.warn("failed to format terminal err={s}", .{@errorName(err)});
         return null;
     };
 
@@ -1391,7 +1430,9 @@ fn serializeTerminalPlainText(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
     if (output.len == 0) return null;
 
     return alloc.dupe(u8, output) catch |err| {
-        std.log.warn("failed to allocate terminal plain text err={s}", .{@errorName(err)});
+        std.log.warn("failed to allocate terminal output err={s}", .{@errorName(err)});
         return null;
     };
 }
+
+
