@@ -1434,5 +1434,3 @@ fn serializeTerminal(alloc: std.mem.Allocator, term: *ghostty_vt.Terminal, forma
         return null;
     };
 }
-
-
