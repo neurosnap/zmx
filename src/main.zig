@@ -55,6 +55,7 @@ else
     c.forkpty;
 
 var sigwinch_received: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+var sigterm_received: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
 const Client = struct {
     alloc: std.mem.Allocator,
@@ -241,7 +242,8 @@ const Daemon = struct {
 
     pub fn handleKill(self: *Daemon) void {
         std.log.info("kill received session={s}", .{self.session_name});
-        posix.kill(self.pid, posix.SIG.TERM) catch |err| {
+        // negative pid means kill process and children
+        posix.kill(-self.pid, posix.SIG.TERM) catch |err| {
             std.log.warn("failed to send SIGTERM to pty child err={s}", .{@errorName(err)});
         };
         self.shutdown();
@@ -680,6 +682,7 @@ fn ensureSession(daemon: *Daemon) !EnsureSessionResult {
                 };
             }
             try daemonLoop(daemon, server_sock_fd, pty_fd);
+            daemon.handleKill();
             _ = posix.waitpid(daemon.pid, 0);
             daemon.deinit();
             return .{ .created = true, .is_daemon = true };
@@ -1007,7 +1010,7 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
 
 fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
     std.log.info("daemon started session={s} pty_fd={d}", .{ daemon.session_name, pty_fd });
-    var should_exit = false;
+    setupSigtermHandler();
     var poll_fds = try std.ArrayList(posix.pollfd).initCapacity(daemon.alloc, 8);
     defer poll_fds.deinit(daemon.alloc);
 
@@ -1021,7 +1024,12 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
     var vt_stream = term.vtStream();
     defer vt_stream.deinit();
 
-    while (!should_exit and daemon.running) {
+    daemon_loop: while (daemon.running) {
+        if (sigterm_received.swap(false, .acq_rel)) {
+            std.log.info("SIGTERM received, shutting down gracefully session={s}", .{daemon.session_name});
+            break :daemon_loop;
+        }
+
         poll_fds.clearRetainingCapacity();
 
         try poll_fds.append(daemon.alloc, .{
@@ -1054,7 +1062,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
 
         if (poll_fds.items[0].revents & (posix.POLL.ERR | posix.POLL.HUP | posix.POLL.NVAL) != 0) {
             std.log.err("server socket error revents={d}", .{poll_fds.items[0].revents});
-            should_exit = true;
+            break :daemon_loop;
         } else if (poll_fds.items[0].revents & posix.POLL.IN != 0) {
             const client_fd = try posix.accept(server_sock_fd, null, null, posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC);
             const client = try daemon.alloc.create(Client);
@@ -1081,7 +1089,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                 if (n == 0) {
                     // EOF: Shell exited
                     std.log.info("shell exited pty_fd={d}", .{pty_fd});
-                    should_exit = true;
+                    break :daemon_loop;
                 } else {
                     // Feed PTY output to terminal emulator for state tracking
                     try vt_stream.nextSlice(buf[0..n]);
@@ -1119,14 +1127,14 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                     if (err == error.WouldBlock) continue;
                     std.log.debug("client read err={s} fd={d}", .{ @errorName(err), client.socket_fd });
                     const last = daemon.closeClient(client, i, false);
-                    if (last) should_exit = true;
+                    if (last) break :daemon_loop;
                     continue;
                 };
 
                 if (n == 0) {
                     // Client closed connection
                     const last = daemon.closeClient(client, i, false);
-                    if (last) should_exit = true;
+                    if (last) break :daemon_loop;
                     continue;
                 }
 
@@ -1145,8 +1153,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                         },
                         .Kill => {
                             daemon.handleKill();
-                            should_exit = true;
-                            break :clients_loop;
+                            break :daemon_loop;
                         },
                         .Info => try daemon.handleInfo(client),
                         .History => try daemon.handleHistory(client, &term, msg.payload),
@@ -1162,7 +1169,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                     if (err == error.WouldBlock) break :blk 0;
                     // Error on write, close client
                     const last = daemon.closeClient(client, i, false);
-                    if (last) should_exit = true;
+                    if (last) break :daemon_loop;
                     continue;
                 };
 
@@ -1177,7 +1184,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
 
             if (revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
                 const last = daemon.closeClient(client, i, false);
-                if (last) should_exit = true;
+                if (last) break :daemon_loop;
             }
         }
     }
@@ -1334,6 +1341,10 @@ fn handleSigwinch(_: i32, _: *const posix.siginfo_t, _: ?*anyopaque) callconv(.c
     sigwinch_received.store(true, .release);
 }
 
+fn handleSigterm(_: i32, _: *const posix.siginfo_t, _: ?*anyopaque) callconv(.c) void {
+    sigterm_received.store(true, .release);
+}
+
 fn setupSigwinchHandler() void {
     const act: posix.Sigaction = .{
         .handler = .{ .sigaction = handleSigwinch },
@@ -1341,6 +1352,15 @@ fn setupSigwinchHandler() void {
         .flags = posix.SA.SIGINFO,
     };
     posix.sigaction(posix.SIG.WINCH, &act, null);
+}
+
+fn setupSigtermHandler() void {
+    const act: posix.Sigaction = .{
+        .handler = .{ .sigaction = handleSigterm },
+        .mask = posix.sigemptyset(),
+        .flags = posix.SA.SIGINFO,
+    };
+    posix.sigaction(posix.SIG.TERM, &act, null);
 }
 
 fn getTerminalSize(fd: i32) ipc.Resize {
