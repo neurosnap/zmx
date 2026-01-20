@@ -241,8 +241,8 @@ const Daemon = struct {
 
     pub fn handleKill(self: *Daemon) void {
         std.log.info("kill received session={s}", .{self.session_name});
-        posix.kill(self.pid, posix.SIG.TERM) catch |err| {
-            std.log.warn("failed to send SIGTERM to pty child err={s}", .{@errorName(err)});
+        posix.kill(self.pid, posix.SIG.HUP) catch |err| {
+            std.log.warn("failed to send SIGHUP to pty child err={s}", .{@errorName(err)});
         };
         self.shutdown();
     }
