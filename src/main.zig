@@ -242,11 +242,18 @@ const Daemon = struct {
 
     pub fn handleKill(self: *Daemon) void {
         std.log.info("kill received session={s}", .{self.session_name});
-        // negative pid means kill process and children
-        posix.kill(-self.pid, posix.SIG.TERM) catch |err| {
-            std.log.warn("failed to send SIGTERM to pty child err={s}", .{@errorName(err)});
-        };
         self.shutdown();
+        // gracefully shutdown shell processes, shells tend to ignore SIGTERM so we send SIGHUP instead
+        //   https://www.gnu.org/software/bash/manual/html_node/Signals.html
+        // negative pid means kill process and children
+        std.log.info("sending SIGHUP session={s} pid={d}", .{ self.session_name, self.pid });
+        posix.kill(-self.pid, posix.SIG.HUP) catch |err| {
+            std.log.warn("failed to send SIGHUP to pty child err={s}", .{@errorName(err)});
+        };
+        std.Thread.sleep(500 * std.time.ns_per_ms);
+        posix.kill(-self.pid, posix.SIG.KILL) catch |err| {
+            std.log.warn("failed to send SIGKILL to pty child err={s}", .{@errorName(err)});
+        };
     }
 
     pub fn handleInfo(self: *Daemon, client: *Client) !void {
@@ -1152,7 +1159,6 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                             break :clients_loop;
                         },
                         .Kill => {
-                            daemon.handleKill();
                             break :daemon_loop;
                         },
                         .Info => try daemon.handleInfo(client),
