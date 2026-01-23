@@ -160,15 +160,17 @@ Add this to your `.bashrc` file:
 
 ```bash
 eval "$(zmx completions bash)"
-````
+```
 
 ### fish
 
 Add this to your `.config/fish/config.fish` file:
 
 ```fish
-zmx completions fish | source
-````
+if type -q zmx
+  zmx completions fish | source
+end
+```
 
 ## philosophy
 

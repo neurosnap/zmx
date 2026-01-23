@@ -10,11 +10,14 @@ Use spec: https://common-changelog.org/
 - New flag `--html` for `zmx [hi]story` which prints html representation of terminal session
 - New list flag `zmx [l]ist [--list]` that lists all session names with no extra information
 - New command `zmx [c]ompletions <shell>` that outputs auto-completion scripts for a given shell
+- List command `zmx list` now shows `started_at` showing working directory when creating session
+- List command `zmx list` now shows `cmd` showing command provided when creating session
 
 ### Fixed
 
 - On restore, background colors for whitespace now properly filled
 - Spawn login shell instead of normal shell
+- Properly cleanup processes (parent and children) during `zmx kill` or SIGTERM
 
 ## v0.2.0 - 2025-12-29
 
