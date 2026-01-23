@@ -146,20 +146,24 @@ ssh remote-server zmx attach session-na<TAB>
 # <- auto-complete suggestions appear here
 ```
 
-### zsh
-
-Add this to your `.zshrc` file:
-
-```zsh
-eval "$(zmx completions zsh)"
-```
-
 ### bash
 
 Add this to your `.bashrc` file:
 
 ```bash
-eval "$(zmx completions bash)"
+if command -v zmx &> /dev/null; then
+  eval "$(zmx completions bash)"
+fi
+```
+
+### zsh
+
+Add this to your `.zshrc` file:
+
+```zsh
+if command -v zmx &> /dev/null; then
+  eval "$(zmx completions zsh)"
+fi
 ```
 
 ### fish
