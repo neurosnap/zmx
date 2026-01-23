@@ -128,6 +128,7 @@ const Daemon = struct {
     running: bool,
     pid: i32,
     command: ?[]const []const u8 = null,
+    cwd: []const u8 = "",
     has_pty_output: bool = false,
     has_had_client: bool = false,
 
@@ -258,9 +259,37 @@ const Daemon = struct {
 
     pub fn handleInfo(self: *Daemon, client: *Client) !void {
         const clients_len = self.clients.items.len - 1;
+
+        // Build command string from args
+        var cmd_buf: [ipc.MAX_CMD_LEN]u8 = undefined;
+        var cmd_len: u16 = 0;
+        if (self.command) |args| {
+            for (args, 0..) |arg, i| {
+                if (i > 0) {
+                    if (cmd_len < ipc.MAX_CMD_LEN) {
+                        cmd_buf[cmd_len] = ' ';
+                        cmd_len += 1;
+                    }
+                }
+                const remaining = ipc.MAX_CMD_LEN - cmd_len;
+                const copy_len: u16 = @intCast(@min(arg.len, remaining));
+                @memcpy(cmd_buf[cmd_len..][0..copy_len], arg[0..copy_len]);
+                cmd_len += copy_len;
+            }
+        }
+
+        // Copy cwd
+        var cwd_buf: [ipc.MAX_CWD_LEN]u8 = undefined;
+        const cwd_len: u16 = @intCast(@min(self.cwd.len, ipc.MAX_CWD_LEN));
+        @memcpy(cwd_buf[0..cwd_len], self.cwd[0..cwd_len]);
+
         const info = ipc.Info{
             .clients_len = clients_len,
             .pid = self.pid,
+            .cmd_len = cmd_len,
+            .cwd_len = cwd_len,
+            .cmd = cmd_buf,
+            .cwd = cwd_buf,
         };
         try ipc.appendMessage(self.alloc, &client.write_buf, .Info, std.mem.asBytes(&info));
         client.has_pending_output = true;
@@ -357,6 +386,10 @@ pub fn main() !void {
         if (command_args.items.len > 0) {
             command = command_args.items;
         }
+
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd = std.posix.getcwd(&cwd_buf) catch "";
+
         var daemon = Daemon{
             .running = true,
             .cfg = &cfg,
@@ -366,6 +399,7 @@ pub fn main() !void {
             .socket_path = undefined,
             .pid = undefined,
             .command = command,
+            .cwd = cwd,
         };
         daemon.socket_path = try getSocketPath(alloc, cfg.socket_dir, session_name);
         std.log.info("socket path={s}", .{daemon.socket_path});
@@ -382,6 +416,10 @@ pub fn main() !void {
         }
 
         const clients = try std.ArrayList(*Client).initCapacity(alloc, 10);
+
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd = std.posix.getcwd(&cwd_buf) catch "";
+
         var daemon = Daemon{
             .running = true,
             .cfg = &cfg,
@@ -391,6 +429,7 @@ pub fn main() !void {
             .socket_path = undefined,
             .pid = undefined,
             .command = null,
+            .cwd = cwd,
         };
         daemon.socket_path = try getSocketPath(alloc, cfg.socket_dir, session_name);
         std.log.info("socket path={s}", .{daemon.socket_path});
@@ -436,6 +475,8 @@ const SessionEntry = struct {
     clients_len: ?usize,
     is_error: bool,
     error_name: ?[]const u8,
+    cmd: ?[]const u8 = null,
+    cwd: ?[]const u8 = null,
 
     fn lessThan(_: void, a: SessionEntry, b: SessionEntry) bool {
         return std.mem.order(u8, a.name, b.name) == .lt;
@@ -457,6 +498,8 @@ fn list(cfg: *Cfg) !void {
     defer {
         for (sessions.items) |session| {
             alloc.free(session.name);
+            if (session.cmd) |cmd| alloc.free(cmd);
+            if (session.cwd) |cwd| alloc.free(cwd);
         }
         sessions.deinit(alloc);
     }
@@ -483,12 +526,24 @@ fn list(cfg: *Cfg) !void {
             };
             posix.close(result.fd);
 
+            // Extract cmd and cwd from the fixed-size arrays
+            const cmd: ?[]const u8 = if (result.info.cmd_len > 0)
+                alloc.dupe(u8, result.info.cmd[0..result.info.cmd_len]) catch null
+            else
+                null;
+            const cwd: ?[]const u8 = if (result.info.cwd_len > 0)
+                alloc.dupe(u8, result.info.cwd[0..result.info.cwd_len]) catch null
+            else
+                null;
+
             try sessions.append(alloc, .{
                 .name = name,
                 .pid = result.info.pid,
                 .clients_len = result.info.clients_len,
                 .is_error = false,
                 .error_name = null,
+                .cmd = cmd,
+                .cwd = cwd,
             });
         }
     }
@@ -505,7 +560,14 @@ fn list(cfg: *Cfg) !void {
         if (session.is_error) {
             try w.interface.print("session_name={s}\tstatus={s}\t(cleaning up)\n", .{ session.name, session.error_name.? });
         } else {
-            try w.interface.print("session_name={s}\tpid={d}\tclients={d}\n", .{ session.name, session.pid.?, session.clients_len.? });
+            try w.interface.print("session_name={s}\tpid={d}\tclients={d}", .{ session.name, session.pid.?, session.clients_len.? });
+            if (session.cwd) |cwd| {
+                try w.interface.print("\tstarted_in={s}", .{cwd});
+            }
+            if (session.cmd) |cmd| {
+                try w.interface.print("\tcmd={s}", .{cmd});
+            }
+            try w.interface.print("\n", .{});
         }
         try w.interface.flush();
     }

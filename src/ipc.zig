@@ -25,9 +25,16 @@ pub const Resize = packed struct {
     cols: u16,
 };
 
-pub const Info = packed struct {
+pub const MAX_CMD_LEN = 256;
+pub const MAX_CWD_LEN = 256;
+
+pub const Info = extern struct {
     clients_len: usize,
     pid: i32,
+    cmd_len: u16,
+    cwd_len: u16,
+    cmd: [MAX_CMD_LEN]u8,
+    cwd: [MAX_CWD_LEN]u8,
 };
 
 pub fn expectedLength(data: []const u8) ?usize {
