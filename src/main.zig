@@ -7,6 +7,7 @@ const ipc = @import("ipc.zig");
 const log = @import("log.zig");
 
 pub const version = build_options.version;
+pub const git_sha = build_options.git_sha;
 pub const ghostty_version = build_options.ghostty_version;
 
 var log_system = log.LogSystem{};
@@ -442,7 +443,11 @@ pub fn main() !void {
 fn printVersion() !void {
     var buf: [256]u8 = undefined;
     var w = std.fs.File.stdout().writer(&buf);
-    try w.interface.print("zmx {s}\nghostty-vt {s}\n", .{ version, ghostty_version });
+    var ver = version;
+    if (builtin.mode == .Debug) {
+        ver = git_sha;
+    }
+    try w.interface.print("zmx {s}\nghostty-vt {s}\n", .{ ver, ghostty_version });
     try w.interface.flush();
 }
 

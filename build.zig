@@ -19,8 +19,16 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     const test_step = b.step("test", "Run unit tests");
 
+    var code: u8 = 0;
+    const git_sha = std.mem.trim(u8, b.runAllowFail(
+        &.{ "git", "rev-parse", "--short", "HEAD" },
+        &code,
+        .Inherit,
+    ) catch "unknown", "\n");
+
     const options = b.addOptions();
     options.addOption([]const u8, "version", version);
+    options.addOption([]const u8, "git_sha", git_sha);
     options.addOption([]const u8, "ghostty_version", @import("build.zig.zon").dependencies.ghostty.hash);
 
     const exe_mod = b.createModule(.{
