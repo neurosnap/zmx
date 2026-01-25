@@ -503,10 +503,56 @@ const SessionEntry = struct {
     }
 };
 
+const current_arrow = "→";
+
+/// Formats a session entry for list output (only the name when `short` is
+/// true), adding a prefix to indicate the current session, if there is one.
+fn writeSessionLine(writer: *std.Io.Writer, session: SessionEntry, short: bool, current_session: ?[]const u8) !void {
+    const prefix = if (current_session) |current|
+        if (std.mem.eql(u8, current, session.name)) current_arrow ++ " " else "  "
+    else
+        "";
+
+    if (short) {
+        if (session.is_error) return;
+        try writer.print("{s}{s}\n", .{ prefix, session.name });
+        return;
+    }
+
+    if (session.is_error) {
+        try writer.print("{s}session_name={s}\tstatus={s}\t(cleaning up)\n", .{
+            prefix,
+            session.name,
+            session.error_name.?,
+        });
+        return;
+    }
+
+    try writer.print("{s}session_name={s}\tpid={d}\tclients={d}", .{
+        prefix,
+        session.name,
+        session.pid.?,
+        session.clients_len.?,
+    });
+    if (session.cwd) |cwd| {
+        try writer.print("\tstarted_in={s}", .{cwd});
+    }
+    if (session.cmd) |cmd| {
+        try writer.print("\tcmd={s}", .{cmd});
+    }
+    try writer.print("\n", .{});
+}
+
 fn list(cfg: *Cfg, short: bool) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
+
+    const current_session = std.process.getEnvVarOwned(alloc, "ZMX_SESSION") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => null,
+        else => return err,
+    };
+    defer if (current_session) |name| alloc.free(name);
 
     var dir = try std.fs.openDirAbsolute(cfg.socket_dir, .{ .iterate = true });
     defer dir.close();
@@ -578,21 +624,7 @@ fn list(cfg: *Cfg, short: bool) !void {
     std.mem.sort(SessionEntry, sessions.items, {}, SessionEntry.lessThan);
 
     for (sessions.items) |session| {
-        if (short) {
-            if (session.is_error) continue;
-            try w.interface.print("{s}\n", .{session.name});
-        } else if (session.is_error) {
-            try w.interface.print("session_name={s}\tstatus={s}\t(cleaning up)\n", .{ session.name, session.error_name.? });
-        } else {
-            try w.interface.print("session_name={s}\tpid={d}\tclients={d}", .{ session.name, session.pid.?, session.clients_len.? });
-            if (session.cwd) |cwd| {
-                try w.interface.print("\tstarted_in={s}", .{cwd});
-            }
-            if (session.cmd) |cmd| {
-                try w.interface.print("\tcmd={s}", .{cmd});
-            }
-            try w.interface.print("\n", .{});
-        }
+        try writeSessionLine(&w.interface, session, short, current_session);
         try w.interface.flush();
     }
 }
@@ -1476,6 +1508,72 @@ test "isKittyCtrlBackslash" {
     try std.testing.expect(!isKittyCtrlBackslash("\x1b[92;5:3u"));
     try std.testing.expect(!isKittyCtrlBackslash("\x1b[92;1u"));
     try std.testing.expect(!isKittyCtrlBackslash("garbage"));
+}
+
+test "writeSessionLine formats output for current session and short output" {
+    const Case = struct {
+        session: SessionEntry,
+        short: bool,
+        current_session: ?[]const u8,
+        expected: []const u8,
+    };
+
+    const session = SessionEntry{
+        .name = "dev",
+        .pid = 123,
+        .clients_len = 2,
+        .is_error = false,
+        .error_name = null,
+        .cmd = null,
+        .cwd = null,
+    };
+
+    const cases = [_]Case{
+        .{
+            .session = session,
+            .short = false,
+            .current_session = "dev",
+            .expected = "→ session_name=dev\tpid=123\tclients=2\n",
+        },
+        .{
+            .session = session,
+            .short = false,
+            .current_session = "other",
+            .expected = "  session_name=dev\tpid=123\tclients=2\n",
+        },
+        .{
+            .session = session,
+            .short = false,
+            .current_session = null,
+            .expected = "session_name=dev\tpid=123\tclients=2\n",
+        },
+        .{
+            .session = session,
+            .short = true,
+            .current_session = "dev",
+            .expected = "→ dev\n",
+        },
+        .{
+            .session = session,
+            .short = true,
+            .current_session = "other",
+            .expected = "  dev\n",
+        },
+        .{
+            .session = session,
+            .short = true,
+            .current_session = null,
+            .expected = "dev\n",
+        },
+    };
+
+    for (cases) |case| {
+        var builder: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer builder.deinit();
+
+        try writeSessionLine(&builder.writer, case.session, case.short, case.current_session);
+        try std.testing.expectEqualStrings(case.expected, builder.writer.buffered());
+    }
 }
 
 fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Terminal) ?[]const u8 {
