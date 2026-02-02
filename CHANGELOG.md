@@ -2,7 +2,7 @@
 
 Use spec: https://common-changelog.org/
 
-## Staged
+## v0.3.0 - 2026-02-01
 
 ### Added
 
