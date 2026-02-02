@@ -12,6 +12,7 @@ Use spec: https://common-changelog.org/
 - New command `zmx [c]ompletions <shell>` that outputs auto-completion scripts for a given shell
 - List command `zmx list` now shows `started_at` showing working directory when creating session
 - List command `zmx list` now shows `cmd` showing command provided when creating session
+- List command `zmx list` now shows `→` arrow indicating the current session
 
 ### Fixed
 
