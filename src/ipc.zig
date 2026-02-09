@@ -35,6 +35,9 @@ pub const Info = extern struct {
     cwd_len: u16,
     cmd: [MAX_CMD_LEN]u8,
     cwd: [MAX_CWD_LEN]u8,
+    created_at: u64,
+    task_ended_at: u64,
+    task_exit_code: i32,
 };
 
 pub fn expectedLength(data: []const u8) ?usize {

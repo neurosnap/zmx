@@ -121,6 +121,13 @@ const Cfg = struct {
     }
 };
 
+const SessionMetadata = struct {
+    created_at: u64, // unix timestamp (ns) - all sessions
+    task_exit_code: ?i32 = null, // null = running, set when task completes
+    task_end_time: ?u64 = null, // timestamp when task exited
+    task_command: []const u8 = "", // original task command string
+};
+
 const Daemon = struct {
     cfg: *Cfg,
     alloc: std.mem.Allocator,
@@ -133,6 +140,11 @@ const Daemon = struct {
     cwd: []const u8 = "",
     has_pty_output: bool = false,
     has_had_client: bool = false,
+    created_at: u64, // unix timestamp (ns)
+    is_task_mode: bool = false, // flag for when session is run as a task
+    task_exit_code: ?i32 = null, // null = running or n/a, set when task completes
+    task_ended_at: ?u64 = null, // timestamp when task exited
+    task_command: ?[]const []const u8 = null,
 
     pub fn deinit(self: *Daemon) void {
         self.clients.deinit(self.alloc);
@@ -265,7 +277,8 @@ const Daemon = struct {
         // Build command string from args
         var cmd_buf: [ipc.MAX_CMD_LEN]u8 = undefined;
         var cmd_len: u16 = 0;
-        if (self.command) |args| {
+        const cur_cmd = self.command orelse self.task_command;
+        if (cur_cmd) |args| {
             for (args, 0..) |arg, i| {
                 if (i > 0) {
                     if (cmd_len < ipc.MAX_CMD_LEN) {
@@ -292,6 +305,9 @@ const Daemon = struct {
             .cwd_len = cwd_len,
             .cmd = cmd_buf,
             .cwd = cwd_buf,
+            .created_at = self.created_at,
+            .task_ended_at = self.task_ended_at orelse 0,
+            .task_exit_code = self.task_exit_code orelse 0,
         };
         try ipc.appendMessage(self.alloc, &client.write_buf, .Info, std.mem.asBytes(&info));
         client.has_pending_output = true;
@@ -407,6 +423,7 @@ pub fn main() !void {
             .pid = undefined,
             .command = command,
             .cwd = cwd,
+            .created_at = @intCast(std.time.nanoTimestamp()),
         };
         daemon.socket_path = try getSocketPath(alloc, cfg.socket_dir, session_name);
         std.log.info("socket path={s}", .{daemon.socket_path});
@@ -416,12 +433,23 @@ pub fn main() !void {
             return error.SessionNameRequired;
         };
 
-        var command_args: std.ArrayList([]const u8) = .empty;
-        defer command_args.deinit(alloc);
+        var cmd_args_raw: std.ArrayList([]const u8) = .empty;
+        defer cmd_args_raw.deinit(alloc);
         while (args.next()) |arg| {
-            try command_args.append(alloc, arg);
+            try cmd_args_raw.append(alloc, arg);
         }
+        var cmd_args = try cmd_args_raw.clone(alloc);
+        defer cmd_args.deinit(alloc);
 
+        const shell = detectShell();
+        // add a task completed marker so we know when the cmd is finished
+        // we also capture the exit status
+        if (std.mem.eql(u8, std.fs.path.basename(shell), "fish")) {
+            // fish has special handling for capturing exit status
+            try cmd_args.append(alloc, "; echo ZMX_TASK_COMPLETED:$status");
+        } else {
+            try cmd_args.append(alloc, "; echo ZMX_TASK_COMPLETED:$?");
+        }
         const clients = try std.ArrayList(*Client).initCapacity(alloc, 10);
 
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -437,10 +465,13 @@ pub fn main() !void {
             .pid = undefined,
             .command = null,
             .cwd = cwd,
+            .created_at = @intCast(std.time.nanoTimestamp()),
+            .is_task_mode = true,
+            .task_command = cmd_args_raw.items,
         };
         daemon.socket_path = try getSocketPath(alloc, cfg.socket_dir, session_name);
         std.log.info("socket path={s}", .{daemon.socket_path});
-        return run(&daemon, command_args.items);
+        return run(&daemon, cmd_args.items);
     } else {
         return help();
     }
@@ -500,6 +531,9 @@ const SessionEntry = struct {
     error_name: ?[]const u8,
     cmd: ?[]const u8 = null,
     cwd: ?[]const u8 = null,
+    created_at: u64,
+    task_ended_at: ?u64,
+    task_exit_code: ?i32,
 
     fn lessThan(_: void, a: SessionEntry, b: SessionEntry) bool {
         return std.mem.order(u8, a.name, b.name) == .lt;
@@ -551,8 +585,11 @@ fn list(cfg: *Cfg, short: bool) !void {
                     .clients_len = null,
                     .is_error = true,
                     .error_name = @errorName(err),
+                    .created_at = 0,
+                    .task_exit_code = 1,
+                    .task_ended_at = 0,
                 });
-                cleanupStaleSocket(dir, entry.name);
+                // cleanupStaleSocket(dir, entry.name);
                 continue;
             };
             posix.close(result.fd);
@@ -575,6 +612,9 @@ fn list(cfg: *Cfg, short: bool) !void {
                 .error_name = null,
                 .cmd = cmd,
                 .cwd = cwd,
+                .created_at = result.info.created_at,
+                .task_ended_at = result.info.task_ended_at,
+                .task_exit_code = result.info.task_exit_code,
             });
         }
     }
@@ -1098,6 +1138,33 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
     }
 }
 
+fn findTaskExitMarker(output: []const u8) ?i32 {
+    const marker = "ZMX_TASK_COMPLETED:";
+
+    // Search for marker in output
+    if (std.mem.indexOf(u8, output, marker)) |idx| {
+        const after_marker = output[idx + marker.len ..];
+
+        // Find the exit code number and newline
+        var end_idx: usize = 0;
+        while (end_idx < after_marker.len and after_marker[end_idx] != '\n' and after_marker[end_idx] != '\r') {
+            end_idx += 1;
+        }
+
+        const exit_code_str = after_marker[0..end_idx];
+
+        // Parse exit code
+        if (std.fmt.parseInt(i32, exit_code_str, 10)) |exit_code| {
+            return exit_code;
+        } else |_| {
+            std.log.warn("failed to parse task exit code from: {s}", .{exit_code_str});
+            return null;
+        }
+    }
+
+    return null;
+}
+
 fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
     std.log.info("daemon started session={s} pty_fd={d}", .{ daemon.session_name, pty_fd });
     setupSigtermHandler();
@@ -1184,6 +1251,17 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                     // Feed PTY output to terminal emulator for state tracking
                     try vt_stream.nextSlice(buf[0..n]);
                     daemon.has_pty_output = true;
+
+                    // In run mode, scan output for exit code marker
+                    if (daemon.is_task_mode and daemon.task_exit_code == null) {
+                        if (findTaskExitMarker(buf[0..n])) |exit_code| {
+                            daemon.task_exit_code = exit_code;
+                            daemon.task_ended_at = @intCast(std.time.nanoTimestamp());
+
+                            std.log.info("task completed exit_code={d}", .{exit_code});
+                            // Shell continues running - no break here
+                        }
+                    }
 
                     // Broadcast data to all clients
                     for (daemon.clients.items) |client| {
@@ -1312,7 +1390,7 @@ fn spawnPty(daemon: *Daemon) !c_int {
             std.log.err("execvpe failed: cmd={s} err={s}", .{ cmd_args[0], @errorName(err) });
             std.posix.exit(1);
         } else {
-            const shell = std.posix.getenv("SHELL") orelse "/bin/sh";
+            const shell = detectShell();
             // Use "-shellname" as argv[0] to signal login shell (traditional method)
             var buf: [64]u8 = undefined;
             const login_shell = try std.fmt.bufPrintZ(&buf, "-{s}", .{std.fs.path.basename(shell)});
@@ -1330,6 +1408,10 @@ fn spawnPty(daemon: *Daemon) !c_int {
     const flags = try posix.fcntl(master_fd, posix.F.GETFL, 0);
     _ = try posix.fcntl(master_fd, posix.F.SETFL, flags | @as(u32, 0o4000));
     return master_fd;
+}
+
+fn detectShell() [:0]const u8 {
+    return std.posix.getenv("SHELL") orelse "/bin/sh";
 }
 
 fn sessionConnect(fname: []const u8) !i32 {
@@ -1483,12 +1565,19 @@ fn writeSessionLine(writer: *std.Io.Writer, session: SessionEntry, short: bool, 
         return;
     }
 
-    try writer.print("{s}session_name={s}\tpid={d}\tclients={d}", .{
+    try writer.print("{s}session_name={s}\tpid={d}\tclients={d}\tcreated_at={d}", .{
         prefix,
         session.name,
         session.pid.?,
         session.clients_len.?,
+        session.created_at,
     });
+    if (session.task_ended_at) |ended_at| {
+        try writer.print("\ttask_ended_at={d}", .{ended_at});
+    }
+    if (session.task_exit_code) |exit_code| {
+        try writer.print("\ttask_exit_code={d}", .{exit_code});
+    }
     if (session.cwd) |cwd| {
         try writer.print("\tstarted_in={s}", .{cwd});
     }
