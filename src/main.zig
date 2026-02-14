@@ -1147,6 +1147,16 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
             return err;
         };
 
+        // Diagnostic: Log PTY poll revents on macOS during heavy I/O
+        if (builtin.os.tag == .macos and poll_fds.items[1].revents & posix.POLL.IN != 0) {
+            std.log.debug("macOS PTY poll: revents={d} (POLLIN={d} POLLERR={d} POLLHUP={d})", .{
+                poll_fds.items[1].revents,
+                (poll_fds.items[1].revents & posix.POLL.IN),
+                (poll_fds.items[1].revents & posix.POLL.ERR),
+                (poll_fds.items[1].revents & posix.POLL.HUP),
+            });
+        }
+
         if (poll_fds.items[0].revents & (posix.POLL.ERR | posix.POLL.HUP | posix.POLL.NVAL) != 0) {
             std.log.err("server socket error revents={d}", .{poll_fds.items[0].revents});
             break :daemon_loop;
@@ -1167,8 +1177,14 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
         if (poll_fds.items[1].revents & (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
             // Read from PTY
             var buf: [4096]u8 = undefined;
+            std.log.debug("PTY poll returned, revents={d}, attempting read", .{poll_fds.items[1].revents});
+            
             const n_opt: ?usize = posix.read(pty_fd, &buf) catch |err| blk: {
-                if (err == error.WouldBlock) break :blk null;
+                if (err == error.WouldBlock) {
+                    std.log.warn("DIAGNOSTIC: poll reported POLLIN but read got WouldBlock", .{});
+                    break :blk null;
+                }
+                std.log.warn("PTY read error: {s}", .{@errorName(err)});
                 break :blk 0;
             };
 
@@ -1178,6 +1194,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                     std.log.info("shell exited pty_fd={d}", .{pty_fd});
                     break :daemon_loop;
                 } else {
+                    std.log.debug("PTY read {d} bytes from pty_fd", .{n});
                     // Feed PTY output to terminal emulator for state tracking
                     try vt_stream.nextSlice(buf[0..n]);
                     daemon.has_pty_output = true;
@@ -1191,6 +1208,8 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                         client.has_pending_output = true;
                     }
                 }
+            } else {
+                std.log.debug("PTY read returned null (WouldBlock or no data)", .{});
             }
         }
 
@@ -1289,6 +1308,15 @@ fn spawnPty(daemon: *Daemon) !c_int {
     const pid = forkpty(&master_fd, null, null, &ws);
     if (pid < 0) {
         return error.ForkPtyFailed;
+    }
+
+    // DIAGNOSTIC: On macOS, test keeping PTY in blocking mode to validate poll() hypothesis
+    // If this fixes the hang, it means the issue is: macOS poll() + non-blocking PTY
+    if (builtin.os.tag == .macos) {
+        std.log.info("EXPERIMENTAL: macOS - Keeping PTY in BLOCKING mode to test poll() hypothesis", .{});
+        // Not calling fcntl to set non-blocking - leaving PTY in default blocking state
+    } else {
+        std.log.info("Linux detected - proceeding with standard PTY setup", .{});
     }
 
     if (pid == 0) { // child pid code path
