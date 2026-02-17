@@ -2,6 +2,12 @@
 
 Use spec: https://common-changelog.org/
 
+## Staged
+
+### Added
+
+- `zmx version` now returns the socket and log directory locations
+
 ## v0.3.0 - 2026-02-01
 
 ### Added

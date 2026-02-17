@@ -344,7 +344,7 @@ pub fn main() !void {
     };
 
     if (std.mem.eql(u8, cmd, "version") or std.mem.eql(u8, cmd, "v") or std.mem.eql(u8, cmd, "-v") or std.mem.eql(u8, cmd, "--version")) {
-        return printVersion();
+        return printVersion(&cfg);
     } else if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "h") or std.mem.eql(u8, cmd, "-h")) {
         return help();
     } else if (std.mem.eql(u8, cmd, "list") or std.mem.eql(u8, cmd, "l")) {
@@ -446,14 +446,17 @@ pub fn main() !void {
     }
 }
 
-fn printVersion() !void {
+fn printVersion(cfg: *Cfg) !void {
     var buf: [256]u8 = undefined;
     var w = std.fs.File.stdout().writer(&buf);
     var ver = version;
     if (builtin.mode == .Debug) {
         ver = git_sha;
     }
-    try w.interface.print("zmx {s}\nghostty-vt {s}\n", .{ ver, ghostty_version });
+    try w.interface.print(
+        "zmx\t\t{s}\nghostty_vt\t{s}\nsocket_dir\t{s}\nlog_dir\t\t{s}\n",
+        .{ ver, ghostty_version, cfg.socket_dir, cfg.log_dir },
+    );
     try w.interface.flush();
 }
 
