@@ -376,7 +376,9 @@ pub fn main() !void {
         const session_name = args.next() orelse {
             return error.SessionNameRequired;
         };
-        return kill(&cfg, session_name);
+        const sesh = try getSeshName(alloc, session_name);
+        defer alloc.free(sesh);
+        return kill(&cfg, sesh);
     } else if (std.mem.eql(u8, cmd, "history") or std.mem.eql(u8, cmd, "hi")) {
         var session_name: ?[]const u8 = null;
         var format: HistoryFormat = .plain;
@@ -392,7 +394,9 @@ pub fn main() !void {
         if (session_name == null) {
             return error.SessionNameRequired;
         }
-        return history(&cfg, session_name.?, format);
+        const sesh = try getSeshName(alloc, session_name.?);
+        defer alloc.free(sesh);
+        return history(&cfg, sesh, format);
     } else if (std.mem.eql(u8, cmd, "attach") or std.mem.eql(u8, cmd, "a")) {
         const session_name = args.next() orelse {
             return error.SessionNameRequired;
@@ -413,19 +417,21 @@ pub fn main() !void {
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
         const cwd = std.posix.getcwd(&cwd_buf) catch "";
 
+        const sesh = try getSeshName(alloc, session_name);
+        defer alloc.free(sesh);
         var daemon = Daemon{
             .running = true,
             .cfg = &cfg,
             .alloc = alloc,
             .clients = clients,
-            .session_name = session_name,
+            .session_name = sesh,
             .socket_path = undefined,
             .pid = undefined,
             .command = command,
             .cwd = cwd,
             .created_at = @intCast(std.time.nanoTimestamp()),
         };
-        daemon.socket_path = try getSocketPath(alloc, cfg.socket_dir, session_name);
+        daemon.socket_path = try getSocketPath(alloc, cfg.socket_dir, sesh);
         std.log.info("socket path={s}", .{daemon.socket_path});
         return attach(&daemon);
     } else if (std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "r")) {
@@ -455,12 +461,14 @@ pub fn main() !void {
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
         const cwd = std.posix.getcwd(&cwd_buf) catch "";
 
+        const sesh = try getSeshName(alloc, session_name);
+        defer alloc.free(sesh);
         var daemon = Daemon{
             .running = true,
             .cfg = &cfg,
             .alloc = alloc,
             .clients = clients,
-            .session_name = session_name,
+            .session_name = sesh,
             .socket_path = undefined,
             .pid = undefined,
             .command = null,
@@ -469,7 +477,7 @@ pub fn main() !void {
             .is_task_mode = true,
             .task_command = cmd_args_raw.items,
         };
-        daemon.socket_path = try getSocketPath(alloc, cfg.socket_dir, session_name);
+        daemon.socket_path = try getSocketPath(alloc, cfg.socket_dir, sesh);
         std.log.info("socket path={s}", .{daemon.socket_path});
         return run(&daemon, cmd_args.items);
     } else {
@@ -1414,8 +1422,16 @@ fn detectShell() [:0]const u8 {
     return std.posix.getenv("SHELL") orelse "/bin/sh";
 }
 
-fn sessionConnect(fname: []const u8) !i32 {
-    var unix_addr = try std.net.Address.initUnix(fname);
+fn seshPrefix() []const u8 {
+    return std.posix.getenv("ZMX_SESSION_PREFIX") orelse "";
+}
+
+fn getSeshName(alloc: std.mem.Allocator, sesh: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(alloc, "{s}{s}", .{ seshPrefix(), sesh });
+}
+
+fn sessionConnect(sesh: []const u8) !i32 {
+    var unix_addr = try std.net.Address.initUnix(sesh);
     const socket_fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
     errdefer posix.close(socket_fd);
     try posix.connect(socket_fd, &unix_addr.any, unix_addr.getOsSockLen());

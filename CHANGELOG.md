@@ -7,6 +7,7 @@ Use spec: https://common-changelog.org/
 ### Added
 
 - `zmx version` now returns the socket and log directory locations
+- New environment variable `ZMX_SESSION_PREFIX` which will be applied to every session name provided
 
 ## v0.3.0 - 2026-02-01
 
