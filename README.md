@@ -1,4 +1,4 @@
-<img src="./logo.png" width="50px" height="50px">
+<img src="./docs/logo.png" height="100px">
 
 # zmx
 
