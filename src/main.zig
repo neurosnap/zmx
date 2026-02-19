@@ -142,7 +142,7 @@ const Daemon = struct {
     has_had_client: bool = false,
     created_at: u64, // unix timestamp (ns)
     is_task_mode: bool = false, // flag for when session is run as a task
-    task_exit_code: ?i32 = null, // null = running or n/a, set when task completes
+    task_exit_code: ?u8 = null, // null = running or n/a, set when task completes
     task_ended_at: ?u64 = null, // timestamp when task exited
     task_command: ?[]const []const u8 = null,
 
@@ -373,9 +373,7 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, cmd, "detach") or std.mem.eql(u8, cmd, "d")) {
         return detachAll(&cfg);
     } else if (std.mem.eql(u8, cmd, "kill") or std.mem.eql(u8, cmd, "k")) {
-        const session_name = args.next() orelse {
-            return error.SessionNameRequired;
-        };
+        const session_name = args.next() orelse "";
         const sesh = try getSeshName(alloc, session_name);
         defer alloc.free(sesh);
         return kill(&cfg, sesh);
@@ -391,16 +389,11 @@ pub fn main() !void {
                 session_name = arg;
             }
         }
-        if (session_name == null) {
-            return error.SessionNameRequired;
-        }
         const sesh = try getSeshName(alloc, session_name.?);
         defer alloc.free(sesh);
         return history(&cfg, sesh, format);
     } else if (std.mem.eql(u8, cmd, "attach") or std.mem.eql(u8, cmd, "a")) {
-        const session_name = args.next() orelse {
-            return error.SessionNameRequired;
-        };
+        const session_name = args.next() orelse "";
 
         var command_args: std.ArrayList([]const u8) = .empty;
         defer command_args.deinit(alloc);
@@ -435,9 +428,7 @@ pub fn main() !void {
         std.log.info("socket path={s}", .{daemon.socket_path});
         return attach(&daemon);
     } else if (std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "r")) {
-        const session_name = args.next() orelse {
-            return error.SessionNameRequired;
-        };
+        const session_name = args.next() orelse "";
 
         var cmd_args_raw: std.ArrayList([]const u8) = .empty;
         defer cmd_args_raw.deinit(alloc);
@@ -480,6 +471,19 @@ pub fn main() !void {
         daemon.socket_path = try getSocketPath(alloc, cfg.socket_dir, sesh);
         std.log.info("socket path={s}", .{daemon.socket_path});
         return run(&daemon, cmd_args.items);
+    } else if (std.mem.eql(u8, cmd, "wait")) {
+        var args_raw: std.ArrayList([]const u8) = .empty;
+        defer {
+            args_raw.deinit(alloc);
+            for (args_raw.items) |sesh| {
+                alloc.free(sesh);
+            }
+        }
+        while (args.next()) |session_name| {
+            const sesh = try getSeshName(alloc, session_name);
+            try args_raw.append(alloc, sesh);
+        }
+        return wait(&cfg, args_raw);
     } else {
         return help();
     }
@@ -514,15 +518,24 @@ fn help() !void {
         \\Usage: zmx <command> [args]
         \\
         \\Commands:
-        \\  [a]ttach <name> [command...]  Attach to session, creating session if needed
-        \\  [r]un <name> [command...]     Send command without attaching, creating session if needed
-        \\  [d]etach                      Detach all clients from current session (ctrl+\ for current client)
-        \\  [l]ist [--short]              List active sessions
-        \\  [c]ompletions <shell>         Completion scripts for shell integration (bash, zsh, or fish)
-        \\  [k]ill <name>                 Kill a session and all attached clients
+        \\  [a]ttach <name> [command...]   Attach to session, creating session if needed
+        \\  [r]un <name> [command...]      Send command without attaching, creating session if needed
+        \\  [d]etach                       Detach all clients from current session (ctrl+\ for current client)
+        \\  [l]ist [--short]               List active sessions
+        \\  [c]ompletions <shell>          Completion scripts for shell integration (bash, zsh, or fish)
+        \\  [k]ill <name>                  Kill a session and all attached clients
         \\  [hi]story <name> [--vt|--html] Output session scrollback (--vt or --html for escape sequences)
-        \\  [v]ersion                     Show version information
-        \\  [h]elp                        Show this help message
+        \\  [w]ait <name>...               Wait for session tasks to complete
+        \\  [v]ersion                      Show version information
+        \\  [h]elp                         Show this help message
+        \\
+        \\Environment variables:
+        \\  - SHELL                Determines which shell is used when creating a session
+        \\  - ZMX_DIR              Controls which folder is used to store unix socket files (prio: 1)
+        \\  - XDG_RUNTIME_DIR      Controls which folder is used to store unix socket files (prio: 2)
+        \\  - TMPDIR               Controls which folder is used to store unix socket files (prio: 3)
+        \\  - ZMX_SESSION          This variable is injected into every zmx session automatically
+        \\  - ZMX_SESSION_PREFIX   Adds this value to the start of every session name for all commands
         \\
     ;
     var buf: [4096]u8 = undefined;
@@ -541,41 +554,80 @@ const SessionEntry = struct {
     cwd: ?[]const u8 = null,
     created_at: u64,
     task_ended_at: ?u64,
-    task_exit_code: ?i32,
+    task_exit_code: ?u8,
 
     fn lessThan(_: void, a: SessionEntry, b: SessionEntry) bool {
         return std.mem.order(u8, a.name, b.name) == .lt;
     }
 };
 
-const current_arrow = "→";
-
-fn list(cfg: *Cfg, short: bool) !void {
+fn wait(cfg: *Cfg, session_names: std.ArrayList([]const u8)) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    const current_session = std.process.getEnvVarOwned(alloc, "ZMX_SESSION") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => null,
-        else => return err,
-    };
-    defer if (current_session) |name| alloc.free(name);
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
 
+    while (true) {
+        var sessions = try get_session_entries(alloc, cfg);
+        var total: i32 = 0;
+        var done: i32 = 0;
+        var agg_exit_code: u8 = 0;
+
+        for (sessions.items) |session| {
+            var found = false;
+            for (session_names.items) |prefix| {
+                if (std.mem.startsWith(u8, session.name, prefix)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                continue;
+            }
+
+            total += 1;
+            if (session.task_ended_at == 0) {
+                try stdout.print("still waiting task={s}\n", .{session.name});
+                try stdout.flush();
+                continue;
+            }
+            if (session.task_exit_code != 0) {
+                agg_exit_code = session.task_exit_code orelse 0;
+            }
+            done += 1;
+        }
+
+        session_entries_deinit(alloc, &sessions);
+
+        if (total == done) {
+            try stdout.print("tasks completed!\n", .{});
+            try stdout.flush();
+            std.process.exit(agg_exit_code);
+            return;
+        }
+
+        std.Thread.sleep(1000 * std.time.ns_per_ms);
+    }
+}
+
+fn session_entries_deinit(alloc: std.mem.Allocator, sessions: *std.ArrayList(SessionEntry)) void {
+    for (sessions.items) |session| {
+        alloc.free(session.name);
+        if (session.cmd) |cmd| alloc.free(cmd);
+        if (session.cwd) |cwd| alloc.free(cwd);
+    }
+    sessions.deinit(alloc);
+}
+
+fn get_session_entries(alloc: std.mem.Allocator, cfg: *Cfg) !std.ArrayList(SessionEntry) {
     var dir = try std.fs.openDirAbsolute(cfg.socket_dir, .{ .iterate = true });
     defer dir.close();
     var iter = dir.iterate();
-    var buf: [4096]u8 = undefined;
-    var w = std.fs.File.stdout().writer(&buf);
 
-    var sessions = try std.ArrayList(SessionEntry).initCapacity(alloc, 16);
-    defer {
-        for (sessions.items) |session| {
-            alloc.free(session.name);
-            if (session.cmd) |cmd| alloc.free(cmd);
-            if (session.cwd) |cwd| alloc.free(cwd);
-        }
-        sessions.deinit(alloc);
-    }
+    var sessions = try std.ArrayList(SessionEntry).initCapacity(alloc, 30);
 
     while (try iter.next()) |entry| {
         const exists = sessionExists(dir, entry.name) catch continue;
@@ -626,6 +678,27 @@ fn list(cfg: *Cfg, short: bool) !void {
             });
         }
     }
+
+    return sessions;
+}
+
+const current_arrow = "→";
+
+fn list(cfg: *Cfg, short: bool) !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    const current_session = std.process.getEnvVarOwned(alloc, "ZMX_SESSION") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => null,
+        else => return err,
+    };
+    defer if (current_session) |name| alloc.free(name);
+    var buf: [4096]u8 = undefined;
+    var w = std.fs.File.stdout().writer(&buf);
+
+    var sessions = try get_session_entries(alloc, cfg);
+    defer session_entries_deinit(alloc, &sessions);
 
     if (sessions.items.len == 0) {
         if (short) return;
@@ -1146,7 +1219,7 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
     }
 }
 
-fn findTaskExitMarker(output: []const u8) ?i32 {
+fn findTaskExitMarker(output: []const u8) ?u8 {
     const marker = "ZMX_TASK_COMPLETED:";
 
     // Search for marker in output
@@ -1162,7 +1235,7 @@ fn findTaskExitMarker(output: []const u8) ?i32 {
         const exit_code_str = after_marker[0..end_idx];
 
         // Parse exit code
-        if (std.fmt.parseInt(i32, exit_code_str, 10)) |exit_code| {
+        if (std.fmt.parseInt(u8, exit_code_str, 10)) |exit_code| {
             return exit_code;
         } else |_| {
             std.log.warn("failed to parse task exit code from: {s}", .{exit_code_str});
@@ -1427,6 +1500,10 @@ fn seshPrefix() []const u8 {
 }
 
 fn getSeshName(alloc: std.mem.Allocator, sesh: []const u8) ![]const u8 {
+    const prefix = seshPrefix();
+    if (std.mem.eql(u8, prefix, "") and std.mem.eql(u8, sesh, "")) {
+        return error.SessionNameRequired;
+    }
     return std.fmt.allocPrint(alloc, "{s}{s}", .{ seshPrefix(), sesh });
 }
 

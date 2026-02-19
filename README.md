@@ -66,6 +66,7 @@ Commands:
   [c]ompletions <shell>          Completion scripts for shell integration (bash, zsh, or fish)
   [k]ill <name>                  Kill a session and all attached clients
   [hi]story <name> [--vt|--html] Output session scrollback (--vt or --html for escape sequences)
+  [w]ait <name>...               Wait for session tasks to complete
   [v]ersion                      Show version information
   [h]elp                         Show this help message
 ```
