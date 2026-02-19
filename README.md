@@ -3,10 +3,13 @@
   <img src="./docs/logo.png" alt="Logo" width="128">
   <br>zmx
 </h1>
-
-session persistence for terminal processes
-
-Reason for this tool: [You might not need `tmux`](https://bower.sh/you-might-not-need-tmux)
+<p align="center">
+  Session persistence for terminal processes.
+  <br />
+  <a href="https://zmx.sh">Docs</a>
+  ·
+  <a href="https://bower.sh/you-might-not-need-tmux">You might not need tmux</a>
+</p>
 
 ## features
 
