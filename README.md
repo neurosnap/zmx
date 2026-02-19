@@ -328,3 +328,7 @@ dtach is a program written in C that emulates the detach feature of screen, whic
 | Auto-daemonize                 | ✓   | ✓      | ✓      | ✓     | ✓    |
 | Daemon per session             | ✓   | ✗      | ✓      | ✓     | ✗    |
 | Session listing                | ✓   | ✓      | ✓      | ✗     | ✓    |
+
+## community tools
+
+- [zsm](https://github.com/mdsakalu/zmx-session-manager) — TUI session manager for zmx. List, preview, filter, and kill sessions from an interactive terminal UI.
