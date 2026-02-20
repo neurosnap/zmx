@@ -1780,6 +1780,9 @@ test "writeSessionLine formats output for current session and short output" {
         .error_name = null,
         .cmd = null,
         .cwd = null,
+        .created_at = 0,
+        .task_ended_at = null,
+        .task_exit_code = null,
     };
 
     const cases = [_]Case{
@@ -1787,19 +1790,19 @@ test "writeSessionLine formats output for current session and short output" {
             .session = session,
             .short = false,
             .current_session = "dev",
-            .expected = "→ session_name=dev\tpid=123\tclients=2\n",
+            .expected = "→ session_name=dev\tpid=123\tclients=2\tcreated_at=0\n",
         },
         .{
             .session = session,
             .short = false,
             .current_session = "other",
-            .expected = "  session_name=dev\tpid=123\tclients=2\n",
+            .expected = "  session_name=dev\tpid=123\tclients=2\tcreated_at=0\n",
         },
         .{
             .session = session,
             .short = false,
             .current_session = null,
-            .expected = "session_name=dev\tpid=123\tclients=2\n",
+            .expected = "session_name=dev\tpid=123\tclients=2\tcreated_at=0\n",
         },
         .{
             .session = session,
