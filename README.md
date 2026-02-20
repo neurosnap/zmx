@@ -355,3 +355,4 @@ dtach is a program written in C that emulates the detach feature of screen, whic
 ## community tools
 
 - [zsm](https://github.com/mdsakalu/zmx-session-manager) — TUI session manager for zmx. List, preview, filter, and kill sessions from an interactive terminal UI.
+- [zmosh](https://github.com/mmonad/zmosh) — A fork of zmx that adds encrypted UDP auto-reconnect for remote sessions (like mosh).
