@@ -649,7 +649,7 @@ fn get_session_entries(alloc: std.mem.Allocator, cfg: *Cfg) !std.ArrayList(Sessi
                     .task_exit_code = 1,
                     .task_ended_at = 0,
                 });
-                // cleanupStaleSocket(dir, entry.name);
+                cleanupStaleSocket(dir, entry.name);
                 continue;
             };
             posix.close(result.fd);

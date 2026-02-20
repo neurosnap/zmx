@@ -9,6 +9,13 @@
   <a href="https://zmx.sh">Docs</a>
   ·
   <a href="https://bower.sh/you-might-not-need-tmux">You might not need tmux</a>
+  ·
+  <span style="display: flex; justify-content: center; align-items: center;">
+	Sponsored by
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path class="logo" d="M107.301 39C111.645 46.5241 113.954 55.0503 113.999 63.7382C114.045 72.4262 111.826 80.9761 107.561 88.5452C103.296 96.1144 97.1319 102.442 89.677 106.903C82.222 111.365 73.7332 113.807 65.047 113.989C56.3608 114.171 47.7772 112.086 40.1419 107.941C32.5067 103.795 26.0835 97.7316 21.5053 90.3476C16.9271 82.9637 14.3519 74.5142 14.0336 65.832C13.7152 57.1497 15.6647 48.5344 19.6899 40.835L64 64L107.301 39Z" stroke="#414558" stroke-width="12"></path>
+  </svg> <a href="https://pico.sh">pico.sh</a>
+  </span>
 </p>
 
 ## features
