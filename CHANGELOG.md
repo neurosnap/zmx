@@ -6,8 +6,17 @@ Use spec: https://common-changelog.org/
 
 ### Added
 
+- New environment variable `ZMX_SESSION_PREFIX` which will be inserted before every session name for every command
+- New command `zmx wait` which will stale until all tasks (`zmx run`) are completed.
+
+### Changed
+
 - `zmx version` now returns the socket and log directory locations
-- New environment variable `ZMX_SESSION_PREFIX` which will be applied to every session name provided
+- `zmx run` now inserts a `ZMX_TASK_COMPLETED` marker after every run command to indicate when the task is completed and then returns the aggregate exit status
+
+### Fixed
+
+- `libghostty` had a regression that caused `zmx` to crash
 
 ## v0.3.0 - 2026-02-01
 
