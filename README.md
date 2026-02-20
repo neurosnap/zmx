@@ -82,6 +82,9 @@ zmx attach mux dvtm         # run a multiplexer inside zmx
 zmx run dev cat README.md   # run the command without attaching to the session
 zmx r dev cat CHANGELOG.md  # alias
 echo "ls -lah" | zmx r dev  # use stdin to run the command
+
+zmx r tests go test ./...   # run your tests in the background
+zmx wait tests              # waits for tests to complete
 ```
 
 ## shell prompt
@@ -180,6 +183,18 @@ Add this to your `.config/fish/config.fish` file:
 if type -q zmx
   zmx completions fish | source
 end
+```
+
+## session prefix
+
+We allow users to set an environment variable `ZMX_SESSION_PREFIX` which will prefix the name of the session for all commands. This means if that variable is set, every command that accepts a session will be prefixed with it.
+
+```bash
+export ZMX_SESSION_PREFIX="d."
+zmx a runner # ZMX_SESSION=d.runner
+zmx a tests  # ZMX_SESSION=d.tests
+zmx k tests  # kills d.tests
+zmx wait     # suspends until all tasks prefixed with "d." are complete
 ```
 
 ## philosophy
