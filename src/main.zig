@@ -471,7 +471,7 @@ pub fn main() !void {
         daemon.socket_path = try getSocketPath(alloc, cfg.socket_dir, sesh);
         std.log.info("socket path={s}", .{daemon.socket_path});
         return run(&daemon, cmd_args.items);
-    } else if (std.mem.eql(u8, cmd, "wait")) {
+    } else if (std.mem.eql(u8, cmd, "wait") or std.mem.eql(u8, cmd, "w")) {
         var args_raw: std.ArrayList([]const u8) = .empty;
         defer {
             args_raw.deinit(alloc);
