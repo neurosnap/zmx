@@ -281,6 +281,7 @@ We are evaluating what should be configurable and what should not. Every configu
 
 ## known issues
 
+- When upgrading versions of `zmx` where we make changes to the underlying IPC communication, it will kill all your sessions because it cannot communicate through the daemon socket properly
 - Terminal state rehydration with nested `zmx` sessions through SSH: host A `zmx` -> SSH -> host B `zmx`
   - Specifically cursor position gets corrupted
 - When re-attaching and kitty keyboard mode was previously enable, we try to re-send that CSI query to re-enable it
