@@ -422,7 +422,7 @@ pub fn main() !void {
             .pid = undefined,
             .command = command,
             .cwd = cwd,
-            .created_at = @intCast(std.time.nanoTimestamp()),
+            .created_at = @intCast(std.time.timestamp()),
         };
         daemon.socket_path = try getSocketPath(alloc, cfg.socket_dir, sesh);
         std.log.info("socket path={s}", .{daemon.socket_path});
@@ -464,7 +464,7 @@ pub fn main() !void {
             .pid = undefined,
             .command = null,
             .cwd = cwd,
-            .created_at = @intCast(std.time.nanoTimestamp()),
+            .created_at = @intCast(std.time.timestamp()),
             .is_task_mode = true,
             .task_command = cmd_args_raw.items,
         };
@@ -1337,7 +1337,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                     if (daemon.is_task_mode and daemon.task_exit_code == null) {
                         if (findTaskExitMarker(buf[0..n])) |exit_code| {
                             daemon.task_exit_code = exit_code;
-                            daemon.task_ended_at = @intCast(std.time.nanoTimestamp());
+                            daemon.task_ended_at = @intCast(std.time.timestamp());
 
                             std.log.info("task completed exit_code={d}", .{exit_code});
                             // Shell continues running - no break here
@@ -1666,10 +1666,13 @@ fn writeSessionLine(writer: *std.Io.Writer, session: SessionEntry, short: bool, 
         session.created_at,
     });
     if (session.task_ended_at) |ended_at| {
-        try writer.print("\ttask_ended_at={d}", .{ended_at});
-    }
-    if (session.task_exit_code) |exit_code| {
-        try writer.print("\ttask_exit_code={d}", .{exit_code});
+        if (ended_at > 0) {
+            try writer.print("\ttask_ended_at={d}", .{ended_at});
+
+            if (session.task_exit_code) |exit_code| {
+                try writer.print("\ttask_exit_code={d}", .{exit_code});
+            }
+        }
     }
     if (session.cwd) |cwd| {
         try writer.print("\tstarted_in={s}", .{cwd});
