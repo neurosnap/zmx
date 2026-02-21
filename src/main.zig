@@ -936,6 +936,9 @@ fn attach(daemon: *Daemon) !void {
         // want to corrupt any programs that rely on it including ghostty's session restore.
         const restore_seq = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l" ++
             "\x1b[?2004l\x1b[?1004l\x1b[?1049l" ++
+            // Restore pre-attach Kitty keyboard protocol mode so Ctrl combos
+            // return to legacy encoding in the user's outer shell.
+            "\x1b[<u" ++
             "\x1b[?25h";
         _ = posix.write(posix.STDOUT_FILENO, restore_seq) catch {};
     }
