@@ -959,10 +959,10 @@ fn attach(daemon: *Daemon) !void {
 
     _ = c.tcsetattr(posix.STDIN_FILENO, c.TCSANOW, &raw_termios);
 
-    // Clear screen before attaching. This provides a clean slate before
-    // the session restore.
-    const clear_seq = "\x1b[2J\x1b[H";
-    _ = try posix.write(posix.STDOUT_FILENO, clear_seq);
+    // Enter alternate screen before attach so detaching restores the exact
+    // outer shell view (cursor position + visible content).
+    const enter_attach_seq = "\x1b[?1049h\x1b[2J\x1b[H";
+    _ = try posix.write(posix.STDOUT_FILENO, enter_attach_seq);
 
     try clientLoop(daemon.cfg, client_sock);
 }
