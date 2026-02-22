@@ -7,7 +7,7 @@ Use spec: https://common-changelog.org/
 ### Added
 
 - New environment variable `ZMX_SESSION_PREFIX` which will be inserted before every session name for every command
-- New command `zmx wait` which will stale until all tasks (`zmx run`) are completed.
+- New command `zmx wait` which will stall until all tasks (`zmx run`) are completed.
 
 ### Changed
 
