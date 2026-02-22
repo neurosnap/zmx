@@ -43,6 +43,7 @@ brew install zmx
 
 ### packages
 
+- [Alpine Linux](https://pkgs.alpinelinux.org/package/edge/testing/x86_64/zmx)
 - [Arch AUR tracking releases](https://aur.archlinux.org/packages/zmx)
 - [Arch AUR tracking git](https://aur.archlinux.org/packages/zmx-git)
 
