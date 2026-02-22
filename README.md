@@ -41,6 +41,11 @@ brew tap neurosnap/tap
 brew install zmx
 ```
 
+### packages
+
+- [Arch AUR tracking releases](https://aur.archlinux.org/packages/zmx)
+- [Arch AUR tracking git](https://aur.archlinux.org/packages/zmx-git)
+
 ### src
 
 - Requires zig `v0.15`
