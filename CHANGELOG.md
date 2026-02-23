@@ -2,6 +2,12 @@
 
 Use spec: https://common-changelog.org/
 
+## v0.4.1 - 2026-02-23
+
+### Fixed
+
+- Update `libghostty` to fix `zig build test`
+
 ## v0.4.0 - 2026-02-20
 
 ### Added

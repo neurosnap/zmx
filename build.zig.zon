@@ -1,6 +1,6 @@
 .{
     .name = .zmx,
-    .version = "0.4.0",
+    .version = "0.4.1",
     .fingerprint = 0x28aad87005052b4e, // Changing this has security and trust implications.
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
