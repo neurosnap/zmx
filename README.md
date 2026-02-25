@@ -154,6 +154,24 @@ POWERLEVEL9K_RIGHT_PROMPT_ELEMENTS+=my_zmx_session
    style = 'plain'
 ```
 
+### starship
+
+[starship](https://starship.rs) is a popular shell themeing and prompt engine. This code will display the session name as part of the prompt if (and only if) you have zmx active:
+
+```
+format = """
+${custom.zmx}\
+...
+"""
+
+...
+
+[custom.zmx]
+command = 'echo "[${ZMX_SESSION}]"'
+when = 'test "${ZMX_SESSION}" != ""'
+style = "bold magenta"
+```
+
 ## shell completion
 
 Shell auto-completion for `zmx` commands and session names can be enabled using the `completions` subcommand. Once configured, you'll get auto-complete for both local `zmx` commands and sessions:
