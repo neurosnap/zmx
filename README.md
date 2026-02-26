@@ -185,7 +185,7 @@ fi
 
 ### fish
 
-Add this to your `.config/fish/config.fish` file:
+Add this to your `~/.config/fish/completions/zmx.fish` file:
 
 ```fish
 if type -q zmx
