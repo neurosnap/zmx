@@ -144,7 +144,7 @@ POWERLEVEL9K_RIGHT_PROMPT_ELEMENTS+=my_zmx_session
 
 [oh-my-posh](https://ohmyposh.dev) is a popular shell themeing and prompt engine. This code will display an icon and session name as part of the prompt if (and only if) you have zmx active:
 
-```
+```toml
 [[blocks.segments]]
    template = '{{ if .Env.ZMX_SESSION }} {{ .Env.ZMX_SESSION }}{{ end }}'
    foreground = 'p:orange'
@@ -153,21 +153,20 @@ POWERLEVEL9K_RIGHT_PROMPT_ELEMENTS+=my_zmx_session
    style = 'plain'
 ```
 
-### starship
+### Starship
 
-[starship](https://starship.rs) is a popular shell themeing and prompt engine. This code will display the session name as part of the prompt if (and only if) you have zmx active:
+[Starship](https://starship.rs) is a popular shell themeing and prompt engine. This code will display an icon and session name as part of the prompt if (and only if) you have zmx active:
 
-```
+```toml
 format = """
-${custom.zmx}\
+${env_var.ZMX_SESSION}\
 ...
 """
 
-...
-
-[custom.zmx]
-command = 'echo "[${ZMX_SESSION}]"'
-when = 'test "${ZMX_SESSION}" != ""'
+[env_var.ZMX_SESSION]
+symbol = " "
+format = "[$symbol$env_value]($style) "
+description = "zmx session name"
 style = "bold magenta"
 ```
 
