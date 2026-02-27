@@ -37,8 +37,7 @@
 ### homebrew
 
 ```bash
-brew tap neurosnap/tap
-brew install zmx
+brew install neurosnap/tap/zmx
 ```
 
 ### packages
