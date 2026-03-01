@@ -62,6 +62,7 @@ var sigterm_received: std.atomic.Value(bool) = std.atomic.Value(bool).init(false
 const Client = struct {
     alloc: std.mem.Allocator,
     socket_fd: i32,
+    initialized: bool = false,
     has_pending_output: bool = false,
     read_buf: ipc.SocketBuffer,
     write_buf: std.ArrayList(u8),
@@ -139,7 +140,6 @@ const Daemon = struct {
     command: ?[]const []const u8 = null,
     cwd: []const u8 = "",
     has_pty_output: bool = false,
-    has_had_client: bool = false,
     created_at: u64, // unix timestamp (ns)
     is_task_mode: bool = false, // flag for when session is run as a task
     task_exit_code: ?u8 = null, // null = running or n/a, set when task completes
@@ -193,6 +193,32 @@ const Daemon = struct {
 
         const resize = std.mem.bytesToValue(ipc.Resize, payload);
 
+        // Serialize terminal state BEFORE resize to capture the pre-reflow
+        // cursor position. We gate on has_pty_output so that the very first
+        // local attach (where the shell hasn't emitted anything yet) skips
+        // the snapshot, while a remote attach — where the shell may have been
+        // running since the gateway forked the daemon — gets a full replay.
+        if (self.has_pty_output) {
+            const cursor = &term.screens.active.cursor;
+            std.log.debug("cursor before serialize: x={d} y={d} pending_wrap={}", .{ cursor.x, cursor.y, cursor.pending_wrap });
+            if (serializeTerminalState(self.alloc, term, resize.rows)) |term_output| {
+                std.log.debug("serialize terminal state", .{});
+                defer self.alloc.free(term_output);
+                // Only clear on re-init. For first Init on a fresh socket,
+                // write_buf may contain queued non-Output replies (e.g. Info)
+                // from earlier messages in the same read batch.
+                if (client.initialized) {
+                    // Drop any stale output buffered before Init so the snapshot
+                    // is the first payload rendered after a resync request.
+                    client.write_buf.clearRetainingCapacity();
+                }
+                ipc.appendMessage(self.alloc, &client.write_buf, .Output, term_output) catch |err| {
+                    std.log.warn("failed to buffer terminal state for client err={s}", .{@errorName(err)});
+                };
+                client.has_pending_output = true;
+            }
+        }
+
         var ws: c.struct_winsize = .{
             .ws_row = resize.rows,
             .ws_col = resize.cols,
@@ -202,26 +228,7 @@ const Daemon = struct {
         _ = c.ioctl(pty_fd, c.TIOCSWINSZ, &ws);
         try term.resize(self.alloc, resize.cols, resize.rows);
 
-        // Serialize terminal state BEFORE resize to capture correct cursor position.
-        // Resizing triggers reflow which can move the cursor, and the shell's
-        // SIGWINCH-triggered redraw will run after our snapshot is sent.
-        // Only serialize on re-attach (has_had_client), not first attach, to avoid
-        // interfering with shell initialization (DA1 queries, etc.)
-        if (self.has_pty_output and self.has_had_client) {
-            const cursor = &term.screens.active.cursor;
-            std.log.debug("cursor before serialize: x={d} y={d} pending_wrap={}", .{ cursor.x, cursor.y, cursor.pending_wrap });
-            if (serializeTerminalState(self.alloc, term)) |term_output| {
-                std.log.debug("serialize terminal state", .{});
-                defer self.alloc.free(term_output);
-                ipc.appendMessage(self.alloc, &client.write_buf, .Output, term_output) catch |err| {
-                    std.log.warn("failed to buffer terminal state for client err={s}", .{@errorName(err)});
-                };
-                client.has_pending_output = true;
-            }
-        }
-
-        // Mark that we've had a client init, so subsequent clients get terminal state
-        self.has_had_client = true;
+        client.initialized = true;
 
         std.log.debug("init resize rows={d} cols={d}", .{ resize.rows, resize.cols });
     }
@@ -334,7 +341,6 @@ const Daemon = struct {
         }
         try ipc.appendMessage(self.alloc, &client.write_buf, .Ack, "");
         client.has_pending_output = true;
-        self.has_had_client = true;
         std.log.debug("run command len={d}", .{payload.len});
     }
 };
@@ -932,8 +938,8 @@ fn attach(daemon: *Daemon) !void {
         // - Mouse: 1000=basic, 1002=button-event, 1003=any-event, 1006=SGR extended
         // - 2004=bracketed paste, 1004=focus events, 1049=alt screen
         // - 25h=show cursor
-        // NOTE: We intentionally do NOT clear screen or home cursor here because we dont
-        // want to corrupt any programs that rely on it including ghostty's session restore.
+        // NOTE: We don't enter alt screen on attach, but the inner session
+        // (vim, less, etc.) may have set it, so we must still reset it here.
         const restore_seq = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l" ++
             "\x1b[?2004l\x1b[?1004l\x1b[?1049l" ++
             // Restore pre-attach Kitty keyboard protocol mode so Ctrl combos
@@ -959,10 +965,12 @@ fn attach(daemon: *Daemon) !void {
 
     _ = c.tcsetattr(posix.STDIN_FILENO, c.TCSANOW, &raw_termios);
 
-    // Clear screen before attaching. This provides a clean slate before
-    // the session restore.
-    const clear_seq = "\x1b[2J\x1b[H";
-    _ = try posix.write(posix.STDOUT_FILENO, clear_seq);
+    // Clear screen before attaching to provide a clean slate for the
+    // session snapshot. We intentionally do NOT use the alternate screen
+    // (\x1b[?1049h) because it has no scrollback buffer, which would
+    // prevent the user from scrolling back through session history.
+    const enter_attach_seq = "\x1b[2J\x1b[H";
+    _ = try posix.write(posix.STDOUT_FILENO, enter_attach_seq);
 
     try clientLoop(daemon.cfg, client_sock);
 }
@@ -1262,7 +1270,10 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
         .max_scrollback = daemon.cfg.max_scrollback,
     });
     defer term.deinit(daemon.alloc);
-    var vt_stream = term.vtStream();
+    var vt_stream: ghostty_vt.Stream(ScrollPreservingHandler) = .initAlloc(
+        daemon.alloc,
+        ScrollPreservingHandler.init(&term),
+    );
     defer vt_stream.deinit();
 
     daemon_loop: while (daemon.running) {
@@ -1333,6 +1344,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                     break :daemon_loop;
                 } else {
                     // Feed PTY output to terminal emulator for state tracking
+                    vt_stream.handler.clear_detected = false;
                     try vt_stream.nextSlice(buf[0..n]);
                     daemon.has_pty_output = true;
 
@@ -1347,8 +1359,18 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                         }
                     }
 
-                    // Broadcast data to all clients
+                    // Broadcast PTY output only to initialized attach clients.
+                    // Utility clients (run/history/probe) never send Init and
+                    // should only receive explicit replies (Ack/History/Info).
                     for (daemon.clients.items) |client| {
+                        if (!client.initialized) continue;
+                        // If ESC[2J was detected, prepend ESC[22J (scroll_complete)
+                        // so the client terminal pushes screen content to scrollback
+                        // before clearing. Terminals that don't support 22J ignore it
+                        // and the original ESC[2J in buf still clears the screen.
+                        if (vt_stream.handler.clear_detected) {
+                            ipc.appendMessage(daemon.alloc, &client.write_buf, .Output, "\x1b[22J") catch {};
+                        }
                         ipc.appendMessage(daemon.alloc, &client.write_buf, .Output, buf[0..n]) catch |err| {
                             std.log.warn("failed to buffer output for client err={s}", .{@errorName(err)});
                             continue;
@@ -1414,7 +1436,9 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                 }
             }
 
-            if (revents & posix.POLL.OUT != 0) {
+            // A client can queue replies while handling POLL.IN (e.g. Init, Run, History, Info).
+            // Flush pending bytes immediately instead of waiting for another poll cycle.
+            if ((revents & posix.POLL.OUT != 0) or client.has_pending_output) {
                 // Flush pending output buffers
                 const n = posix.write(client.socket_fd, client.write_buf.items) catch |err| blk: {
                     if (err == error.WouldBlock) break :blk 0;
@@ -1693,13 +1717,84 @@ fn isKittyCtrlBackslash(buf: []const u8) bool {
         std.mem.indexOf(u8, buf, "\x1b[92;5:1u") != null;
 }
 
-fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Terminal) ?[]const u8 {
+/// A VT stream handler that detects ESC[2J (erase display complete) on the
+/// primary screen and sets a flag so the daemon can prepend a scroll-preserving
+/// sequence (ESC[22J) to client output before forwarding the raw bytes.
+///
+/// Also calls scrollClear() on the server-side VT as a safety net for shells
+/// without OSC 133 prompt annotations, where ghostty's built-in heuristic
+/// would skip scrollback preservation.
+const ScrollPreservingHandler = struct {
+    terminal: *ghostty_vt.Terminal,
+    clear_detected: bool = false,
+
+    pub fn init(terminal: *ghostty_vt.Terminal) ScrollPreservingHandler {
+        return .{ .terminal = terminal };
+    }
+
+    pub fn deinit(_: *ScrollPreservingHandler) void {}
+
+    pub fn vt(
+        self: *ScrollPreservingHandler,
+        comptime action: ghostty_vt.StreamAction.Tag,
+        value: ghostty_vt.StreamAction.Value(action),
+    ) !void {
+        if (comptime action == .erase_display_complete) {
+            if (self.terminal.screens.active_key == .primary) {
+                self.terminal.screens.active.scrollClear() catch {};
+                self.clear_detected = true;
+            }
+        }
+        var handler = self.terminal.vtHandler();
+        return handler.vt(action, value);
+    }
+};
+
+fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Terminal, client_rows: u16) ?[]const u8 {
     var builder: std.Io.Writer.Allocating = .init(alloc);
     defer builder.deinit();
 
-    var term_formatter = ghostty_vt.formatter.TerminalFormatter.init(term, .vt);
-    term_formatter.content = .{ .selection = null };
-    term_formatter.extra = .{
+    const screen = term.screens.active;
+
+    // Phase 1: Serialize scrollback history as content only (no cursor/modes).
+    // This flows into the client's scrollback buffer naturally.
+    if (screen.pages.getBottomRight(.history)) |history_br| {
+        const history_tl = screen.pages.getTopLeft(.history);
+        var hist_fmt = ghostty_vt.formatter.TerminalFormatter.init(term, .vt);
+        hist_fmt.content = .{ .selection = ghostty_vt.Selection.init(history_tl, history_br, false) };
+        hist_fmt.extra = .{
+            .palette = false,
+            .modes = false,
+            .scrolling_region = false,
+            .tabstops = false,
+            .pwd = false,
+            .keyboard = false,
+            .screen = .none,
+        };
+        hist_fmt.format(&builder.writer) catch |err| {
+            std.log.warn("failed to format scrollback err={s}", .{@errorName(err)});
+            return null;
+        };
+        // Scroll visible history lines into the client's scrollback buffer.
+        // We push exactly min(history_rows, client_rows) newlines — enough to
+        // scroll rendered content off screen without inserting blank lines into
+        // the scrollback. Move cursor to the bottom first so each \n scrolls.
+        const history_rows = screen.pages.total_rows - screen.pages.rows;
+        const push_count: usize = @min(history_rows, @as(usize, client_rows));
+        builder.writer.writeAll("\x1b[999;1H") catch return null;
+        var i: usize = 0;
+        while (i < push_count) : (i += 1) {
+            builder.writer.writeAll("\n") catch return null;
+        }
+        builder.writer.writeAll("\x1b[H") catch return null;
+    }
+
+    // Phase 2: Serialize active screen with cursor position and terminal modes.
+    const active_tl = screen.pages.getTopLeft(.active);
+    const active_br = screen.pages.getBottomRight(.active) orelse return null;
+    var active_fmt = ghostty_vt.formatter.TerminalFormatter.init(term, .vt);
+    active_fmt.content = .{ .selection = ghostty_vt.Selection.init(active_tl, active_br, false) };
+    active_fmt.extra = .{
         .palette = false,
         .modes = true,
         .scrolling_region = true,
@@ -1708,9 +1803,8 @@ fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Terminal) 
         .keyboard = true,
         .screen = .all,
     };
-
-    term_formatter.format(&builder.writer) catch |err| {
-        std.log.warn("failed to format terminal state err={s}", .{@errorName(err)});
+    active_fmt.format(&builder.writer) catch |err| {
+        std.log.warn("failed to format active screen err={s}", .{@errorName(err)});
         return null;
     };
 
