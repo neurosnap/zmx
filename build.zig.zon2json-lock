@@ -1,9 +1,9 @@
 {
-  "ghostty-1.3.0-dev-5UdBC1jbPQQiKIuCh-CDmtqsuAVn7HUDNjkzKjt9H_aX": {
+  "ghostty-1.3.0-dev-5UdBC0h6TwSwECcK25wXYZkpJ2TrATdQx8jqy9bVGWyV": {
     "name": "ghostty",
-    "url": "git+https://github.com/ghostty-org/ghostty.git?ref=HEAD#4ff0e0c9d251ddd0687ead578a90d58d63f9840b",
-    "hash": "sha256-S7ksHBC6jVDnSDaFgVhJ5wwdEjtfVhbPvkqWxkFH8kA=",
-    "rev": "4ff0e0c9d251ddd0687ead578a90d58d63f9840b"
+    "url": "git+https://github.com/ghostty-org/ghostty.git?ref=HEAD#c61f184069336c61f7840e2268c6f4dc183b60af",
+    "hash": "sha256-/WcotC/YCONDob/86441GEEMPRrlTO86HQXrZU5Ao3M=",
+    "rev": "c61f184069336c61f7840e2268c6f4dc183b60af"
   },
   "libxev-0.0.0-86vtc4IcEwCqEYxEYoN_3KXmc6A9VLcm22aVImfvecYs": {
     "name": "libxev",
@@ -12,7 +12,7 @@
   },
   "vaxis-0.5.1-BWNV_LosCQAGmCCNOLljCIw6j6-yt53tji6n6rwJ2BhS": {
     "name": "vaxis",
-    "url": "https://github.com/rockorager/libvaxis/archive/7dbb9fd3122e4ffad262dd7c151d80d863b68558.tar.gz",
+    "url": "https://deps.files.ghostty.org/vaxis-7dbb9fd3122e4ffad262dd7c151d80d863b68558.tar.gz",
     "hash": "sha256-LnIzK8icW1Qexua9SHaeHz+3V8QAbz0a+UC1T5sIjvY="
   },
   "zigimg-0.1.0-8_eo2vHnEwCIVW34Q14Ec-xUlzIoVg86-7FU2ypPtxms": {
@@ -26,10 +26,10 @@
     "hash": "sha256-sHPh+TQSdUGus/QTbj7KSJJkTuNTrK4VNmQDjS30Lf8=",
     "rev": "5f05f8f83a75caea201f12cc8ea32a2d82ea9732"
   },
-  "z2d-0.9.0-j5P_Hu-WFgA_JEfRpiFss6gdvcvS47cgOc0Via2eKD_T": {
+  "z2d-0.10.0-j5P_Hu-6FgBsZNgwphIqh17jDnj8_yPtD8yzjO6PpHRQ": {
     "name": "z2d",
-    "url": "https://github.com/vancluever/z2d/archive/refs/tags/v0.9.0.tar.gz",
-    "hash": "sha256-+QqCRoXwrFA1/l+oWvYVyAVebGQitAFQNhi9U3EVrxA="
+    "url": "https://deps.files.ghostty.org/z2d-0.10.0-j5P_Hu-6FgBsZNgwphIqh17jDnj8_yPtD8yzjO6PpHRQ.tar.gz",
+    "hash": "sha256-afIdou/V7gk3/lXE0J5Ir8T7L5GgHvFnyMJ1rgRnl/c="
   },
   "zig_objc-0.0.0-Ir_Sp5gTAQCvxxR7oVIrPXxXwsfKgVP7_wqoOQrZjFeK": {
     "name": "zig_objc",
@@ -41,10 +41,10 @@
     "url": "https://deps.files.ghostty.org/zig_js-04db83c617da1956ac5adc1cb9ba1e434c1cb6fd.tar.gz",
     "hash": "sha256-TCAY5WAV05UEuAkDhq2c6Tk/ODgAhdnDI3O/flb8c6M="
   },
-  "uucode-0.1.0-ZZjBPicPTQDlG6OClzn2bPu7ICkkkyWrTB6aRsBr-A1E": {
+  "uucode-0.2.0-ZZjBPqZVVABQepOqZHR7vV_NcaN-wats0IB6o-Exj6m9": {
     "name": "uucode",
-    "url": "https://github.com/jacobsandlund/uucode/archive/31655fba3c638229989cc524363ef5e3c7b580c1.tar.gz",
-    "hash": "sha256-SzpYGhgG4B6Luf8eT35sKLobCxjmwEuo1Twk0jeu9g4="
+    "url": "https://deps.files.ghostty.org/uucode-0.2.0-ZZjBPqZVVABQepOqZHR7vV_NcaN-wats0IB6o-Exj6m9.tar.gz",
+    "hash": "sha256-0KvuD0+L1urjwFF3fhbnxC2JZKqqAVWRxOVlcD9GX5U="
   },
   "wayland-0.5.0-dev-lQa1khrMAQDJDwYFKpdH3HizherB7sHo5dKMECfvxQHe": {
     "name": "zig_wayland",
@@ -53,18 +53,23 @@
   },
   "zf-0.10.3-OIRy8RuJAACKA3Lohoumrt85nRbHwbpMcUaLES8vxDnh": {
     "name": "zf",
-    "url": "https://github.com/natecraddock/zf/archive/3c52637b7e937c5ae61fd679717da3e276765b23.tar.gz",
+    "url": "https://deps.files.ghostty.org/zf-3c52637b7e937c5ae61fd679717da3e276765b23.tar.gz",
     "hash": "sha256-OwFdkorwTp4mJyvBXrTbtNmp1GnrbSkKDdrmc7d8RWg="
   },
-  "gobject-0.3.0-Skun7ET3nQCqJhDL0KnF_X7M4L7o7JePsJBbrYpEr7UV": {
+  "gobject-0.3.0-Skun7ANLnwDvEfIpVmohcppXgOvg_I6YOJFmPIsKfXk-": {
     "name": "gobject",
-    "url": "https://deps.files.ghostty.org/gobject-2025-09-20-20-1.tar.zst",
-    "hash": "sha256-SXiqGm81aUn6yq1wFXgNTAULdKOHS/Rzkp5OgNkkcXo="
+    "url": "https://deps.files.ghostty.org/gobject-2025-11-08-23-1.tar.zst",
+    "hash": "sha256-2b1DBvAIHY5LhItq3+q9L6tJgi7itnnrSAHc7fXWDEg="
   },
-  "N-V-__8AAH0GaQC8a52s6vfIxg88OZgFgEW6DFxfSK4lX_l3": {
+  "N-V-__8AANT61wB--nJ95Gj_ctmzAtcjloZ__hRqNw5lC1Kr": {
+    "name": "bindings",
+    "url": "https://deps.files.ghostty.org/DearBindings_v0.17_ImGui_v1.92.5-docking.tar.gz",
+    "hash": "sha256-i/7FAOAJJvZ5hT7iPWfMOS08MYFzPKRwRzhlHT9wuqM="
+  },
+  "N-V-__8AAEbOfQBnvcFcCX2W5z7tDaN8vaNZGamEQtNOe0UI": {
     "name": "imgui",
-    "url": "https://deps.files.ghostty.org/imgui-1220bc6b9daceaf7c8c60f3c3998058045ba0c5c5f48ae255ff97776d9cd8bfc6402.tar.gz",
-    "hash": "sha256-oF/QHgTPEat4Hig4fGIdLkIPHmBEyOJ6JeYD6pnveGA="
+    "url": "https://github.com/ocornut/imgui/archive/refs/tags/v1.92.5-docking.tar.gz",
+    "hash": "sha256-yBbCDox18+Fa6Gc1DnmSVQLRpqhZOLsac7iSfl8x+cs="
   },
   "N-V-__8AAKLKpwC4H27Ps_0iL3bPkQb-z6ZVSrB-x_3EEkub": {
     "name": "freetype",
@@ -176,9 +181,9 @@
     "url": "https://deps.files.ghostty.org/NerdFontsSymbolsOnly-3.4.0.tar.gz",
     "hash": "sha256-EWTRuVbUveJI17LwmYxDzJT1ICQxoVZKeTiVsec7DQQ="
   },
-  "N-V-__8AAPZCAwDJ0OsIn2nbr3FMvBw68oiv-hC2pFuY1eLN": {
+  "N-V-__8AABVbAwBwDRyZONfx553tvMW8_A2OKUoLzPUSRiLF": {
     "name": "iterm2_themes",
-    "url": "https://github.com/mbadolato/iTerm2-Color-Schemes/releases/download/release-20251110-150531-d5f3d53/ghostty-themes.tgz",
-    "hash": "sha256-VZq3L/cAAu7kLA5oqJYNjAZApoblfBtAzfdKVOuJPQI="
+    "url": "https://deps.files.ghostty.org/ghostty-themes-release-20260216-151611-fc73ce3.tgz",
+    "hash": "sha256-FCALuGoMgUq2lgnVALKAs5a20uuDXt8Gdt5KeJwKqP0="
   }
 }
