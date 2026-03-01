@@ -474,10 +474,10 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, cmd, "wait") or std.mem.eql(u8, cmd, "w")) {
         var args_raw: std.ArrayList([]const u8) = .empty;
         defer {
-            args_raw.deinit(alloc);
             for (args_raw.items) |sesh| {
                 alloc.free(sesh);
             }
+            args_raw.deinit(alloc);
         }
         while (args.next()) |session_name| {
             const sesh = try getSeshName(alloc, session_name);
