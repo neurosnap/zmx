@@ -274,7 +274,8 @@ const Daemon = struct {
     pub fn handleInfo(self: *Daemon, client: *Client) !void {
         const clients_len = self.clients.items.len - 1;
 
-        // Build command string from args
+        // Build command string from args, re-quoting args that contain
+        // shell-special characters so the displayed command is copy-pasteable.
         var cmd_buf: [ipc.MAX_CMD_LEN]u8 = undefined;
         var cmd_len: u16 = 0;
         const cur_cmd = self.command orelse self.task_command;
@@ -286,10 +287,19 @@ const Daemon = struct {
                         cmd_len += 1;
                     }
                 }
-                const remaining = ipc.MAX_CMD_LEN - cmd_len;
-                const copy_len: u16 = @intCast(@min(arg.len, remaining));
-                @memcpy(cmd_buf[cmd_len..][0..copy_len], arg[0..copy_len]);
-                cmd_len += copy_len;
+                if (shellNeedsQuoting(arg)) {
+                    const quoted = shellQuote(self.alloc, arg) catch arg;
+                    defer if (quoted.ptr != arg.ptr) self.alloc.free(quoted);
+                    const remaining = ipc.MAX_CMD_LEN - cmd_len;
+                    const copy_len: u16 = @intCast(@min(quoted.len, remaining));
+                    @memcpy(cmd_buf[cmd_len..][0..copy_len], quoted[0..copy_len]);
+                    cmd_len += copy_len;
+                } else {
+                    const remaining = ipc.MAX_CMD_LEN - cmd_len;
+                    const copy_len: u16 = @intCast(@min(arg.len, remaining));
+                    @memcpy(cmd_buf[cmd_len..][0..copy_len], arg[0..copy_len]);
+                    cmd_len += copy_len;
+                }
             }
         }
 
@@ -967,6 +977,79 @@ fn attach(daemon: *Daemon) !void {
     try clientLoop(daemon.cfg, client_sock);
 }
 
+fn shellNeedsQuoting(arg: []const u8) bool {
+    if (arg.len == 0) return true;
+    for (arg) |ch| {
+        switch (ch) {
+            ' ', '\t', '"', '\'', '\\', '$', '`', '!', '(', ')', '{', '}', '[', ']', '|', '&', ';', '<', '>', '?', '*', '~', '#', '\n' => return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
+fn shellQuote(alloc: std.mem.Allocator, arg: []const u8) ![]u8 {
+    // Prefer double quotes when the arg has no double quotes (cleaner output).
+    // Fall back to single quotes with '\'' escaping for embedded single quotes.
+    const has_double_quote = std.mem.indexOfScalar(u8, arg, '"') != null;
+
+    if (!has_double_quote) {
+        // Double-quote style: escape only $ ` \ ! "
+        var len: usize = 2; // opening and closing "
+        for (arg) |ch| {
+            if (ch == '$' or ch == '`' or ch == '\\' or ch == '!') {
+                len += 2; // backslash + char
+            } else {
+                len += 1;
+            }
+        }
+        const buf = try alloc.alloc(u8, len);
+        var i: usize = 0;
+        buf[i] = '"';
+        i += 1;
+        for (arg) |ch| {
+            if (ch == '$' or ch == '`' or ch == '\\' or ch == '!') {
+                buf[i] = '\\';
+                buf[i + 1] = ch;
+                i += 2;
+            } else {
+                buf[i] = ch;
+                i += 1;
+            }
+        }
+        buf[i] = '"';
+        return buf;
+    }
+
+    // Single-quote style: escape embedded single quotes as '\''
+    var len: usize = 2;
+    for (arg) |ch| {
+        if (ch == '\'') {
+            len += 4;
+        } else {
+            len += 1;
+        }
+    }
+    const buf = try alloc.alloc(u8, len);
+    var i: usize = 0;
+    buf[i] = '\'';
+    i += 1;
+    for (arg) |ch| {
+        if (ch == '\'') {
+            buf[i] = '\'';
+            buf[i + 1] = '\\';
+            buf[i + 2] = '\'';
+            buf[i + 3] = '\'';
+            i += 4;
+        } else {
+            buf[i] = ch;
+            i += 1;
+        }
+    }
+    buf[i] = '\'';
+    return buf;
+}
+
 fn run(daemon: *Daemon, command_args: [][]const u8) !void {
     const alloc = daemon.alloc;
     var buf: [4096]u8 = undefined;
@@ -985,19 +1068,36 @@ fn run(daemon: *Daemon, command_args: [][]const u8) !void {
     defer if (allocated_cmd) |cmd| alloc.free(cmd);
 
     if (command_args.len > 0) {
+        var parts: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (parts.items) |part| alloc.free(part);
+            parts.deinit(alloc);
+        }
+
         var total_len: usize = 0;
-        for (command_args) |arg| {
-            total_len += arg.len + 1;
+        for (command_args, 0..) |arg, i| {
+            // Last arg is the sentinel (e.g. "; echo ZMX_TASK_COMPLETED:$?")
+            // which must not be quoted so the shell interprets it.
+            const is_last = i == command_args.len - 1;
+            if (!is_last and shellNeedsQuoting(arg)) {
+                const quoted = try shellQuote(alloc, arg);
+                try parts.append(alloc, quoted);
+                total_len += quoted.len + 1;
+            } else {
+                const duped = try alloc.dupe(u8, arg);
+                try parts.append(alloc, duped);
+                total_len += duped.len + 1;
+            }
         }
 
         const cmd_buf = try alloc.alloc(u8, total_len);
         allocated_cmd = cmd_buf;
 
         var offset: usize = 0;
-        for (command_args, 0..) |arg, i| {
-            @memcpy(cmd_buf[offset .. offset + arg.len], arg);
-            offset += arg.len;
-            if (i < command_args.len - 1) {
+        for (parts.items, 0..) |part, i| {
+            @memcpy(cmd_buf[offset .. offset + part.len], part);
+            offset += part.len;
+            if (i < parts.items.len - 1) {
                 cmd_buf[offset] = ' ';
             } else {
                 cmd_buf[offset] = '\n';
