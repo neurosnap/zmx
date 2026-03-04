@@ -445,18 +445,6 @@ pub fn main() !void {
         while (args.next()) |arg| {
             try cmd_args_raw.append(alloc, arg);
         }
-        var cmd_args = try cmd_args_raw.clone(alloc);
-        defer cmd_args.deinit(alloc);
-
-        const shell = detectShell();
-        // add a task completed marker so we know when the cmd is finished
-        // we also capture the exit status
-        if (std.mem.eql(u8, std.fs.path.basename(shell), "fish")) {
-            // fish has special handling for capturing exit status
-            try cmd_args.append(alloc, "; echo ZMX_TASK_COMPLETED:$status");
-        } else {
-            try cmd_args.append(alloc, "; echo ZMX_TASK_COMPLETED:$?");
-        }
         const clients = try std.ArrayList(*Client).initCapacity(alloc, 10);
 
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -480,7 +468,7 @@ pub fn main() !void {
         };
         daemon.socket_path = try getSocketPath(alloc, cfg.socket_dir, sesh);
         std.log.info("socket path={s}", .{daemon.socket_path});
-        return run(&daemon, cmd_args.items);
+        return run(&daemon, cmd_args_raw.items);
     } else if (std.mem.eql(u8, cmd, "wait") or std.mem.eql(u8, cmd, "w")) {
         var args_raw: std.ArrayList([]const u8) = .empty;
         defer {
@@ -1055,6 +1043,10 @@ fn run(daemon: *Daemon, command_args: [][]const u8) !void {
     var buf: [4096]u8 = undefined;
     var w = std.fs.File.stdout().writer(&buf);
 
+    var cmd_to_send: ?[]const u8 = null;
+    var allocated_cmd: ?[]u8 = null;
+    defer if (allocated_cmd) |cmd| alloc.free(cmd);
+
     const result = try ensureSession(daemon);
     if (result.is_daemon) return;
 
@@ -1063,9 +1055,16 @@ fn run(daemon: *Daemon, command_args: [][]const u8) !void {
         try w.interface.flush();
     }
 
-    var cmd_to_send: ?[]const u8 = null;
-    var allocated_cmd: ?[]u8 = null;
-    defer if (allocated_cmd) |cmd| alloc.free(cmd);
+    const shell = detectShell();
+    const shell_basename = std.fs.path.basename(shell);
+    const inline_task_marker = if (std.mem.eql(u8, shell_basename, "fish"))
+        "; echo ZMX_TASK_COMPLETED:$status"
+    else
+        "; echo ZMX_TASK_COMPLETED:$?";
+    const stdin_task_marker = if (std.mem.eql(u8, shell_basename, "fish"))
+        "echo ZMX_TASK_COMPLETED:$status"
+    else
+        "echo ZMX_TASK_COMPLETED:$?";
 
     if (command_args.len > 0) {
         var parts: std.ArrayList([]const u8) = .empty;
@@ -1075,11 +1074,8 @@ fn run(daemon: *Daemon, command_args: [][]const u8) !void {
         }
 
         var total_len: usize = 0;
-        for (command_args, 0..) |arg, i| {
-            // Last arg is the sentinel (e.g. "; echo ZMX_TASK_COMPLETED:$?")
-            // which must not be quoted so the shell interprets it.
-            const is_last = i == command_args.len - 1;
-            if (!is_last and shellNeedsQuoting(arg)) {
+        for (command_args) |arg| {
+            if (shellNeedsQuoting(arg)) {
                 const quoted = try shellQuote(alloc, arg);
                 try parts.append(alloc, quoted);
                 total_len += quoted.len + 1;
@@ -1090,20 +1086,22 @@ fn run(daemon: *Daemon, command_args: [][]const u8) !void {
             }
         }
 
+        total_len += inline_task_marker.len + 1;
+
         const cmd_buf = try alloc.alloc(u8, total_len);
         allocated_cmd = cmd_buf;
 
         var offset: usize = 0;
-        for (parts.items, 0..) |part, i| {
+        for (parts.items) |part| {
             @memcpy(cmd_buf[offset .. offset + part.len], part);
             offset += part.len;
-            if (i < parts.items.len - 1) {
-                cmd_buf[offset] = ' ';
-            } else {
-                cmd_buf[offset] = '\n';
-            }
+            cmd_buf[offset] = ' ';
             offset += 1;
         }
+
+        @memcpy(cmd_buf[offset .. offset + inline_task_marker.len], inline_task_marker);
+        offset += inline_task_marker.len;
+        cmd_buf[offset] = '\n';
         cmd_to_send = cmd_buf;
     } else {
         const stdin_fd = posix.STDIN_FILENO;
@@ -1126,6 +1124,10 @@ fn run(daemon: *Daemon, command_args: [][]const u8) !void {
                 if (needs_newline) {
                     try stdin_buf.append(alloc, '\n');
                 }
+
+                try stdin_buf.appendSlice(alloc, stdin_task_marker);
+                try stdin_buf.append(alloc, '\n');
+
                 cmd_to_send = try alloc.dupe(u8, stdin_buf.items);
                 allocated_cmd = @constCast(cmd_to_send.?);
             }
