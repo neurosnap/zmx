@@ -1322,6 +1322,46 @@ fn clientLoop(_: *Cfg, client_sock_fd: i32) !void {
     }
 }
 
+const DA1_QUERY = "\x1b[c";
+const DA1_QUERY_EXPLICIT = "\x1b[0c";
+const DA2_QUERY = "\x1b[>c";
+const DA2_QUERY_EXPLICIT = "\x1b[>0c";
+const DA1_RESPONSE = "\x1b[?62;22c";
+const DA2_RESPONSE = "\x1b[>1;10;0c";
+
+fn respondToDeviceAttributes(pty_fd: i32, data: []const u8) void {
+    // Scan for DA queries in PTY output and respond on behalf of the terminal.
+    // This handles the case where no client is attached (e.g. zmx run)
+    // and the shell (e.g. fish) sends a DA query that would otherwise go unanswered.
+    //
+    // DA1 query: ESC [ c  or  ESC [ 0 c
+    // DA2 query: ESC [ > c  or  ESC [ > 0 c
+    // DA1 response (from terminal): ESC [ ? ... c  (has '?' after '[')
+    //
+    // We must NOT match DA responses (which contain '?') as queries.
+    var i: usize = 0;
+    while (i < data.len) {
+        if (data[i] == '\x1b' and i + 1 < data.len and data[i + 1] == '[') {
+            // Skip DA responses which have '?' after CSI
+            if (i + 2 < data.len and data[i + 2] == '?') {
+                i += 3;
+                continue;
+            }
+            if (matchSeq(data[i..], DA2_QUERY) or matchSeq(data[i..], DA2_QUERY_EXPLICIT)) {
+                _ = posix.write(pty_fd, DA2_RESPONSE) catch {};
+            } else if (matchSeq(data[i..], DA1_QUERY) or matchSeq(data[i..], DA1_QUERY_EXPLICIT)) {
+                _ = posix.write(pty_fd, DA1_RESPONSE) catch {};
+            }
+        }
+        i += 1;
+    }
+}
+
+fn matchSeq(data: []const u8, seq: []const u8) bool {
+    if (data.len < seq.len) return false;
+    return std.mem.eql(u8, data[0..seq.len], seq);
+}
+
 fn findTaskExitMarker(output: []const u8) ?u8 {
     const marker = "ZMX_TASK_COMPLETED:";
 
@@ -1435,6 +1475,15 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                     // Feed PTY output to terminal emulator for state tracking
                     try vt_stream.nextSlice(buf[0..n]);
                     daemon.has_pty_output = true;
+
+                    // When no clients are attached, respond to terminal
+                    // queries (e.g. DA1/DA2) on behalf of the terminal.
+                    // This prevents shells like from fish from waiting 2s
+                    // and then sending a no DA query response warning because
+                    // there's no client terminal to respond to the query.
+                    if (daemon.clients.items.len == 0) {
+                        respondToDeviceAttributes(pty_fd, buf[0..n]);
+                    }
 
                     // In run mode, scan output for exit code marker
                     if (daemon.is_task_mode and daemon.task_exit_code == null) {
