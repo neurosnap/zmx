@@ -179,6 +179,8 @@ ssh remote-server zmx attach session-na<TAB>
 # <- auto-complete suggestions appear here
 ```
 
+> NOTICE: when installing `zmx` with `homebrew` completions are automatically installed.
+
 ### bash
 
 Add this to your `.bashrc` file:
