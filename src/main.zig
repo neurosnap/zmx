@@ -281,25 +281,29 @@ const Daemon = struct {
         const cur_cmd = self.command orelse self.task_command;
         if (cur_cmd) |args| {
             for (args, 0..) |arg, i| {
-                if (i > 0) {
-                    if (cmd_len < ipc.MAX_CMD_LEN) {
-                        cmd_buf[cmd_len] = ' ';
-                        cmd_len += 1;
+                const quoted = if (shellNeedsQuoting(arg))
+                    shellQuote(self.alloc, arg) catch null
+                else
+                    null;
+                defer if (quoted) |q| self.alloc.free(q);
+                const src = quoted orelse arg;
+
+                const need = src.len + @as(usize, if (i > 0) 1 else 0);
+                if (cmd_len + need > ipc.MAX_CMD_LEN) {
+                    const ellipsis = "...";
+                    if (cmd_len + ellipsis.len <= ipc.MAX_CMD_LEN) {
+                        @memcpy(cmd_buf[cmd_len..][0..ellipsis.len], ellipsis);
+                        cmd_len += ellipsis.len;
                     }
+                    break;
                 }
-                if (shellNeedsQuoting(arg)) {
-                    const quoted = shellQuote(self.alloc, arg) catch arg;
-                    defer if (quoted.ptr != arg.ptr) self.alloc.free(quoted);
-                    const remaining = ipc.MAX_CMD_LEN - cmd_len;
-                    const copy_len: u16 = @intCast(@min(quoted.len, remaining));
-                    @memcpy(cmd_buf[cmd_len..][0..copy_len], quoted[0..copy_len]);
-                    cmd_len += copy_len;
-                } else {
-                    const remaining = ipc.MAX_CMD_LEN - cmd_len;
-                    const copy_len: u16 = @intCast(@min(arg.len, remaining));
-                    @memcpy(cmd_buf[cmd_len..][0..copy_len], arg[0..copy_len]);
-                    cmd_len += copy_len;
+
+                if (i > 0) {
+                    cmd_buf[cmd_len] = ' ';
+                    cmd_len += 1;
                 }
+                @memcpy(cmd_buf[cmd_len..][0..src.len], src);
+                cmd_len += @intCast(src.len);
             }
         }
 
@@ -977,46 +981,15 @@ fn shellNeedsQuoting(arg: []const u8) bool {
 }
 
 fn shellQuote(alloc: std.mem.Allocator, arg: []const u8) ![]u8 {
-    // Prefer double quotes when the arg has no double quotes (cleaner output).
-    // Fall back to single quotes with '\'' escaping for embedded single quotes.
-    const has_double_quote = std.mem.indexOfScalar(u8, arg, '"') != null;
-
-    if (!has_double_quote) {
-        // Double-quote style: escape only $ ` \ ! "
-        var len: usize = 2; // opening and closing "
-        for (arg) |ch| {
-            if (ch == '$' or ch == '`' or ch == '\\' or ch == '!') {
-                len += 2; // backslash + char
-            } else {
-                len += 1;
-            }
-        }
-        const buf = try alloc.alloc(u8, len);
-        var i: usize = 0;
-        buf[i] = '"';
-        i += 1;
-        for (arg) |ch| {
-            if (ch == '$' or ch == '`' or ch == '\\' or ch == '!') {
-                buf[i] = '\\';
-                buf[i + 1] = ch;
-                i += 2;
-            } else {
-                buf[i] = ch;
-                i += 1;
-            }
-        }
-        buf[i] = '"';
-        return buf;
-    }
-
-    // Single-quote style: escape embedded single quotes as '\''
+    // Always use single quotes (like Python's shlex.quote). Inside single
+    // quotes nothing is special except ' itself, which we handle with the
+    // '\'' trick (end quote, escaped literal quote, reopen quote).
+    //
+    // The previous double-quote strategy broke in interactive bash because
+    // \! does not suppress history expansion inside double quotes.
     var len: usize = 2;
     for (arg) |ch| {
-        if (ch == '\'') {
-            len += 4;
-        } else {
-            len += 1;
-        }
+        len += if (ch == '\'') 4 else 1;
     }
     const buf = try alloc.alloc(u8, len);
     var i: usize = 0;
@@ -1024,10 +997,7 @@ fn shellQuote(alloc: std.mem.Allocator, arg: []const u8) ![]u8 {
     i += 1;
     for (arg) |ch| {
         if (ch == '\'') {
-            buf[i] = '\'';
-            buf[i + 1] = '\\';
-            buf[i + 2] = '\'';
-            buf[i + 3] = '\'';
+            @memcpy(buf[i..][0..4], "'\\''");
             i += 4;
         } else {
             buf[i] = ch;
@@ -1067,42 +1037,25 @@ fn run(daemon: *Daemon, command_args: [][]const u8) !void {
         "echo ZMX_TASK_COMPLETED:$?";
 
     if (command_args.len > 0) {
-        var parts: std.ArrayList([]const u8) = .empty;
-        defer {
-            for (parts.items) |part| alloc.free(part);
-            parts.deinit(alloc);
-        }
+        var cmd_list = std.ArrayList(u8).empty;
+        defer cmd_list.deinit(alloc);
 
-        var total_len: usize = 0;
-        for (command_args) |arg| {
+        for (command_args, 0..) |arg, i| {
+            if (i > 0) try cmd_list.append(alloc, ' ');
             if (shellNeedsQuoting(arg)) {
                 const quoted = try shellQuote(alloc, arg);
-                try parts.append(alloc, quoted);
-                total_len += quoted.len + 1;
+                defer alloc.free(quoted);
+                try cmd_list.appendSlice(alloc, quoted);
             } else {
-                const duped = try alloc.dupe(u8, arg);
-                try parts.append(alloc, duped);
-                total_len += duped.len + 1;
+                try cmd_list.appendSlice(alloc, arg);
             }
         }
 
-        total_len += inline_task_marker.len + 1;
+        try cmd_list.appendSlice(alloc, inline_task_marker);
+        try cmd_list.append(alloc, '\n');
 
-        const cmd_buf = try alloc.alloc(u8, total_len);
-        allocated_cmd = cmd_buf;
-
-        var offset: usize = 0;
-        for (parts.items) |part| {
-            @memcpy(cmd_buf[offset .. offset + part.len], part);
-            offset += part.len;
-            cmd_buf[offset] = ' ';
-            offset += 1;
-        }
-
-        @memcpy(cmd_buf[offset .. offset + inline_task_marker.len], inline_task_marker);
-        offset += inline_task_marker.len;
-        cmd_buf[offset] = '\n';
-        cmd_to_send = cmd_buf;
+        cmd_to_send = try cmd_list.toOwnedSlice(alloc);
+        allocated_cmd = @constCast(cmd_to_send.?);
     } else {
         const stdin_fd = posix.STDIN_FILENO;
         if (!std.posix.isatty(stdin_fd)) {
@@ -1911,6 +1864,114 @@ fn serializeTerminal(alloc: std.mem.Allocator, term: *ghostty_vt.Terminal, forma
         std.log.warn("failed to allocate terminal output err={s}", .{@errorName(err)});
         return null;
     };
+}
+
+test "shellNeedsQuoting" {
+    try std.testing.expect(shellNeedsQuoting(""));
+    try std.testing.expect(shellNeedsQuoting("hello world"));
+    try std.testing.expect(shellNeedsQuoting("hello!"));
+    try std.testing.expect(shellNeedsQuoting("$PATH"));
+    try std.testing.expect(shellNeedsQuoting("it's"));
+    try std.testing.expect(shellNeedsQuoting("a|b"));
+    try std.testing.expect(shellNeedsQuoting("a;b"));
+    try std.testing.expect(!shellNeedsQuoting("hello"));
+    try std.testing.expect(!shellNeedsQuoting("bash"));
+    try std.testing.expect(!shellNeedsQuoting("-c"));
+    try std.testing.expect(!shellNeedsQuoting("/usr/bin/env"));
+}
+
+test "shellQuote" {
+    const alloc = std.testing.allocator;
+
+    const empty = try shellQuote(alloc, "");
+    defer alloc.free(empty);
+    try std.testing.expectEqualStrings("''", empty);
+
+    const space = try shellQuote(alloc, "hello world");
+    defer alloc.free(space);
+    try std.testing.expectEqualStrings("'hello world'", space);
+
+    const bang = try shellQuote(alloc, "hello!");
+    defer alloc.free(bang);
+    try std.testing.expectEqualStrings("'hello!'", bang);
+
+    const dollar = try shellQuote(alloc, "$PATH");
+    defer alloc.free(dollar);
+    try std.testing.expectEqualStrings("'$PATH'", dollar);
+
+    const sq = try shellQuote(alloc, "it's");
+    defer alloc.free(sq);
+    try std.testing.expectEqualStrings("'it'\\''s'", sq);
+
+    const dq = try shellQuote(alloc, "say \"hi\"");
+    defer alloc.free(dq);
+    try std.testing.expectEqualStrings("'say \"hi\"'", dq);
+
+    const both = try shellQuote(alloc, "it's \"cool\"");
+    defer alloc.free(both);
+    try std.testing.expectEqualStrings("'it'\\''s \"cool\"'", both);
+
+    // just a single quote
+    const lone_sq = try shellQuote(alloc, "'");
+    defer alloc.free(lone_sq);
+    try std.testing.expectEqualStrings("''\\'''", lone_sq);
+
+    // multiple consecutive single quotes
+    const triple_sq = try shellQuote(alloc, "'''");
+    defer alloc.free(triple_sq);
+    try std.testing.expectEqualStrings("''\\'''\\'''\\'''", triple_sq);
+
+    // backtick command substitution
+    const backtick = try shellQuote(alloc, "`whoami`");
+    defer alloc.free(backtick);
+    try std.testing.expectEqualStrings("'`whoami`'", backtick);
+
+    // dollar command substitution
+    const dollar_cmd = try shellQuote(alloc, "$(whoami)");
+    defer alloc.free(dollar_cmd);
+    try std.testing.expectEqualStrings("'$(whoami)'", dollar_cmd);
+
+    // glob
+    const glob = try shellQuote(alloc, "*.txt");
+    defer alloc.free(glob);
+    try std.testing.expectEqualStrings("'*.txt'", glob);
+
+    // tilde
+    const tilde = try shellQuote(alloc, "~/file");
+    defer alloc.free(tilde);
+    try std.testing.expectEqualStrings("'~/file'", tilde);
+
+    // trailing backslash
+    const trailing_bs = try shellQuote(alloc, "path\\");
+    defer alloc.free(trailing_bs);
+    try std.testing.expectEqualStrings("'path\\'", trailing_bs);
+
+    // semicolon (command injection)
+    const semi = try shellQuote(alloc, "; rm -rf /");
+    defer alloc.free(semi);
+    try std.testing.expectEqualStrings("'; rm -rf /'", semi);
+
+    // embedded newline
+    const newline = try shellQuote(alloc, "line1\nline2");
+    defer alloc.free(newline);
+    try std.testing.expectEqualStrings("'line1\nline2'", newline);
+
+    // parentheses (subshell)
+    const parens = try shellQuote(alloc, "(echo hi)");
+    defer alloc.free(parens);
+    try std.testing.expectEqualStrings("'(echo hi)'", parens);
+
+    // heredoc marker
+    const heredoc = try shellQuote(alloc, "<<EOF");
+    defer alloc.free(heredoc);
+    try std.testing.expectEqualStrings("'<<EOF'", heredoc);
+
+    // no quoting needed -- plain word should still be quoted
+    // (shellQuote is only called when shellNeedsQuoting returns true,
+    // but verify it produces valid output anyway)
+    const plain = try shellQuote(alloc, "hello");
+    defer alloc.free(plain);
+    try std.testing.expectEqualStrings("'hello'", plain);
 }
 
 test "isKittyCtrlBackslash" {
