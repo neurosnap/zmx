@@ -4,12 +4,16 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
+### Changed
+
+- `zmx list` renamed keys and made formatting more stable
+
 ### Fixed
 
-- Run command stdin regression with ZMX_TASK_COMPLETED
-- Run command when no client is attached, send DA response query from daemon
-- Run command re-quote when using shell meta chars
-- Wait command use-after-free
+- `zmx run` stdin regression with ZMX_TASK_COMPLETED
+- `zmx run` when no client is attached, send DA response query from daemon
+- `zmx run` re-quote when using shell meta chars
+- `zmx wait` use-after-free
 
 ## v0.4.1 - 2026-02-23
 

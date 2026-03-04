@@ -1804,7 +1804,7 @@ fn writeSessionLine(writer: *std.Io.Writer, session: SessionEntry, short: bool, 
     }
 
     if (session.is_error) {
-        try writer.print("{s}session_name={s}\tstatus={s}\t(cleaning up)\n", .{
+        try writer.print("{s}name={s}\terr={s}\tstatus=cleaning up\n", .{
             prefix,
             session.name,
             session.error_name.?,
@@ -1812,27 +1812,27 @@ fn writeSessionLine(writer: *std.Io.Writer, session: SessionEntry, short: bool, 
         return;
     }
 
-    try writer.print("{s}session_name={s}\tpid={d}\tclients={d}\tcreated_at={d}", .{
+    try writer.print("{s}name={s}\tpid={d}\tclients={d}\tcreated={d}", .{
         prefix,
         session.name,
         session.pid.?,
         session.clients_len.?,
         session.created_at,
     });
-    if (session.task_ended_at) |ended_at| {
-        if (ended_at > 0) {
-            try writer.print("\ttask_ended_at={d}", .{ended_at});
-
-            if (session.task_exit_code) |exit_code| {
-                try writer.print("\ttask_exit_code={d}", .{exit_code});
-            }
-        }
-    }
     if (session.cwd) |cwd| {
-        try writer.print("\tstarted_in={s}", .{cwd});
+        try writer.print("\tstart_dir={s}", .{cwd});
     }
     if (session.cmd) |cmd| {
         try writer.print("\tcmd={s}", .{cmd});
+    }
+    if (session.task_ended_at) |ended_at| {
+        if (ended_at > 0) {
+            try writer.print("\tended={d}", .{ended_at});
+
+            if (session.task_exit_code) |exit_code| {
+                try writer.print("\texit_code={d}", .{exit_code});
+            }
+        }
     }
     try writer.print("\n", .{});
 }
@@ -1947,19 +1947,19 @@ test "writeSessionLine formats output for current session and short output" {
             .session = session,
             .short = false,
             .current_session = "dev",
-            .expected = "→ session_name=dev\tpid=123\tclients=2\tcreated_at=0\n",
+            .expected = "→ name=dev\tpid=123\tclients=2\tcreated=0\n",
         },
         .{
             .session = session,
             .short = false,
             .current_session = "other",
-            .expected = "  session_name=dev\tpid=123\tclients=2\tcreated_at=0\n",
+            .expected = "  name=dev\tpid=123\tclients=2\tcreated=0\n",
         },
         .{
             .session = session,
             .short = false,
             .current_session = null,
-            .expected = "session_name=dev\tpid=123\tclients=2\tcreated_at=0\n",
+            .expected = "name=dev\tpid=123\tclients=2\tcreated=0\n",
         },
         .{
             .session = session,
