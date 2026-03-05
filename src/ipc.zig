@@ -1,5 +1,7 @@
 const std = @import("std");
 const posix = std.posix;
+const cross = @import("cross.zig");
+const socket = @import("socket.zig");
 
 pub const Tag = enum(u8) {
     Input = 0,
@@ -24,6 +26,14 @@ pub const Resize = packed struct {
     rows: u16,
     cols: u16,
 };
+
+pub fn getTerminalSize(fd: i32) Resize {
+    var ws: cross.c.struct_winsize = undefined;
+    if (cross.c.ioctl(fd, cross.c.TIOCGWINSZ, &ws) == 0 and ws.ws_row > 0 and ws.ws_col > 0) {
+        return .{ .rows = ws.ws_row, .cols = ws.ws_col };
+    }
+    return .{ .rows = 24, .cols = 80 };
+}
 
 pub const MAX_CMD_LEN = 256;
 pub const MAX_CWD_LEN = 256;
@@ -150,3 +160,49 @@ pub const SocketBuffer = struct {
         return .{ .header = hdr, .payload = pay };
     }
 };
+
+const SessionProbeError = error{
+    Timeout,
+    ConnectionRefused,
+    Unexpected,
+};
+
+const SessionProbeResult = struct {
+    fd: i32,
+    info: Info,
+};
+
+pub fn probeSession(alloc: std.mem.Allocator, socket_path: []const u8) SessionProbeError!SessionProbeResult {
+    const timeout_ms = 1000;
+    const fd = socket.sessionConnect(socket_path) catch |err| switch (err) {
+        error.ConnectionRefused => return error.ConnectionRefused,
+        else => return error.Unexpected,
+    };
+    errdefer posix.close(fd);
+
+    send(fd, .Info, "") catch return error.Unexpected;
+
+    var poll_fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
+    const poll_result = posix.poll(&poll_fds, timeout_ms) catch return error.Unexpected;
+    if (poll_result == 0) {
+        return error.Timeout;
+    }
+
+    var sb = SocketBuffer.init(alloc) catch return error.Unexpected;
+    defer sb.deinit();
+
+    const n = sb.read(fd) catch return error.Unexpected;
+    if (n == 0) return error.Unexpected;
+
+    while (sb.next()) |msg| {
+        if (msg.header.tag == .Info) {
+            if (msg.payload.len == @sizeOf(Info)) {
+                return .{
+                    .fd = fd,
+                    .info = std.mem.bytesToValue(Info, msg.payload[0..@sizeOf(Info)]),
+                };
+            }
+        }
+    }
+    return error.Unexpected;
+}
