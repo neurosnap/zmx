@@ -984,9 +984,6 @@ fn shellQuote(alloc: std.mem.Allocator, arg: []const u8) ![]u8 {
     // Always use single quotes (like Python's shlex.quote). Inside single
     // quotes nothing is special except ' itself, which we handle with the
     // '\'' trick (end quote, escaped literal quote, reopen quote).
-    //
-    // The previous double-quote strategy broke in interactive bash because
-    // \! does not suppress history expansion inside double quotes.
     var len: usize = 2;
     for (arg) |ch| {
         len += if (ch == '\'') 4 else 1;
