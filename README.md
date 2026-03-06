@@ -211,6 +211,70 @@ if type -q zmx
 end
 ```
 
+## session picker
+
+You can add an interactive session picker to your shell that lets you fuzzy-find existing sessions, preview their scrollback history, or create new ones — all from a single prompt. This is especially useful for remote SSH workflows: add it to your shell startup so that connecting to a machine immediately presents the picker.
+
+Requires [fzf](https://github.com/junegunn/fzf).
+
+- **Enter** selects a matched session (or creates one if no sessions exist)
+- **Ctrl-N** creates a new session using the typed query, even when a fuzzy match is highlighted
+
+<details>
+<summary>bash and zsh</summary>
+
+```bash
+zmx-select() {
+  local display
+  display=$(zmx list 2>/dev/null | while IFS=$'\t' read -r name pid clients created dir; do
+    name=${name#session_name=}
+    pid=${pid#pid=}
+    clients=${clients#clients=}
+    dir=${dir#started_in=}
+    printf "%-20s  pid:%-8s  clients:%-2s  %s\n" "$name" "$pid" "$clients" "$dir"
+  done)
+
+  local output query key selected session_name
+  output=$({ [[ -n "$display" ]] && echo "$display"; } | fzf \
+    --print-query \
+    --expect=ctrl-n \
+    --height=80% \
+    --reverse \
+    --prompt="zmx> " \
+    --header="Enter: select | Ctrl-N: create new" \
+    --preview='zmx history {1}' \
+    --preview-window=right:60%:follow \
+  )
+  local rc=$?
+
+  query=$(echo "$output" | sed -n '1p')
+  key=$(echo "$output" | sed -n '2p')
+  selected=$(echo "$output" | sed -n '3p')
+
+  if [[ "$key" == "ctrl-n" && -n "$query" ]]; then
+    session_name="$query"
+  elif [[ $rc -eq 0 && -n "$selected" ]]; then
+    session_name=$(echo "$selected" | awk '{print $1}')
+  elif [[ -n "$query" ]]; then
+    session_name="$query"
+  else
+    return 130
+  fi
+
+  zmx attach "$session_name"
+}
+```
+
+You can call `zmx-select` manually, bind it to a key, or auto-launch it on shell startup when outside a zmx session. With `&& exit`, the normal flow becomes: connect via SSH → pick a session → work → detach or exit the session → SSH disconnects automatically. Cancelling the picker with **Ctrl-C** drops you into a regular shell as an escape hatch.
+
+```bash
+if command -v zmx &> /dev/null && command -v fzf &> /dev/null && [[ -z "$ZMX_SESSION" ]]; then
+  zmx-select && exit
+fi
+```
+
+</details>
+
 ## session prefix
 
 We allow users to set an environment variable `ZMX_SESSION_PREFIX` which will prefix the name of the session for all commands. This means if that variable is set, every command that accepts a session will be prefixed with it.
