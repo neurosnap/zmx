@@ -294,6 +294,48 @@ const Daemon = struct {
         return false;
     }
 
+    /// Runs in the forked child. Either execs or returns an error (caller
+    /// must exit on error -- returning would fall through to parent code).
+    fn execChild(self: *Daemon) !noreturn {
+        const alloc = std.heap.c_allocator;
+
+        // main() set SIGPIPE to SIG_IGN, which (unlike handlers) survives
+        // exec. Restore the default so the shell and its children behave
+        // normally (e.g. `yes | head` should exit 141 via SIGPIPE).
+        const dfl: posix.Sigaction = .{
+            .handler = .{ .handler = posix.SIG.DFL },
+            .mask = posix.sigemptyset(),
+            .flags = 0,
+        };
+        posix.sigaction(posix.SIG.PIPE, &dfl, null);
+
+        const session_env = try std.fmt.allocPrintSentinel(
+            alloc,
+            "ZMX_SESSION={s}",
+            .{self.session_name},
+            0,
+        );
+        _ = cross.c.putenv(session_env.ptr);
+
+        if (self.command) |cmd_args| {
+            const argv = try alloc.allocSentinel(?[*:0]const u8, cmd_args.len, null);
+            for (cmd_args, 0..) |arg, i| {
+                argv[i] = try alloc.dupeZ(u8, arg);
+            }
+            const err = std.posix.execvpeZ(argv[0].?, argv.ptr, std.c.environ);
+            std.log.err("execvpe failed: cmd={s} err={s}", .{ cmd_args[0], @errorName(err) });
+            std.posix.exit(1);
+        }
+
+        const shell = util.detectShell();
+        // Use "-shellname" as argv[0] to signal login shell (traditional method)
+        const login_shell = try std.fmt.allocPrintSentinel(alloc, "-{s}", .{std.fs.path.basename(shell)}, 0);
+        const argv = [_:null]?[*:0]const u8{ login_shell, null };
+        const err = std.posix.execveZ(shell, &argv, std.c.environ);
+        std.log.err("execve failed: err={s}", .{@errorName(err)});
+        std.posix.exit(1);
+    }
+
     fn spawnPty(self: *Daemon) !c_int {
         const size = ipc.getTerminalSize(posix.STDOUT_FILENO);
         var ws: cross.c.struct_winsize = .{
@@ -310,32 +352,15 @@ const Daemon = struct {
         }
 
         if (pid == 0) { // child pid code path
-            const session_env = try std.fmt.allocPrint(self.alloc, "ZMX_SESSION={s}\x00", .{self.session_name});
-            _ = cross.c.putenv(@ptrCast(session_env.ptr));
-
-            if (self.command) |cmd_args| {
-                const alloc = std.heap.c_allocator;
-                var argv_buf: [64:null]?[*:0]const u8 = undefined;
-                for (cmd_args, 0..) |arg, i| {
-                    argv_buf[i] = alloc.dupeZ(u8, arg) catch {
-                        std.posix.exit(1);
-                    };
-                }
-                argv_buf[cmd_args.len] = null;
-                const argv: [*:null]const ?[*:0]const u8 = &argv_buf;
-                const err = std.posix.execvpeZ(argv_buf[0].?, argv, std.c.environ);
-                std.log.err("execvpe failed: cmd={s} err={s}", .{ cmd_args[0], @errorName(err) });
+            // In the forked child, ANY error must exit rather than propagate:
+            // a returned error falls through to the parent code path below,
+            // running a second daemon on the same socket (or worse, hitting
+            // errdefers that delete the parent's socket file).
+            execChild(self) catch |err| {
+                std.log.err("child setup failed: {s}", .{@errorName(err)});
                 std.posix.exit(1);
-            } else {
-                const shell = util.detectShell();
-                // Use "-shellname" as argv[0] to signal login shell (traditional method)
-                var buf: [64]u8 = undefined;
-                const login_shell = try std.fmt.bufPrintZ(&buf, "-{s}", .{std.fs.path.basename(shell)});
-                const argv = [_:null]?[*:0]const u8{ login_shell, null };
-                const err = std.posix.execveZ(shell, &argv, std.c.environ);
-                std.log.err("execve failed: err={s}", .{@errorName(err)});
-                std.posix.exit(1);
-            }
+            };
+            unreachable; // execChild either execs or exits, never returns ok
         }
         // master pid code path
         self.pid = pid;
