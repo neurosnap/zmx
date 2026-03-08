@@ -54,7 +54,12 @@ pub fn get_session_entries(alloc: std.mem.Allocator, socket_dir: []const u8) !st
                     .task_exit_code = 1,
                     .task_ended_at = 0,
                 });
-                socket.cleanupStaleSocket(dir, entry.name);
+                // Only clean up when the daemon is definitively gone. A busy
+                // daemon can miss the probe timeout; deleting its socket
+                // orphans it permanently.
+                if (err == error.ConnectionRefused) {
+                    socket.cleanupStaleSocket(dir, entry.name);
+                }
                 continue;
             };
             posix.close(result.fd);

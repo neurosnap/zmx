@@ -362,9 +362,18 @@ const Daemon = struct {
                 if (self.command != null) {
                     std.log.warn("session already exists, ignoring command session={s}", .{self.session_name});
                 }
-            } else |_| {
-                socket.cleanupStaleSocket(dir, self.session_name);
-                should_create = true;
+            } else |err| switch (err) {
+                // Daemon is definitively gone: safe to replace.
+                error.ConnectionRefused => {
+                    socket.cleanupStaleSocket(dir, self.session_name);
+                    should_create = true;
+                },
+                // Probe didn't respond in time — daemon may just be busy.
+                // The probe is only to decide create-vs-attach; the session
+                // exists, so proceed to attach rather than fail or orphan.
+                else => {
+                    std.log.warn("probe slow ({s}), proceeding to attach session={s}", .{ @errorName(err), self.session_name });
+                },
             }
         }
 
@@ -782,7 +791,7 @@ fn detachAll(cfg: *Cfg) !void {
     defer alloc.free(socket_path);
     const result = ipc.probeSession(alloc, socket_path) catch |err| {
         std.log.err("session unresponsive: {s}", .{@errorName(err)});
-        socket.cleanupStaleSocket(dir, session_name);
+        if (err == error.ConnectionRefused) socket.cleanupStaleSocket(dir, session_name);
         return;
     };
     defer posix.close(result.fd);
@@ -810,10 +819,14 @@ fn kill(cfg: *Cfg, session_name: []const u8) !void {
     defer alloc.free(socket_path);
     const result = ipc.probeSession(alloc, socket_path) catch |err| {
         std.log.err("session unresponsive: {s}", .{@errorName(err)});
-        socket.cleanupStaleSocket(dir, session_name);
         var buf: [4096]u8 = undefined;
         var w = std.fs.File.stdout().writer(&buf);
-        w.interface.print("cleaned up stale session {s}\n", .{session_name}) catch {};
+        if (err == error.ConnectionRefused) {
+            socket.cleanupStaleSocket(dir, session_name);
+            w.interface.print("cleaned up stale session {s}\n", .{session_name}) catch {};
+        } else {
+            w.interface.print("session {s} is unresponsive ({s}) — daemon may be busy, try again or kill the process directly\n", .{ session_name, @errorName(err) }) catch {};
+        }
         w.interface.flush() catch {};
         return;
     };
@@ -847,7 +860,7 @@ fn history(cfg: *Cfg, session_name: []const u8, format: util.HistoryFormat) !voi
     defer alloc.free(socket_path);
     const result = ipc.probeSession(alloc, socket_path) catch |err| {
         std.log.err("session unresponsive: {s}", .{@errorName(err)});
-        socket.cleanupStaleSocket(dir, session_name);
+        if (err == error.ConnectionRefused) socket.cleanupStaleSocket(dir, session_name);
         return;
     };
     defer posix.close(result.fd);
