@@ -983,13 +983,19 @@ fn attach(daemon: *Daemon) !void {
     //      - modify the desired attributes in the termios structure
     //      - then apply the changes with tcsetattr().
     //  This prevents unintended side effects by preserving other settings.
-    var orig_termios: cross.c.termios = undefined;
-    _ = cross.c.tcgetattr(posix.STDIN_FILENO, &orig_termios);
-
     // restore stdin fd to its original state after exiting.
     // Use TCSAFLUSH to discard any unread input, preventing stale input after detach.
+    //
+    // tcgetattr fails when stdin is not a TTY (e.g. piped). In that case,
+    // skip terminal setup entirely rather than applying undefined stack bytes
+    // via tcsetattr.
+    var orig_termios: cross.c.termios = undefined;
+    const stdin_is_tty = cross.c.tcgetattr(posix.STDIN_FILENO, &orig_termios) == 0;
+
     defer {
-        _ = cross.c.tcsetattr(posix.STDIN_FILENO, cross.c.TCSAFLUSH, &orig_termios);
+        if (stdin_is_tty) {
+            _ = cross.c.tcsetattr(posix.STDIN_FILENO, cross.c.TCSAFLUSH, &orig_termios);
+        }
         // Reset terminal modes on detach:
         // - Mouse: 1000=basic, 1002=button-event, 1003=any-event, 1006=SGR extended
         // - 2004=bracketed paste, 1004=focus events, 1049=alt screen
@@ -1005,21 +1011,23 @@ fn attach(daemon: *Daemon) !void {
         _ = posix.write(posix.STDOUT_FILENO, restore_seq) catch {};
     }
 
-    var raw_termios = orig_termios;
-    //  set raw mode after successful connection.
-    //      disables canonical mode (line buffering), input echoing, signal generation from
-    //      control characters (like Ctrl+C), and flow control.
-    cross.c.cfmakeraw(&raw_termios);
+    if (stdin_is_tty) {
+        var raw_termios = orig_termios;
+        //  set raw mode after successful connection.
+        //      disables canonical mode (line buffering), input echoing, signal generation from
+        //      control characters (like Ctrl+C), and flow control.
+        cross.c.cfmakeraw(&raw_termios);
 
-    // Additional granular raw mode settings for precise control
-    // (matches what abduco and shpool do)
-    raw_termios.c_cc[cross.c.VLNEXT] = cross.c._POSIX_VDISABLE; // Disable literal-next (Ctrl-V)
-    // We want to intercept Ctrl+\ (SIGQUIT) so we can use it as a detach key
-    raw_termios.c_cc[cross.c.VQUIT] = cross.c._POSIX_VDISABLE; // Disable SIGQUIT (Ctrl+\)
-    raw_termios.c_cc[cross.c.VMIN] = 1; // Minimum chars to read: return after 1 byte
-    raw_termios.c_cc[cross.c.VTIME] = 0; // Read timeout: no timeout, return immediately
+        // Additional granular raw mode settings for precise control
+        // (matches what abduco and shpool do)
+        raw_termios.c_cc[cross.c.VLNEXT] = cross.c._POSIX_VDISABLE; // Disable literal-next (Ctrl-V)
+        // We want to intercept Ctrl+\ (SIGQUIT) so we can use it as a detach key
+        raw_termios.c_cc[cross.c.VQUIT] = cross.c._POSIX_VDISABLE; // Disable SIGQUIT (Ctrl+\)
+        raw_termios.c_cc[cross.c.VMIN] = 1; // Minimum chars to read: return after 1 byte
+        raw_termios.c_cc[cross.c.VTIME] = 0; // Read timeout: no timeout, return immediately
 
-    _ = cross.c.tcsetattr(posix.STDIN_FILENO, cross.c.TCSANOW, &raw_termios);
+        _ = cross.c.tcsetattr(posix.STDIN_FILENO, cross.c.TCSANOW, &raw_termios);
+    }
 
     // Clear screen before attaching. This provides a clean slate before
     // the session restore.
