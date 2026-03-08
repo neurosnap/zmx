@@ -640,6 +640,13 @@ const Daemon = struct {
     }
 
     pub fn handleRun(self: *Daemon, client: *Client, pty_fd: i32, payload: []const u8) !void {
+        // Reset task tracking so the new command's exit marker is detected.
+        // Without this, a second `zmx run` on the same session is ignored
+        // because task_exit_code is still set from the first run.
+        self.task_exit_code = null;
+        self.task_ended_at = null;
+        self.is_task_mode = true;
+
         if (payload.len > 0) {
             ptyWrite(pty_fd, payload);
         }
