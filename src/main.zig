@@ -83,7 +83,7 @@ pub fn main() !void {
                 session_name = arg;
             }
         }
-        const sesh = try socket.getSeshName(alloc, session_name.?);
+        const sesh = try socket.getSeshName(alloc, session_name orelse "");
         defer alloc.free(sesh);
         return history(&cfg, sesh, format);
     } else if (std.mem.eql(u8, cmd, "attach") or std.mem.eql(u8, cmd, "a")) {
