@@ -64,13 +64,16 @@ pub fn get_session_entries(alloc: std.mem.Allocator, socket_dir: []const u8) !st
             };
             posix.close(result.fd);
 
-            // Extract cmd and cwd from the fixed-size arrays
-            const cmd: ?[]const u8 = if (result.info.cmd_len > 0)
-                alloc.dupe(u8, result.info.cmd[0..result.info.cmd_len]) catch null
+            // Extract cmd and cwd from the fixed-size arrays. Lengths come
+            // off the wire (u16 range), so clamp to the actual array size.
+            const cmd_len = @min(result.info.cmd_len, ipc.MAX_CMD_LEN);
+            const cwd_len = @min(result.info.cwd_len, ipc.MAX_CWD_LEN);
+            const cmd: ?[]const u8 = if (cmd_len > 0)
+                alloc.dupe(u8, result.info.cmd[0..cmd_len]) catch null
             else
                 null;
-            const cwd: ?[]const u8 = if (result.info.cwd_len > 0)
-                alloc.dupe(u8, result.info.cwd[0..result.info.cwd_len]) catch null
+            const cwd: ?[]const u8 = if (cwd_len > 0)
+                alloc.dupe(u8, result.info.cwd[0..cwd_len]) catch null
             else
                 null;
 
