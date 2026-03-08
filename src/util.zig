@@ -54,7 +54,12 @@ pub fn get_session_entries(alloc: std.mem.Allocator, socket_dir: []const u8) !st
                     .task_exit_code = 1,
                     .task_ended_at = 0,
                 });
-                socket.cleanupStaleSocket(dir, entry.name);
+                // Only clean up when the daemon is definitively gone. A busy
+                // daemon can miss the probe timeout; deleting its socket
+                // orphans it permanently.
+                if (err == error.ConnectionRefused) {
+                    socket.cleanupStaleSocket(dir, entry.name);
+                }
                 continue;
             };
             posix.close(result.fd);
@@ -292,10 +297,18 @@ pub fn writeSessionLine(writer: *std.Io.Writer, session: SessionEntry, short: bo
     }
 
     if (session.is_error) {
-        try writer.print("{s}name={s}\terr={s}\tstatus=cleaning up\n", .{
+        // "cleaning up" is only truthful when the probe was definitively
+        // refused (socket deleted this pass). On Timeout/Unexpected the
+        // daemon may just be busy, so don't lie about what we did.
+        const status = if (std.mem.eql(u8, session.error_name.?, "ConnectionRefused"))
+            "cleaning up"
+        else
+            "unreachable";
+        try writer.print("{s}name={s}\terr={s}\tstatus={s}\n", .{
             prefix,
             session.name,
             session.error_name.?,
+            status,
         });
         return;
     }
