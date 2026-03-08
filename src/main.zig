@@ -626,7 +626,7 @@ const Daemon = struct {
 
     pub fn handleHistory(self: *Daemon, client: *Client, term: *ghostty_vt.Terminal, payload: []const u8) !void {
         const format: util.HistoryFormat = if (payload.len > 0)
-            @enumFromInt(payload[0])
+            std.meta.intToEnum(util.HistoryFormat, payload[0]) catch .plain
         else
             .plain;
         if (util.serializeTerminal(self.alloc, term, format)) |output| {
@@ -1487,6 +1487,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                         .History => try daemon.handleHistory(client, &term, msg.payload),
                         .Run => try daemon.handleRun(client, pty_fd, msg.payload),
                         .Output, .Ack => {},
+                        _ => std.log.warn("ignoring unknown IPC tag={d}", .{@intFromEnum(msg.header.tag)}),
                     }
                 }
             }
