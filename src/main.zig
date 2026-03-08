@@ -40,6 +40,12 @@ pub fn main() !void {
     // use c_allocator to avoid "reached unreachable code" panic in DebugAllocator when forking
     const alloc = std.heap.c_allocator;
 
+    // Every subcommand may write to a Unix-domain socket; a peer that
+    // disappears between probe and send would otherwise kill us before
+    // write() can return BrokenPipe. Inherited across fork, so this also
+    // covers the daemon.
+    ignoreSigpipe();
+
     var args = try std.process.argsWithAllocator(alloc);
     defer args.deinit();
     _ = args.skip(); // skip program name
@@ -1068,7 +1074,10 @@ fn run(daemon: *Daemon, command_args: [][]const u8) !void {
     };
     defer posix.close(probe_result.fd);
 
-    try ipc.send(probe_result.fd, .Run, cmd_to_send.?);
+    ipc.send(probe_result.fd, .Run, cmd_to_send.?) catch |err| switch (err) {
+        error.ConnectionResetByPeer, error.BrokenPipe => return,
+        else => return err,
+    };
 
     var poll_fds = [_]posix.pollfd{.{ .fd = probe_result.fd, .events = posix.POLL.IN, .revents = 0 }};
     const poll_result = posix.poll(&poll_fds, 5000) catch return error.PollFailed;
@@ -1301,6 +1310,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
         }
 
         _ = posix.poll(poll_fds.items, -1) catch |err| {
+            if (err == error.Interrupted) continue;
             return err;
         };
 
@@ -1461,6 +1471,9 @@ fn handleSigterm(_: i32, _: *const posix.siginfo_t, _: ?*anyopaque) callconv(.c)
     sigterm_received.store(true, .release);
 }
 
+// No SA_RESTART on these: we WANT the signal to interrupt poll() so the
+// loop can check the flag. On BSD/macOS, SA_RESTART makes poll restartable,
+// which would leave an idle daemon deaf to SIGTERM until other I/O wakes it.
 fn setupSigwinchHandler() void {
     const act: posix.Sigaction = .{
         .handler = .{ .sigaction = handleSigwinch },
@@ -1477,4 +1490,13 @@ fn setupSigtermHandler() void {
         .flags = posix.SA.SIGINFO,
     };
     posix.sigaction(posix.SIG.TERM, &act, null);
+}
+
+fn ignoreSigpipe() void {
+    const act: posix.Sigaction = .{
+        .handler = .{ .handler = posix.SIG.IGN },
+        .mask = posix.sigemptyset(),
+        .flags = 0,
+    };
+    posix.sigaction(posix.SIG.PIPE, &act, null);
 }
