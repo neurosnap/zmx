@@ -15,6 +15,10 @@ pub const Tag = enum(u8) {
     History = 8,
     Run = 9,
     Ack = 10,
+    // Non-exhaustive: this enum comes off the wire via bytesToValue and
+    // @enumFromInt, so out-of-range values (11-255) are representable
+    // rather than UB. Switches must handle `_` (unknown tag).
+    _,
 };
 
 pub const Header = packed struct {
@@ -53,7 +57,9 @@ pub const Info = extern struct {
 pub fn expectedLength(data: []const u8) ?usize {
     if (data.len < @sizeOf(Header)) return null;
     const header = std.mem.bytesToValue(Header, data[0..@sizeOf(Header)]);
-    return @sizeOf(Header) + header.len;
+    // header.len comes off the wire; widen to usize before adding so a
+    // near-u32-max value can't wrap (panic in safe mode, UB in release).
+    return @as(usize, @sizeOf(Header)) + @as(usize, header.len);
 }
 
 pub fn send(fd: i32, tag: Tag, data: []const u8) !void {
