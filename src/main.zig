@@ -33,6 +33,9 @@ fn zmxLogFn(
 var sigwinch_received: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 var sigterm_received: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
+// https://github.com/ziglang/zig/blob/738d2be9d6b6ef3ff3559130c05159ef53336224/lib/std/posix.zig#L3505
+const O_NONBLOCK: usize = 1 << @bitOffsetOf(posix.O, "NONBLOCK");
+
 pub fn main() !void {
     // use c_allocator to avoid "reached unreachable code" panic in DebugAllocator when forking
     const alloc = std.heap.c_allocator;
@@ -334,7 +337,7 @@ const Daemon = struct {
 
         // make pty non-blocking
         const flags = try posix.fcntl(master_fd, posix.F.GETFL, 0);
-        _ = try posix.fcntl(master_fd, posix.F.SETFL, flags | @as(u32, 0o4000));
+        _ = try posix.fcntl(master_fd, posix.F.SETFL, flags | O_NONBLOCK);
         return master_fd;
     }
 
@@ -372,12 +375,19 @@ const Daemon = struct {
                 defer self.alloc.free(session_log_path);
                 try log_system.init(self.alloc, session_log_path);
 
-                errdefer {
+                // If spawnPty fails, clean up here. Once it succeeds,
+                // the inner block's defer takes ownership of cleanup to
+                // avoid double-closing server_sock_fd on daemonLoop error.
+                const pty_fd = self.spawnPty() catch |err| {
                     posix.close(server_sock_fd);
                     dir.deleteFile(self.session_name) catch {};
-                }
-                const pty_fd = try self.spawnPty();
+                    return err;
+                };
+
                 defer {
+                    self.handleKill();
+                    self.deinit();
+                    _ = posix.waitpid(self.pid, 0);
                     posix.close(pty_fd);
                     posix.close(server_sock_fd);
                     std.log.info("deleting socket file session_name={s}", .{self.session_name});
@@ -385,10 +395,8 @@ const Daemon = struct {
                         std.log.warn("failed to delete socket file err={s}", .{@errorName(err)});
                     };
                 }
+
                 try daemonLoop(self, server_sock_fd, pty_fd);
-                self.handleKill();
-                _ = posix.waitpid(self.pid, 0);
-                self.deinit();
                 return .{ .created = true, .is_daemon = true };
             }
             posix.close(server_sock_fd);
@@ -399,10 +407,33 @@ const Daemon = struct {
         return .{ .created = false, .is_daemon = false };
     }
 
-    pub fn handleInput(self: *Daemon, pty_fd: i32, payload: []const u8) !void {
+    /// Best-effort write to the (non-blocking) PTY fd. Retries short writes
+    /// until complete, but on WouldBlock (kernel buffer full) gives up and
+    /// drops the remainder — the daemon is single-threaded, so blocking here
+    /// to wait for POLLOUT would deadlock against a shell that's itself
+    /// blocked writing echo to a full PTY output buffer that we're not
+    /// draining. Dropping is the same trade-off the old code made implicitly
+    /// (short writes were silently truncated), just without the crash.
+    fn ptyWrite(pty_fd: i32, data: []const u8) void {
+        var remaining = data;
+        while (remaining.len > 0) {
+            const n = posix.write(pty_fd, remaining) catch |err| {
+                if (err == error.WouldBlock) {
+                    std.log.warn("pty write dropped {d}/{d} bytes (buffer full)", .{ remaining.len, data.len });
+                } else {
+                    std.log.warn("pty write failed, {d} bytes lost: {s}", .{ remaining.len, @errorName(err) });
+                }
+                return;
+            };
+            if (n == 0) return;
+            remaining = remaining[n..];
+        }
+    }
+
+    pub fn handleInput(self: *Daemon, pty_fd: i32, payload: []const u8) void {
         _ = self;
         if (payload.len > 0) {
-            _ = try posix.write(pty_fd, payload);
+            ptyWrite(pty_fd, payload);
         }
     }
 
@@ -575,7 +606,7 @@ const Daemon = struct {
         self.is_task_mode = true;
 
         if (payload.len > 0) {
-            _ = try posix.write(pty_fd, payload);
+            ptyWrite(pty_fd, payload);
         }
         try ipc.appendMessage(self.alloc, &client.write_buf, .Ack, "");
         client.has_pending_output = true;
@@ -1071,8 +1102,9 @@ fn clientLoop(client_sock_fd: i32) !void {
     setupSigwinchHandler();
 
     // Make socket non-blocking to avoid blocking on writes
-    const sock_flags = try posix.fcntl(client_sock_fd, posix.F.GETFL, 0);
-    _ = try posix.fcntl(client_sock_fd, posix.F.SETFL, sock_flags | posix.SOCK.NONBLOCK);
+    var sock_flags = try posix.fcntl(client_sock_fd, posix.F.GETFL, 0);
+    sock_flags |= O_NONBLOCK;
+    _ = try posix.fcntl(client_sock_fd, posix.F.SETFL, sock_flags);
 
     // Buffer for outgoing socket writes
     var sock_write_buf = try std.ArrayList(u8).initCapacity(alloc, 4096);
@@ -1093,9 +1125,12 @@ fn clientLoop(client_sock_fd: i32) !void {
 
     const stdin_fd = posix.STDIN_FILENO;
 
-    // Make stdin non-blocking
-    const flags = try posix.fcntl(stdin_fd, posix.F.GETFL, 0);
-    _ = try posix.fcntl(stdin_fd, posix.F.SETFL, flags | posix.SOCK.NONBLOCK);
+    // Make stdin non-blocking. O_NONBLOCK is set on the open file description,
+    // which is shared with the parent shell; restore on exit to avoid
+    // corrupting the parent's stdin.
+    const stdin_orig_flags = try posix.fcntl(stdin_fd, posix.F.GETFL, 0);
+    _ = try posix.fcntl(stdin_fd, posix.F.SETFL, stdin_orig_flags | O_NONBLOCK);
+    defer _ = posix.fcntl(stdin_fd, posix.F.SETFL, stdin_orig_flags) catch {};
 
     while (true) {
         // Check for pending SIGWINCH
@@ -1369,7 +1404,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
 
                 while (client.read_buf.next()) |msg| {
                     switch (msg.header.tag) {
-                        .Input => try daemon.handleInput(pty_fd, msg.payload),
+                        .Input => daemon.handleInput(pty_fd, msg.payload),
                         .Init => try daemon.handleInit(client, pty_fd, &term, msg.payload),
                         .Resize => try daemon.handleResize(pty_fd, &term, msg.payload),
                         .Detach => {
