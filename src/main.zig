@@ -652,6 +652,7 @@ fn wait(cfg: *Cfg, session_names: std.ArrayList([]const u8)) !void {
     // appeared yet" (keep polling) from "sessions we were tracking
     // disappeared" (fail — daemon crashed or was killed).
     var max_seen: i32 = 0;
+    var zero_match_iters: u32 = 0;
 
     while (true) {
         var sessions = try util.get_session_entries(alloc, cfg.socket_dir);
@@ -704,6 +705,20 @@ fn wait(cfg: *Cfg, session_names: std.ArrayList([]const u8)) !void {
             try stdout.flush();
             std.process.exit(agg_exit_code);
             return;
+        }
+
+        if (max_seen == 0) {
+            // `zmx run foo && zmx wait foo` is essentially sequential, so
+            // matching sessions should be visible from the first poll. If
+            // nothing appears after a few iterations it's almost certainly a
+            // typo, not a slow start.
+            zero_match_iters += 1;
+            if (zero_match_iters >= 3) {
+                try stdout.print("error: no matching sessions found\n", .{});
+                try stdout.flush();
+                std.process.exit(2);
+                return;
+            }
         }
 
         std.Thread.sleep(1000 * std.time.ns_per_ms);
