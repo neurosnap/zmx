@@ -721,6 +721,11 @@ fn wait(cfg: *Cfg, session_names: std.ArrayList([]const u8)) !void {
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
 
+    // Highest match count seen so far. Lets us distinguish "sessions haven't
+    // appeared yet" (keep polling) from "sessions we were tracking
+    // disappeared" (fail — daemon crashed or was killed).
+    var max_seen: i32 = 0;
+
     while (true) {
         var sessions = try util.get_session_entries(alloc, cfg.socket_dir);
         var total: i32 = 0;
@@ -756,7 +761,18 @@ fn wait(cfg: *Cfg, session_names: std.ArrayList([]const u8)) !void {
         }
         sessions.deinit(alloc);
 
-        if (total == done) {
+        // Check disappearance BEFORE completion: if one of N sessions
+        // crashed and the remaining N-1 happen to be done, total==done
+        // would be a false success.
+        if (total < max_seen) {
+            try stdout.print("error: {d} session(s) disappeared before completing\n", .{max_seen - total});
+            try stdout.flush();
+            std.process.exit(1);
+            return;
+        }
+        max_seen = total;
+
+        if (total > 0 and total == done) {
             try stdout.print("tasks completed!\n", .{});
             try stdout.flush();
             std.process.exit(agg_exit_code);
