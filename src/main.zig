@@ -1055,7 +1055,11 @@ fn run(daemon: *Daemon, command_args: [][]const u8) !void {
         }
 
         try cmd_list.appendSlice(alloc, inline_task_marker);
-        try cmd_list.append(alloc, '\n');
+        // \r, not \n: once the shell is at the readline prompt the PTY is in
+        // raw mode; readline's accept-line binds to CR. The first-ever run
+        // works with \n only because it arrives during shell startup while
+        // the line discipline is still canonical.
+        try cmd_list.append(alloc, '\r');
 
         cmd_to_send = try cmd_list.toOwnedSlice(alloc);
         allocated_cmd = @constCast(cmd_to_send.?);
@@ -1076,13 +1080,16 @@ fn run(daemon: *Daemon, command_args: [][]const u8) !void {
             }
 
             if (stdin_buf.items.len > 0) {
-                const needs_newline = stdin_buf.items[stdin_buf.items.len - 1] != '\n';
-                if (needs_newline) {
-                    try stdin_buf.append(alloc, '\n');
+                // Normalize any trailing newline to CR so readline (raw mode)
+                // accepts each line.
+                if (stdin_buf.items[stdin_buf.items.len - 1] == '\n') {
+                    stdin_buf.items[stdin_buf.items.len - 1] = '\r';
+                } else {
+                    try stdin_buf.append(alloc, '\r');
                 }
 
                 try stdin_buf.appendSlice(alloc, stdin_task_marker);
-                try stdin_buf.append(alloc, '\n');
+                try stdin_buf.append(alloc, '\r');
 
                 cmd_to_send = try alloc.dupe(u8, stdin_buf.items);
                 allocated_cmd = @constCast(cmd_to_send.?);
