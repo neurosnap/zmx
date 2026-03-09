@@ -83,7 +83,7 @@ pub fn main() !void {
                 session_name = arg;
             }
         }
-        const sesh = try socket.getSeshName(alloc, session_name.?);
+        const sesh = try socket.getSeshName(alloc, session_name orelse "");
         defer alloc.free(sesh);
         return history(&cfg, sesh, format);
     } else if (std.mem.eql(u8, cmd, "attach") or std.mem.eql(u8, cmd, "a")) {
@@ -567,6 +567,13 @@ const Daemon = struct {
     }
 
     pub fn handleRun(self: *Daemon, client: *Client, pty_fd: i32, payload: []const u8) !void {
+        // Reset task tracking so the new command's exit marker is detected.
+        // Without this, a second `zmx run` on the same session is ignored
+        // because task_exit_code is still set from the first run.
+        self.task_exit_code = null;
+        self.task_ended_at = null;
+        self.is_task_mode = true;
+
         if (payload.len > 0) {
             _ = try posix.write(pty_fd, payload);
         }
@@ -641,6 +648,11 @@ fn wait(cfg: *Cfg, session_names: std.ArrayList([]const u8)) !void {
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
 
+    // Highest match count seen so far. Lets us distinguish "sessions haven't
+    // appeared yet" (keep polling) from "sessions we were tracking
+    // disappeared" (fail — daemon crashed or was killed).
+    var max_seen: i32 = 0;
+
     while (true) {
         var sessions = try util.get_session_entries(alloc, cfg.socket_dir);
         var total: i32 = 0;
@@ -676,7 +688,18 @@ fn wait(cfg: *Cfg, session_names: std.ArrayList([]const u8)) !void {
         }
         sessions.deinit(alloc);
 
-        if (total == done) {
+        // Check disappearance BEFORE completion: if one of N sessions
+        // crashed and the remaining N-1 happen to be done, total==done
+        // would be a false success.
+        if (total < max_seen) {
+            try stdout.print("error: {d} session(s) disappeared before completing\n", .{max_seen - total});
+            try stdout.flush();
+            std.process.exit(1);
+            return;
+        }
+        max_seen = total;
+
+        if (total > 0 and total == done) {
             try stdout.print("tasks completed!\n", .{});
             try stdout.flush();
             std.process.exit(agg_exit_code);
@@ -947,7 +970,11 @@ fn run(daemon: *Daemon, command_args: [][]const u8) !void {
         }
 
         try cmd_list.appendSlice(alloc, inline_task_marker);
-        try cmd_list.append(alloc, '\n');
+        // \r, not \n: once the shell is at the readline prompt the PTY is in
+        // raw mode; readline's accept-line binds to CR. The first-ever run
+        // works with \n only because it arrives during shell startup while
+        // the line discipline is still canonical.
+        try cmd_list.append(alloc, '\r');
 
         cmd_to_send = try cmd_list.toOwnedSlice(alloc);
         allocated_cmd = @constCast(cmd_to_send.?);
@@ -968,13 +995,16 @@ fn run(daemon: *Daemon, command_args: [][]const u8) !void {
             }
 
             if (stdin_buf.items.len > 0) {
-                const needs_newline = stdin_buf.items[stdin_buf.items.len - 1] != '\n';
-                if (needs_newline) {
-                    try stdin_buf.append(alloc, '\n');
+                // Normalize any trailing newline to CR so readline (raw mode)
+                // accepts each line.
+                if (stdin_buf.items[stdin_buf.items.len - 1] == '\n') {
+                    stdin_buf.items[stdin_buf.items.len - 1] = '\r';
+                } else {
+                    try stdin_buf.append(alloc, '\r');
                 }
 
                 try stdin_buf.appendSlice(alloc, stdin_task_marker);
-                try stdin_buf.append(alloc, '\n');
+                try stdin_buf.append(alloc, '\r');
 
                 cmd_to_send = try alloc.dupe(u8, stdin_buf.items);
                 allocated_cmd = @constCast(cmd_to_send.?);
