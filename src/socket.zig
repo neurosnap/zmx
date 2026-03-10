@@ -63,11 +63,99 @@ pub fn createSocket(fname: []const u8) !i32 {
     return fd;
 }
 
-pub fn getSocketPath(alloc: std.mem.Allocator, socket_dir: []const u8, session_name: []const u8) ![]const u8 {
+/// Maximum number of usable bytes in a Unix domain socket path.
+/// Derived from the platform's sockaddr_un.path field, minus 1 for the
+/// required null terminator.
+pub const max_socket_path_len: usize = @typeInfo(
+    @TypeOf(@as(posix.sockaddr.un, undefined).path),
+).array.len - 1;
+
+pub fn getSocketPath(alloc: std.mem.Allocator, socket_dir: []const u8, session_name: []const u8) error{ NameTooLong, OutOfMemory }![]const u8 {
     const dir = socket_dir;
-    const fname = try alloc.alloc(u8, dir.len + session_name.len + 1);
+    const path_len = dir.len + 1 + session_name.len;
+    if (path_len > max_socket_path_len) return error.NameTooLong;
+    const fname = try alloc.alloc(u8, path_len);
     @memcpy(fname[0..dir.len], dir);
     @memcpy(fname[dir.len .. dir.len + 1], "/");
     @memcpy(fname[dir.len + 1 ..], session_name);
     return fname;
+}
+
+/// Returns the maximum session name length for a given socket directory,
+/// or null if the socket directory itself is already too long.
+pub fn maxSessionNameLen(socket_dir: []const u8) ?usize {
+    // path = socket_dir + "/" + session_name
+    const overhead = socket_dir.len + 1;
+    if (overhead >= max_socket_path_len) return null;
+    return max_socket_path_len - overhead;
+}
+
+test "max_socket_path_len matches platform sockaddr_un" {
+    const path_field_len = @typeInfo(
+        @TypeOf(@as(posix.sockaddr.un, undefined).path),
+    ).array.len;
+    try std.testing.expectEqual(path_field_len - 1, max_socket_path_len);
+    try std.testing.expect(max_socket_path_len > 0);
+}
+
+test "getSocketPath succeeds for paths within limit" {
+    const alloc = std.testing.allocator;
+    const result = try getSocketPath(alloc, "/tmp/zmx", "mysession");
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("/tmp/zmx/mysession", result);
+}
+
+test "getSocketPath returns NameTooLong when path exceeds limit" {
+    const alloc = std.testing.allocator;
+    const dir = [_]u8{'d'} ** (max_socket_path_len - 2);
+    const dir_slice: []const u8 = &dir;
+
+    const ok = try getSocketPath(alloc, dir_slice, "x");
+    defer alloc.free(ok);
+    try std.testing.expectEqual(max_socket_path_len, ok.len);
+
+    const err = getSocketPath(alloc, dir_slice, "xx");
+    try std.testing.expectError(error.NameTooLong, err);
+}
+
+test "getSocketPath returns NameTooLong for empty dir with oversized name" {
+    const alloc = std.testing.allocator;
+    const name = [_]u8{'n'} ** (max_socket_path_len);
+    const name_slice: []const u8 = &name;
+    const err = getSocketPath(alloc, "", name_slice);
+    try std.testing.expectError(error.NameTooLong, err);
+}
+
+test "maxSessionNameLen computes correct dynamic limit" {
+    const short_dir = "/tmp/zmx";
+    const short_max = maxSessionNameLen(short_dir).?;
+    try std.testing.expectEqual(max_socket_path_len - short_dir.len - 1, short_max);
+
+    const full_dir = [_]u8{'f'} ** max_socket_path_len;
+    const full_dir_slice: []const u8 = &full_dir;
+    try std.testing.expectEqual(@as(?usize, null), maxSessionNameLen(full_dir_slice));
+
+    const tight_dir = [_]u8{'t'} ** (max_socket_path_len - 2);
+    const tight_dir_slice: []const u8 = &tight_dir;
+    try std.testing.expectEqual(@as(?usize, 1), maxSessionNameLen(tight_dir_slice));
+}
+
+test "getSocketPath boundary: name fills exactly to limit" {
+    const alloc = std.testing.allocator;
+    const dir = "/tmp/zmx";
+    const max_name_len = maxSessionNameLen(dir).?;
+
+    const name_at_limit = try alloc.alloc(u8, max_name_len);
+    defer alloc.free(name_at_limit);
+    @memset(name_at_limit, 'a');
+
+    const path = try getSocketPath(alloc, dir, name_at_limit);
+    defer alloc.free(path);
+    try std.testing.expectEqual(max_socket_path_len, path.len);
+
+    const name_over_limit = try alloc.alloc(u8, max_name_len + 1);
+    defer alloc.free(name_over_limit);
+    @memset(name_over_limit, 'b');
+
+    try std.testing.expectError(error.NameTooLong, getSocketPath(alloc, dir, name_over_limit));
 }

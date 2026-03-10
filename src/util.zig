@@ -40,7 +40,10 @@ pub fn get_session_entries(alloc: std.mem.Allocator, socket_dir: []const u8) !st
             const name = try alloc.dupe(u8, entry.name);
             errdefer alloc.free(name);
 
-            const socket_path = try socket.getSocketPath(alloc, socket_dir, entry.name);
+            const socket_path = socket.getSocketPath(alloc, socket_dir, entry.name) catch |err| switch (err) {
+                error.NameTooLong => continue,
+                error.OutOfMemory => return err,
+            };
             defer alloc.free(socket_path);
 
             const result = ipc.probeSession(alloc, socket_path) catch |err| {
