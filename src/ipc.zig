@@ -15,8 +15,9 @@ pub const Tag = enum(u8) {
     History = 8,
     Run = 9,
     Ack = 10,
+    Rename = 11,
     // Non-exhaustive: this enum comes off the wire via bytesToValue and
-    // @enumFromInt, so out-of-range values (11-255) are representable
+    // @enumFromInt, so out-of-range values (12-255) are representable
     // rather than UB. Switches must handle `_` (unknown tag).
     _,
 };

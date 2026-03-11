@@ -80,6 +80,36 @@ pub fn main() !void {
         const sesh = try socket.getSeshName(alloc, session_name);
         defer alloc.free(sesh);
         return kill(&cfg, sesh);
+    } else if (std.mem.eql(u8, cmd, "rename") or std.mem.eql(u8, cmd, "rn")) {
+        const first_arg = args.next();
+        const second_arg = args.next();
+
+        if (second_arg) |new_name_raw| {
+            // zmx rename <old> <new>
+            const old_sesh = try socket.getSeshName(alloc, first_arg.?);
+            defer alloc.free(old_sesh);
+            const new_sesh = try socket.getSeshName(alloc, new_name_raw);
+            defer alloc.free(new_sesh);
+            return rename(&cfg, old_sesh, new_sesh);
+        } else if (first_arg) |new_name_raw| {
+            // zmx rename <new> (inside session, uses ZMX_SESSION)
+            const current = std.process.getEnvVarOwned(alloc, "ZMX_SESSION") catch |err| switch (err) {
+                error.EnvironmentVariableNotFound => {
+                    var buf: [4096]u8 = undefined;
+                    var w = std.fs.File.stderr().writer(&buf);
+                    w.interface.print("usage: zmx rename <old-name> <new-name>, or zmx rename <new-name> inside a session\n", .{}) catch {};
+                    w.interface.flush() catch {};
+                    return;
+                },
+                else => return err,
+            };
+            defer alloc.free(current);
+            const new_sesh = try socket.getSeshName(alloc, new_name_raw);
+            defer alloc.free(new_sesh);
+            return rename(&cfg, current, new_sesh);
+        } else {
+            return help();
+        }
     } else if (std.mem.eql(u8, cmd, "history") or std.mem.eql(u8, cmd, "hi")) {
         var session_name: ?[]const u8 = null;
         var format: util.HistoryFormat = .plain;
@@ -653,6 +683,86 @@ const Daemon = struct {
         self.has_had_client = true;
         std.log.debug("run command len={d}", .{payload.len});
     }
+
+    pub fn handleRename(self: *Daemon, client: *Client, payload: []const u8) !void {
+        const new_name = payload;
+        if (new_name.len == 0) return;
+
+        // Validate new name (same rules as socket.getSeshName)
+        if (std.mem.indexOfScalar(u8, new_name, '/') != null or
+            std.mem.indexOfScalar(u8, new_name, 0) != null or
+            std.mem.eql(u8, new_name, ".") or
+            std.mem.eql(u8, new_name, "..")) return;
+
+        // Same name — just ack
+        if (std.mem.eql(u8, new_name, self.session_name)) {
+            try ipc.appendMessage(self.alloc, &client.write_buf, .Ack, "");
+            client.has_pending_output = true;
+            return;
+        }
+
+        std.log.info("rename session old={s} new={s}", .{ self.session_name, new_name });
+
+        // Build notification BEFORE freeing old name
+        const notif = std.fmt.allocPrint(
+            self.alloc,
+            "\r\n\x1b[33m[zmx]\x1b[0m session renamed: \"{s}\" \xe2\x86\x92 \"{s}\"\r\n",
+            .{ self.session_name, new_name },
+        ) catch null;
+        defer if (notif) |n| self.alloc.free(n);
+
+        // Build new paths
+        const new_socket_path = socket.getSocketPath(self.alloc, self.cfg.socket_dir, new_name) catch |err| {
+            std.log.warn("rename: failed to build new socket path err={s}", .{@errorName(err)});
+            return;
+        };
+        const duped_new_name = self.alloc.dupe(u8, new_name) catch |err| {
+            std.log.warn("rename: failed to allocate new name err={s}", .{@errorName(err)});
+            self.alloc.free(new_socket_path);
+            return;
+        };
+
+        // Rename socket file (atomic on POSIX)
+        std.fs.renameAbsolute(self.socket_path, new_socket_path) catch |err| {
+            std.log.warn("rename: socket rename failed err={s}", .{@errorName(err)});
+            self.alloc.free(duped_new_name);
+            self.alloc.free(new_socket_path);
+            return;
+        };
+
+        // Rename log file (best-effort)
+        rename_log: {
+            const old_log = std.fmt.allocPrint(self.alloc, "{s}/{s}.log", .{ self.cfg.log_dir, self.session_name }) catch break :rename_log;
+            defer self.alloc.free(old_log);
+            const new_log = std.fmt.allocPrint(self.alloc, "{s}/{s}.log", .{ self.cfg.log_dir, new_name }) catch break :rename_log;
+            defer self.alloc.free(new_log);
+            std.fs.renameAbsolute(old_log, new_log) catch {};
+            // Update LogSystem path for future rotation (fd stays valid — same inode)
+            const new_log_path = self.alloc.dupe(u8, new_log) catch break :rename_log;
+            log_system.mutex.lock();
+            defer log_system.mutex.unlock();
+            if (log_system.path.len > 0) self.alloc.free(@constCast(log_system.path));
+            log_system.path = new_log_path;
+        }
+
+        // Update daemon state
+        self.alloc.free(@constCast(self.session_name));
+        self.session_name = duped_new_name;
+        self.alloc.free(self.socket_path);
+        self.socket_path = new_socket_path;
+
+        // Notify attached clients via Output
+        if (notif) |n| {
+            for (self.clients.items) |c| {
+                ipc.appendMessage(self.alloc, &c.write_buf, .Output, n) catch continue;
+                c.has_pending_output = true;
+            }
+        }
+
+        // Ack the requester
+        try ipc.appendMessage(self.alloc, &client.write_buf, .Ack, "");
+        client.has_pending_output = true;
+    }
 };
 
 fn printVersion(cfg: *Cfg) !void {
@@ -690,6 +800,7 @@ fn help() !void {
         \\  [l]ist [--short]               List active sessions
         \\  [c]ompletions <shell>          Completion scripts for shell integration (bash, zsh, or fish)
         \\  [k]ill <name>                  Kill a session and all attached clients
+        \\  [rn] rename <old> <new>        Rename a session (or just <new> from inside a session)
         \\  [hi]story <name> [--vt|--html] Output session scrollback (--vt or --html for escape sequences)
         \\  [w]ait <name>...               Wait for session tasks to complete
         \\  [v]ersion                      Show version information
@@ -912,6 +1023,79 @@ fn kill(cfg: *Cfg, session_name: []const u8) !void {
     var w = std.fs.File.stdout().writer(&buf);
     try w.interface.print("killed session {s}\n", .{session_name});
     try w.interface.flush();
+}
+
+fn rename(cfg: *Cfg, old_name: []const u8, new_name: []const u8) !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    var buf: [4096]u8 = undefined;
+    var w = std.fs.File.stdout().writer(&buf);
+
+    var dir = try std.fs.openDirAbsolute(cfg.socket_dir, .{});
+    defer dir.close();
+
+    // Verify old session exists
+    const old_exists = try socket.sessionExists(dir, old_name);
+    if (!old_exists) {
+        try w.interface.print("cannot rename: session \"{s}\" does not exist\n", .{old_name});
+        try w.interface.flush();
+        return;
+    }
+
+    // Verify new session does NOT exist
+    const new_exists = socket.sessionExists(dir, new_name) catch false;
+    if (new_exists) {
+        try w.interface.print("cannot rename: session \"{s}\" already exists\n", .{new_name});
+        try w.interface.flush();
+        return;
+    }
+
+    // Probe old session
+    const socket_path = try socket.getSocketPath(alloc, cfg.socket_dir, old_name);
+    defer alloc.free(socket_path);
+    const result = ipc.probeSession(alloc, socket_path) catch |err| {
+        std.log.err("session unresponsive: {s}", .{@errorName(err)});
+        if (err == error.ConnectionRefused) {
+            socket.cleanupStaleSocket(dir, old_name);
+            w.interface.print("cleaned up stale session {s}\n", .{old_name}) catch {};
+        } else {
+            w.interface.print("session {s} is unresponsive ({s}) -- daemon may be busy, try again\n", .{ old_name, @errorName(err) }) catch {};
+        }
+        w.interface.flush() catch {};
+        return;
+    };
+    defer posix.close(result.fd);
+
+    // Send rename message with new name as payload
+    ipc.send(result.fd, .Rename, new_name) catch |err| switch (err) {
+        error.BrokenPipe, error.ConnectionResetByPeer => return,
+        else => return err,
+    };
+
+    // Wait for Ack
+    var poll_fds = [_]posix.pollfd{.{ .fd = result.fd, .events = posix.POLL.IN, .revents = 0 }};
+    const poll_result = posix.poll(&poll_fds, 5000) catch return;
+    if (poll_result == 0) {
+        try w.interface.print("rename may have failed: daemon did not acknowledge\n", .{});
+        try w.interface.flush();
+        return;
+    }
+
+    var sb = try ipc.SocketBuffer.init(alloc);
+    defer sb.deinit();
+
+    const n = sb.read(result.fd) catch return;
+    if (n == 0) return;
+
+    while (sb.next()) |msg| {
+        if (msg.header.tag == .Ack) {
+            try w.interface.print("renamed session \"{s}\" to \"{s}\"\n", .{ old_name, new_name });
+            try w.interface.flush();
+            return;
+        }
+    }
 }
 
 fn history(cfg: *Cfg, session_name: []const u8, format: util.HistoryFormat) !void {
@@ -1488,6 +1672,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                         .Info => try daemon.handleInfo(client),
                         .History => try daemon.handleHistory(client, &term, msg.payload),
                         .Run => try daemon.handleRun(client, pty_fd, msg.payload),
+                        .Rename => try daemon.handleRename(client, msg.payload),
                         .Output, .Ack => {},
                         _ => std.log.warn("ignoring unknown IPC tag={d}", .{@intFromEnum(msg.header.tag)}),
                     }
