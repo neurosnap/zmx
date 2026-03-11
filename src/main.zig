@@ -92,7 +92,8 @@ pub fn main() !void {
                 session_name = arg;
             }
         }
-        const sesh = try socket.getSeshName(alloc, session_name orelse "");
+        const sesh_env = socket.getSeshNameFromEnv();
+        const sesh = try socket.getSeshName(alloc, session_name orelse sesh_env);
         defer alloc.free(sesh);
         return history(&cfg, sesh, format);
     } else if (std.mem.eql(u8, cmd, "attach") or std.mem.eql(u8, cmd, "a")) {
@@ -967,7 +968,7 @@ fn history(cfg: *Cfg, session_name: []const u8, format: util.HistoryFormat) !voi
 }
 
 fn attach(daemon: *Daemon) !void {
-    if (std.posix.getenv("ZMX_SESSION")) |_| {
+    if (socket.getSeshNameFromEnv()) |_| {
         return error.CannotAttachToSessionInSession;
     }
 
