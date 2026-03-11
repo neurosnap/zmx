@@ -968,7 +968,8 @@ fn history(cfg: *Cfg, session_name: []const u8, format: util.HistoryFormat) !voi
 }
 
 fn attach(daemon: *Daemon) !void {
-    if (socket.getSeshNameFromEnv()) |_| {
+    const sesh = socket.getSeshNameFromEnv();
+    if (sesh.len > 0) {
         return error.CannotAttachToSessionInSession;
     }
 
