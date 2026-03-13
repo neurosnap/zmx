@@ -129,7 +129,7 @@ pub fn main() !void {
             .created_at = @intCast(std.time.timestamp()),
         };
         daemon.socket_path = socket.getSocketPath(alloc, cfg.socket_dir, sesh) catch |err| switch (err) {
-            error.NameTooLong => return printSessionNameTooLong(sesh, &cfg),
+            error.NameTooLong => return socket.printSessionNameTooLong(sesh, cfg.socket_dir),
             error.OutOfMemory => return err,
         };
         std.log.info("socket path={s}", .{daemon.socket_path});
@@ -164,7 +164,7 @@ pub fn main() !void {
             .task_command = cmd_args_raw.items,
         };
         daemon.socket_path = socket.getSocketPath(alloc, cfg.socket_dir, sesh) catch |err| switch (err) {
-            error.NameTooLong => return printSessionNameTooLong(sesh, &cfg),
+            error.NameTooLong => return socket.printSessionNameTooLong(sesh, cfg.socket_dir),
             error.OutOfMemory => return err,
         };
         std.log.info("socket path={s}", .{daemon.socket_path});
@@ -717,23 +717,6 @@ fn help() !void {
     try w.interface.flush();
 }
 
-fn printSessionNameTooLong(session_name: []const u8, cfg: *Cfg) void {
-    var buf: [4096]u8 = undefined;
-    var w = std.fs.File.stderr().writer(&buf);
-    if (socket.maxSessionNameLen(cfg.socket_dir)) |max_len| {
-        w.interface.print(
-            "error: session name is too long ({d} bytes, max {d} for socket directory \"{s}\")\n",
-            .{ session_name.len, max_len, cfg.socket_dir },
-        ) catch {};
-    } else {
-        w.interface.print(
-            "error: socket directory path is too long (\"{s}\")\n",
-            .{cfg.socket_dir},
-        ) catch {};
-    }
-    w.interface.flush() catch {};
-}
-
 fn wait(cfg: *Cfg, session_names: std.ArrayList([]const u8)) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -884,7 +867,7 @@ fn detachAll(cfg: *Cfg) !void {
     defer dir.close();
 
     const socket_path = socket.getSocketPath(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
-        error.NameTooLong => return printSessionNameTooLong(session_name, cfg),
+        error.NameTooLong => return socket.printSessionNameTooLong(session_name, cfg.socket_dir),
         error.OutOfMemory => return err,
     };
     defer alloc.free(socket_path);
@@ -906,7 +889,7 @@ fn kill(cfg: *Cfg, session_name: []const u8) !void {
     const alloc = gpa.allocator();
 
     const socket_path = socket.getSocketPath(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
-        error.NameTooLong => return printSessionNameTooLong(session_name, cfg),
+        error.NameTooLong => return socket.printSessionNameTooLong(session_name, cfg.socket_dir),
         error.OutOfMemory => return err,
     };
     defer alloc.free(socket_path);
@@ -953,7 +936,7 @@ fn history(cfg: *Cfg, session_name: []const u8, format: util.HistoryFormat) !voi
     const alloc = gpa.allocator();
 
     const socket_path = socket.getSocketPath(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
-        error.NameTooLong => return printSessionNameTooLong(session_name, cfg),
+        error.NameTooLong => return socket.printSessionNameTooLong(session_name, cfg.socket_dir),
         error.OutOfMemory => return err,
     };
     defer alloc.free(socket_path);

@@ -85,6 +85,23 @@ pub fn getSocketPath(alloc: std.mem.Allocator, socket_dir: []const u8, session_n
     return fname;
 }
 
+pub fn printSessionNameTooLong(session_name: []const u8, socket_dir: []const u8) void {
+    var buf: [4096]u8 = undefined;
+    var w = std.fs.File.stderr().writer(&buf);
+    if (maxSessionNameLen(socket_dir)) |max_len| {
+        w.interface.print(
+            "error: session name is too long ({d} bytes, max {d} for socket directory \"{s}\")\n",
+            .{ session_name.len, max_len, socket_dir },
+        ) catch {};
+    } else {
+        w.interface.print(
+            "error: socket directory path is too long (\"{s}\")\n",
+            .{socket_dir},
+        ) catch {};
+    }
+    w.interface.flush() catch {};
+}
+
 /// Returns the maximum session name length for a given socket directory,
 /// or null if the socket directory itself is already too long.
 pub fn maxSessionNameLen(socket_dir: []const u8) ?usize {
