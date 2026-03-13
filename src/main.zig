@@ -884,8 +884,11 @@ fn kill(cfg: *Cfg, session_name: []const u8) !void {
 
     const exists = try socket.sessionExists(dir, session_name);
     if (!exists) {
-        std.log.err("cannot kill session because it does not exist session_name={s}", .{session_name});
-        return;
+        var buf: [4096]u8 = undefined;
+        var w = std.fs.File.stderr().writer(&buf);
+        w.interface.print("error: session \"{s}\" does not exist\n", .{session_name}) catch {};
+        w.interface.flush() catch {};
+        return error.SessionNotFound;
     }
 
     const socket_path = try socket.getSocketPath(alloc, cfg.socket_dir, session_name);
@@ -925,8 +928,11 @@ fn history(cfg: *Cfg, session_name: []const u8, format: util.HistoryFormat) !voi
 
     const exists = try socket.sessionExists(dir, session_name);
     if (!exists) {
-        std.log.err("session does not exist session_name={s}", .{session_name});
-        return;
+        var buf: [4096]u8 = undefined;
+        var w = std.fs.File.stderr().writer(&buf);
+        w.interface.print("error: session \"{s}\" does not exist\n", .{session_name}) catch {};
+        w.interface.flush() catch {};
+        return error.SessionNotFound;
     }
 
     const socket_path = try socket.getSocketPath(alloc, cfg.socket_dir, session_name);
