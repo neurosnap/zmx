@@ -184,11 +184,18 @@ ssh remote-server zmx attach session-na<TAB>
 
 ### bash
 
-Add this to your `.bashrc` file:
+Run this snippet:
 
 ```bash
-if command -v zmx &> /dev/null; then
-  eval "$(zmx completions bash)"
+if [[ ${BASH_COMPLETION_VERSINFO-} ]]; then
+  # bash-completion is active: install for lazy loading (runs zmx only on first Tab)
+  dir="${BASH_COMPLETION_USER_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion}/completions"
+  mkdir -p "$dir"
+  printf '%s\n' 'command -v zmx &>/dev/null && eval "$(zmx completions bash)"' > "$dir/zmx.bash"
+else
+  # fallback: bash-completion not available, zmx will run on every shell startup
+  line='command -v zmx &>/dev/null && eval "$(zmx completions bash)"'
+  grep -qF "$line" ~/.bashrc || echo "$line" >> ~/.bashrc
 fi
 ```
 
