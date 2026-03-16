@@ -46,6 +46,7 @@ brew install neurosnap/tap/zmx
 - [Arch AUR tracking releases](https://aur.archlinux.org/packages/zmx)
 - [Arch AUR tracking git](https://aur.archlinux.org/packages/zmx-git)
 - [openSUSE Tumbleweed](https://software.opensuse.org/package/zmx)
+- [Gentoo (overlay)](https://codeberg.org/samuelhautamaki/samuelhautamaki-gentoo) 
 
 ### src
 
