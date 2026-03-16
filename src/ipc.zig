@@ -178,13 +178,8 @@ const SessionProbeResult = struct {
     info: Info,
 };
 
-pub fn probeSession(alloc: std.mem.Allocator, socket_path: []const u8) SessionProbeError!SessionProbeResult {
+pub fn probeSessionFd(alloc: std.mem.Allocator, fd: i32) SessionProbeError!Info {
     const timeout_ms = 1000;
-    const fd = socket.sessionConnect(socket_path) catch |err| switch (err) {
-        error.ConnectionRefused => return error.ConnectionRefused,
-        else => return error.Unexpected,
-    };
-    errdefer posix.close(fd);
 
     send(fd, .Info, "") catch return error.Unexpected;
 
@@ -203,12 +198,23 @@ pub fn probeSession(alloc: std.mem.Allocator, socket_path: []const u8) SessionPr
     while (sb.next()) |msg| {
         if (msg.header.tag == .Info) {
             if (msg.payload.len == @sizeOf(Info)) {
-                return .{
-                    .fd = fd,
-                    .info = std.mem.bytesToValue(Info, msg.payload[0..@sizeOf(Info)]),
-                };
+                return std.mem.bytesToValue(Info, msg.payload[0..@sizeOf(Info)]);
             }
         }
     }
     return error.Unexpected;
+}
+
+pub fn probeSession(alloc: std.mem.Allocator, socket_path: []const u8) SessionProbeError!SessionProbeResult {
+    const fd = socket.sessionConnect(socket_path) catch |err| switch (err) {
+        error.ConnectionRefused => return error.ConnectionRefused,
+        else => return error.Unexpected,
+    };
+
+    const info = probeSessionFd(alloc, fd) catch |err| {
+        posix.close(fd);
+        return err;
+    };
+
+    return .{ .fd = fd, .info = info };
 }

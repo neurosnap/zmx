@@ -111,6 +111,86 @@ pub fn maxSessionNameLen(socket_dir: []const u8) ?usize {
     return max_socket_path_len - overhead;
 }
 
+pub fn isTcpAddress(str: []const u8) bool {
+    _ = parseTcpAddress(str) catch return false;
+    return true;
+}
+
+pub fn parseTcpAddress(addr: []const u8) !struct { host: []const u8, port: u16 } {
+    if (addr.len == 0) return error.InvalidAddress;
+
+    if (addr[0] == '[') {
+        // IPv6 form: [host]:port
+        const bracket_end = std.mem.indexOf(u8, addr, "]:") orelse return error.InvalidAddress;
+        const host = addr[1..bracket_end];
+        if (host.len == 0) return error.InvalidAddress;
+        const port_str = addr[bracket_end + 2 ..];
+        const port = std.fmt.parseInt(u16, port_str, 10) catch return error.InvalidPort;
+        if (port == 0) return error.InvalidPort;
+        // Validate that host is a numeric IPv6 address
+        _ = std.net.Address.parseIp6(host, port) catch return error.InvalidAddress;
+        return .{ .host = host, .port = port };
+    }
+
+    const colon = std.mem.lastIndexOfScalar(u8, addr, ':') orelse return error.InvalidAddress;
+    const port_str = addr[colon + 1 ..];
+    if (port_str.len == 0) return error.InvalidPort;
+    const port = std.fmt.parseInt(u16, port_str, 10) catch return error.InvalidPort;
+    if (port == 0) return error.InvalidPort;
+
+    const host = addr[0..colon];
+    if (host.len == 0) {
+        return .{ .host = "0.0.0.0", .port = port };
+    }
+    // Validate that host is a numeric IPv4 address (reject hostnames like "localhost")
+    _ = std.net.Address.parseIp4(host, port) catch return error.InvalidAddress;
+    return .{ .host = host, .port = port };
+}
+
+pub fn setTcpNoDelay(fd: i32) !void {
+    const TCP_NODELAY: u32 = 1;
+    try posix.setsockopt(fd, posix.IPPROTO.TCP, TCP_NODELAY, &std.mem.toBytes(@as(c_int, 1)));
+}
+
+pub fn createTcpSocket(addr: []const u8) !i32 {
+    const parsed = try parseTcpAddress(addr);
+    const is_ipv6 = std.mem.indexOfScalar(u8, parsed.host, ':') != null;
+
+    var sock_addr = if (is_ipv6)
+        std.net.Address.parseIp6(parsed.host, parsed.port) catch return error.InvalidAddress
+    else
+        std.net.Address.parseIp4(parsed.host, parsed.port) catch return error.InvalidAddress;
+
+    const fd = try posix.socket(sock_addr.any.family, posix.SOCK.STREAM | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC, 0);
+    errdefer posix.close(fd);
+
+    // SO_REUSEADDR to allow quick restarts
+    try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1)));
+
+    try posix.bind(fd, &sock_addr.any, sock_addr.getOsSockLen());
+    try posix.listen(fd, 128);
+    return fd;
+}
+
+pub fn tcpConnect(addr: []const u8) !i32 {
+    const parsed = try parseTcpAddress(addr);
+    const is_ipv6 = std.mem.indexOfScalar(u8, parsed.host, ':') != null;
+
+    var sock_addr = if (is_ipv6)
+        std.net.Address.parseIp6(parsed.host, parsed.port) catch return error.InvalidAddress
+    else
+        std.net.Address.parseIp4(parsed.host, parsed.port) catch return error.InvalidAddress;
+
+    const fd = try posix.socket(sock_addr.any.family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    errdefer posix.close(fd);
+
+    // TCP_NODELAY for interactive responsiveness
+    try setTcpNoDelay(fd);
+
+    try posix.connect(fd, &sock_addr.any, sock_addr.getOsSockLen());
+    return fd;
+}
+
 test "max_socket_path_len matches platform sockaddr_un" {
     const path_field_len = @typeInfo(
         @TypeOf(@as(posix.sockaddr.un, undefined).path),
@@ -179,4 +259,56 @@ test "getSocketPath boundary: name fills exactly to limit" {
     @memset(name_over_limit, 'b');
 
     try std.testing.expectError(error.NameTooLong, getSocketPath(alloc, dir, name_over_limit));
+}
+
+test "isTcpAddress valid inputs" {
+    try std.testing.expect(isTcpAddress("127.0.0.1:7777"));
+    try std.testing.expect(isTcpAddress("0.0.0.0:1"));
+    try std.testing.expect(isTcpAddress("192.168.1.1:65535"));
+    try std.testing.expect(isTcpAddress(":8080"));
+    try std.testing.expect(isTcpAddress("[::1]:9090"));
+    try std.testing.expect(isTcpAddress("[fe80::1]:443"));
+}
+
+test "isTcpAddress invalid inputs" {
+    try std.testing.expect(!isTcpAddress(""));
+    try std.testing.expect(!isTcpAddress("no-port"));
+    try std.testing.expect(!isTcpAddress("host:"));
+    try std.testing.expect(!isTcpAddress("host:0"));
+    try std.testing.expect(!isTcpAddress("host:99999"));
+    try std.testing.expect(!isTcpAddress("host:abc"));
+    try std.testing.expect(!isTcpAddress("localhost:7777")); // hostnames rejected, numeric IPs only
+    try std.testing.expect(!isTcpAddress("[::1]"));
+    try std.testing.expect(!isTcpAddress("[::1]:"));
+    try std.testing.expect(!isTcpAddress("[::1]:0"));
+    try std.testing.expect(!isTcpAddress("/tmp/zmx.sock"));
+}
+
+test "parseTcpAddress IPv4" {
+    const result = try parseTcpAddress("127.0.0.1:7777");
+    try std.testing.expectEqualStrings("127.0.0.1", result.host);
+    try std.testing.expectEqual(@as(u16, 7777), result.port);
+}
+
+test "parseTcpAddress IPv6" {
+    const result = try parseTcpAddress("[::1]:9090");
+    try std.testing.expectEqualStrings("::1", result.host);
+    try std.testing.expectEqual(@as(u16, 9090), result.port);
+}
+
+test "parseTcpAddress bare port" {
+    const result = try parseTcpAddress(":8080");
+    try std.testing.expectEqualStrings("0.0.0.0", result.host);
+    try std.testing.expectEqual(@as(u16, 8080), result.port);
+}
+
+test "parseTcpAddress invalid formats" {
+    try std.testing.expectError(error.InvalidAddress, parseTcpAddress(""));
+    try std.testing.expectError(error.InvalidAddress, parseTcpAddress("no-port"));
+    try std.testing.expectError(error.InvalidAddress, parseTcpAddress("localhost:8080")); // hostnames rejected
+    try std.testing.expectError(error.InvalidPort, parseTcpAddress("127.0.0.1:0"));
+    try std.testing.expectError(error.InvalidPort, parseTcpAddress("127.0.0.1:"));
+    try std.testing.expectError(error.InvalidPort, parseTcpAddress("127.0.0.1:abc"));
+    try std.testing.expectError(error.InvalidAddress, parseTcpAddress("[]:8080"));
+    try std.testing.expectError(error.InvalidPort, parseTcpAddress("[::1]:0"));
 }

@@ -37,7 +37,11 @@ const bash_completions =
     \\  fi
     \\
     \\  case "$prev" in
-    \\    attach|run|kill|history)
+    \\    attach)
+    \\      local sessions=$(zmx list --short 2>/dev/null | tr '\n' ' ')
+    \\      COMPREPLY=($(compgen -W "$sessions --tcp" -- "$cur"))
+    \\      ;;
+    \\    run|kill|history)
     \\      local sessions=$(zmx list --short 2>/dev/null | tr '\n' ' ')
     \\      COMPREPLY=($(compgen -W "$sessions" -- "$cur"))
     \\      ;;
@@ -84,7 +88,11 @@ const zsh_completions =
     \\      ;;
     \\    args)
     \\      case $words[2] in
-    \\        attach|a|kill|k|run|r|history|hi)
+    \\        attach|a)
+    \\          _zmx_sessions
+    \\          _values 'options' '--tcp'
+    \\          ;;
+    \\        kill|k|run|r|history|hi)
     \\          _zmx_sessions
     \\          ;;
     \\        completions|c)
@@ -135,6 +143,7 @@ const fish_completions =
     \\
     \\complete -c zmx -n "__fish_is_nth_token 2; and __fish_seen_subcommand_from c completions" -a 'bash zsh fish' -d Shell
     \\
+    \\complete -c zmx -n "__fish_seen_subcommand_from a attach" -l tcp -d 'Use TCP transport'
     \\complete -c zmx -n "__fish_seen_subcommand_from l list" -l short -d 'Short output'
     \\complete -c zmx -n "__fish_seen_subcommand_from hi history" -l vt -d 'History format for escape sequences'
     \\complete -c zmx -n "__fish_seen_subcommand_from hi history" -l html -d 'History format for escape sequences'

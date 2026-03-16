@@ -97,12 +97,33 @@ pub fn main() !void {
         defer alloc.free(sesh);
         return history(&cfg, sesh, format);
     } else if (std.mem.eql(u8, cmd, "attach") or std.mem.eql(u8, cmd, "a")) {
-        const session_name = args.next() orelse "";
+        // Parse optional --tcp flag before session name
+        var tcp_addr: ?[]const u8 = null;
+        var session_name: []const u8 = "";
+        var found_session = false;
 
         var command_args: std.ArrayList([]const u8) = .empty;
         defer command_args.deinit(alloc);
+
         while (args.next()) |arg| {
-            try command_args.append(alloc, arg);
+            if (!found_session and (std.mem.eql(u8, arg, "--tcp"))) {
+                tcp_addr = args.next() orelse {
+                    std.log.err("--tcp requires an address argument (e.g. 0.0.0.0:7777)", .{});
+                    return error.MissingTcpAddress;
+                };
+            } else if (!found_session) {
+                session_name = arg;
+                found_session = true;
+            } else {
+                try command_args.append(alloc, arg);
+            }
+        }
+
+        cfg.tcp_addr = tcp_addr;
+
+        // If session_name looks like a TCP address, connect directly
+        if (socket.isTcpAddress(session_name)) {
+            return attachTcp(session_name);
         }
 
         const clients = try std.ArrayList(*Client).initCapacity(alloc, 10);
@@ -142,6 +163,12 @@ pub fn main() !void {
         while (args.next()) |arg| {
             try cmd_args_raw.append(alloc, arg);
         }
+
+        // If session_name looks like a TCP address, run via TCP
+        if (socket.isTcpAddress(session_name)) {
+            return runTcp(alloc, session_name, cmd_args_raw.items);
+        }
+
         const clients = try std.ArrayList(*Client).initCapacity(alloc, 10);
 
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -205,6 +232,7 @@ const Cfg = struct {
     socket_dir: []const u8,
     log_dir: []const u8,
     max_scrollback: usize = 10_000_000,
+    tcp_addr: ?[]const u8 = null, // --tcp bind address, e.g. "0.0.0.0:7777"
 
     pub fn init(alloc: std.mem.Allocator) !Cfg {
         const tmpdir = std.mem.trimRight(u8, posix.getenv("TMPDIR") orelse "/tmp", "/");
@@ -271,8 +299,10 @@ const Daemon = struct {
     task_exit_code: ?u8 = null, // null = running or n/a, set when task completes
     task_ended_at: ?u64 = null, // timestamp when task exited
     task_command: ?[]const []const u8 = null,
+    tcp_fd: ?i32 = null, // TCP listener fd, null if --tcp not specified
 
     pub fn deinit(self: *Daemon) void {
+        if (self.tcp_fd) |fd| posix.close(fd);
         self.clients.deinit(self.alloc);
         self.alloc.free(self.socket_path);
     }
@@ -411,6 +441,26 @@ const Daemon = struct {
             std.log.info("creating session={s}", .{self.session_name});
             const server_sock_fd = try socket.createSocket(self.socket_path);
 
+            // Create TCP listener if --tcp was specified
+            if (self.cfg.tcp_addr) |tcp_addr| {
+                const tcp_fd = socket.createTcpSocket(tcp_addr) catch |err| {
+                    posix.close(server_sock_fd);
+                    dir.deleteFile(self.session_name) catch {};
+                    std.log.err("failed to create TCP listener on {s}: {s}", .{ tcp_addr, @errorName(err) });
+                    return err;
+                };
+                self.tcp_fd = tcp_fd;
+                std.log.info("TCP listener on {s}", .{tcp_addr});
+                // Warn if binding to a non-loopback address (no auth in v1)
+                const parsed = socket.parseTcpAddress(tcp_addr) catch unreachable;
+                if (!std.mem.eql(u8, parsed.host, "127.0.0.1") and !std.mem.eql(u8, parsed.host, "::1")) {
+                    var buf: [4096]u8 = undefined;
+                    var w = std.fs.File.stderr().writer(&buf);
+                    w.interface.print("warning: TCP listener on {s} has no authentication -- anyone who can reach this address can control the session\n", .{tcp_addr}) catch {};
+                    w.interface.flush() catch {};
+                }
+            }
+
             const pid = try posix.fork();
             if (pid == 0) { // child (daemon)
                 _ = try posix.setsid();
@@ -427,13 +477,17 @@ const Daemon = struct {
                 // avoid double-closing server_sock_fd on daemonLoop error.
                 const pty_fd = self.spawnPty() catch |err| {
                     posix.close(server_sock_fd);
+                    if (self.tcp_fd) |fd| {
+                        posix.close(fd);
+                        self.tcp_fd = null;
+                    }
                     dir.deleteFile(self.session_name) catch {};
                     return err;
                 };
 
                 defer {
                     self.handleKill();
-                    self.deinit();
+                    self.deinit(); // closes tcp_fd via Daemon.deinit
                     _ = posix.waitpid(self.pid, 0);
                     posix.close(pty_fd);
                     posix.close(server_sock_fd);
@@ -447,6 +501,10 @@ const Daemon = struct {
                 return .{ .created = true, .is_daemon = true };
             }
             posix.close(server_sock_fd);
+            if (self.tcp_fd) |fd| {
+                posix.close(fd);
+                self.tcp_fd = null;
+            }
             std.Thread.sleep(10 * std.time.ns_per_ms);
             return .{ .created = true, .is_daemon = false };
         }
@@ -691,8 +749,12 @@ fn help() !void {
         \\Usage: zmx <command> [args]
         \\
         \\Commands:
-        \\  [a]ttach <name> [command...]   Attach to session, creating session if needed
+        \\  [a]ttach [--tcp addr:port] <name> [command...]
+        \\                                 Attach to session, creating session if needed
+        \\                                 --tcp: also listen on TCP (e.g. --tcp 0.0.0.0:7777)
+        \\  [a]ttach <addr:port>           Attach to a remote session via TCP
         \\  [r]un <name> [command...]      Send command without attaching, creating session if needed
+        \\  [r]un <addr:port> [command...] Send command to a remote session via TCP
         \\  [d]etach                       Detach all clients from current session (ctrl+\ for current client)
         \\  [l]ist [--short]               List active sessions
         \\  [c]ompletions <shell>          Completion scripts for shell integration (bash, zsh, or fish)
@@ -1058,6 +1120,163 @@ fn attach(daemon: *Daemon) !void {
     try clientLoop(client_sock);
 }
 
+/// Attach to a remote session via TCP address (no daemon creation).
+fn attachTcp(addr: []const u8) !void {
+    const sesh = socket.getSeshNameFromEnv();
+    if (sesh.len > 0) {
+        return error.CannotAttachToSessionInSession;
+    }
+
+    const client_sock = try socket.tcpConnect(addr);
+    std.log.info("attached via tcp={s}", .{addr});
+
+    var orig_termios: cross.c.termios = undefined;
+    const stdin_is_tty = cross.c.tcgetattr(posix.STDIN_FILENO, &orig_termios) == 0;
+
+    defer {
+        if (stdin_is_tty) {
+            _ = cross.c.tcsetattr(posix.STDIN_FILENO, cross.c.TCSAFLUSH, &orig_termios);
+        }
+        const restore_seq = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l" ++
+            "\x1b[?2004l\x1b[?1004l\x1b[?1049l" ++
+            "\x1b[<u" ++
+            "\x1b[?25h";
+        _ = posix.write(posix.STDOUT_FILENO, restore_seq) catch {};
+    }
+
+    if (stdin_is_tty) {
+        var raw_termios = orig_termios;
+        cross.c.cfmakeraw(&raw_termios);
+        raw_termios.c_cc[cross.c.VLNEXT] = cross.c._POSIX_VDISABLE;
+        raw_termios.c_cc[cross.c.VQUIT] = cross.c._POSIX_VDISABLE;
+        raw_termios.c_cc[cross.c.VMIN] = 1;
+        raw_termios.c_cc[cross.c.VTIME] = 0;
+        _ = cross.c.tcsetattr(posix.STDIN_FILENO, cross.c.TCSANOW, &raw_termios);
+    }
+
+    const clear_seq = "\x1b[2J\x1b[H";
+    _ = try posix.write(posix.STDOUT_FILENO, clear_seq);
+
+    try clientLoop(client_sock);
+}
+
+/// Run a command on a remote session via TCP address.
+fn runTcp(alloc: std.mem.Allocator, addr: []const u8, command_args: [][]const u8) !void {
+    var buf: [4096]u8 = undefined;
+    var w = std.fs.File.stdout().writer(&buf);
+
+    var cmd_to_send: ?[]const u8 = null;
+    var allocated_cmd: ?[]u8 = null;
+    defer if (allocated_cmd) |c| alloc.free(c);
+
+    const shell = util.detectShell();
+    const shell_basename = std.fs.path.basename(shell);
+    const inline_task_marker = if (std.mem.eql(u8, shell_basename, "fish"))
+        "; echo ZMX_TASK_COMPLETED:$status"
+    else
+        "; echo ZMX_TASK_COMPLETED:$?";
+    const stdin_task_marker = if (std.mem.eql(u8, shell_basename, "fish"))
+        "echo ZMX_TASK_COMPLETED:$status"
+    else
+        "echo ZMX_TASK_COMPLETED:$?";
+
+    if (command_args.len > 0) {
+        var cmd_list = std.ArrayList(u8).empty;
+        defer cmd_list.deinit(alloc);
+
+        for (command_args, 0..) |arg, i| {
+            if (i > 0) try cmd_list.append(alloc, ' ');
+            if (util.shellNeedsQuoting(arg)) {
+                const quoted = try util.shellQuote(alloc, arg);
+                defer alloc.free(quoted);
+                try cmd_list.appendSlice(alloc, quoted);
+            } else {
+                try cmd_list.appendSlice(alloc, arg);
+            }
+        }
+
+        try cmd_list.appendSlice(alloc, inline_task_marker);
+        try cmd_list.append(alloc, '\r');
+
+        cmd_to_send = try cmd_list.toOwnedSlice(alloc);
+        allocated_cmd = @constCast(cmd_to_send.?);
+    } else {
+        const stdin_fd = posix.STDIN_FILENO;
+        if (!std.posix.isatty(stdin_fd)) {
+            var stdin_buf = try std.ArrayList(u8).initCapacity(alloc, 4096);
+            defer stdin_buf.deinit(alloc);
+
+            while (true) {
+                var tmp: [4096]u8 = undefined;
+                const n = posix.read(stdin_fd, &tmp) catch |err| {
+                    if (err == error.WouldBlock) break;
+                    return err;
+                };
+                if (n == 0) break;
+                try stdin_buf.appendSlice(alloc, tmp[0..n]);
+            }
+
+            if (stdin_buf.items.len > 0) {
+                if (stdin_buf.items[stdin_buf.items.len - 1] == '\n') {
+                    stdin_buf.items[stdin_buf.items.len - 1] = '\r';
+                } else {
+                    try stdin_buf.append(alloc, '\r');
+                }
+
+                try stdin_buf.appendSlice(alloc, stdin_task_marker);
+                try stdin_buf.append(alloc, '\r');
+
+                cmd_to_send = try alloc.dupe(u8, stdin_buf.items);
+                allocated_cmd = @constCast(cmd_to_send.?);
+            }
+        }
+    }
+
+    if (cmd_to_send == null) {
+        return error.CommandRequired;
+    }
+
+    // Connect via TCP and probe
+    const fd = try socket.tcpConnect(addr);
+    errdefer posix.close(fd);
+
+    const info = ipc.probeSessionFd(alloc, fd) catch |err| {
+        std.log.err("session not ready: {s}", .{@errorName(err)});
+        return error.SessionNotReady;
+    };
+    _ = info;
+
+    defer posix.close(fd);
+
+    ipc.send(fd, .Run, cmd_to_send.?) catch |err| switch (err) {
+        error.ConnectionResetByPeer, error.BrokenPipe => return,
+        else => return err,
+    };
+
+    var poll_fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
+    const poll_result = posix.poll(&poll_fds, 5000) catch return error.PollFailed;
+    if (poll_result == 0) {
+        std.log.err("timeout waiting for ack", .{});
+        return error.Timeout;
+    }
+
+    var sb = try ipc.SocketBuffer.init(alloc);
+    defer sb.deinit();
+
+    const n = sb.read(fd) catch return error.ReadFailed;
+    if (n == 0) return error.ConnectionClosed;
+
+    while (sb.next()) |msg| {
+        if (msg.header.tag == .Ack) {
+            try w.interface.print("command sent\n", .{});
+            try w.interface.flush();
+            return;
+        }
+    }
+
+    return error.NoAckReceived;
+}
+
 fn run(daemon: *Daemon, command_args: [][]const u8) !void {
     const alloc = daemon.alloc;
     var buf: [4096]u8 = undefined;
@@ -1341,6 +1560,27 @@ fn clientLoop(client_sock_fd: i32) !void {
     }
 }
 
+/// Accept a new client connection from a server socket (Unix or TCP).
+fn acceptClient(daemon: *Daemon, server_fd: i32, transport: []const u8) !void {
+    const client_fd = try posix.accept(server_fd, null, null, posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC);
+    // Set TCP_NODELAY on TCP-accepted clients for interactive responsiveness
+    if (std.mem.eql(u8, transport, "tcp")) {
+        socket.setTcpNoDelay(client_fd) catch |err| {
+            std.log.warn("failed to set TCP_NODELAY on client fd={d}: {s}", .{ client_fd, @errorName(err) });
+        };
+    }
+    const client = try daemon.alloc.create(Client);
+    client.* = Client{
+        .alloc = daemon.alloc,
+        .socket_fd = client_fd,
+        .read_buf = try ipc.SocketBuffer.init(daemon.alloc),
+        .write_buf = undefined,
+    };
+    client.write_buf = try std.ArrayList(u8).initCapacity(client.alloc, 4096);
+    try daemon.clients.append(daemon.alloc, client);
+    std.log.info("client connected transport={s} fd={d} total={d}", .{ transport, client_fd, daemon.clients.items.len });
+}
+
 fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
     std.log.info("daemon started session={s} pty_fd={d}", .{ daemon.session_name, pty_fd });
     setupSigtermHandler();
@@ -1365,17 +1605,32 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
 
         poll_fds.clearRetainingCapacity();
 
+        // Index 0: Unix server socket
         try poll_fds.append(daemon.alloc, .{
             .fd = server_sock_fd,
             .events = posix.POLL.IN,
             .revents = 0,
         });
 
+        // Index 1 (optional): TCP server socket
+        if (daemon.tcp_fd) |tcp_fd| {
+            try poll_fds.append(daemon.alloc, .{
+                .fd = tcp_fd,
+                .events = posix.POLL.IN,
+                .revents = 0,
+            });
+        }
+
+        // PTY fd
+        const pty_poll_index = poll_fds.items.len;
         try poll_fds.append(daemon.alloc, .{
             .fd = pty_fd,
             .events = posix.POLL.IN,
             .revents = 0,
         });
+
+        // Client offset: clients start after pty
+        const client_poll_offset = poll_fds.items.len;
 
         for (daemon.clients.items) |client| {
             var events: i16 = posix.POLL.IN;
@@ -1394,24 +1649,31 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
             return err;
         };
 
+        // Handle Unix server socket
         if (poll_fds.items[0].revents & (posix.POLL.ERR | posix.POLL.HUP | posix.POLL.NVAL) != 0) {
             std.log.err("server socket error revents={d}", .{poll_fds.items[0].revents});
             break :daemon_loop;
         } else if (poll_fds.items[0].revents & posix.POLL.IN != 0) {
-            const client_fd = try posix.accept(server_sock_fd, null, null, posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC);
-            const client = try daemon.alloc.create(Client);
-            client.* = Client{
-                .alloc = daemon.alloc,
-                .socket_fd = client_fd,
-                .read_buf = try ipc.SocketBuffer.init(daemon.alloc),
-                .write_buf = undefined,
+            acceptClient(daemon, server_sock_fd, "unix") catch |err| {
+                std.log.warn("failed to accept unix client: {s}", .{@errorName(err)});
             };
-            client.write_buf = try std.ArrayList(u8).initCapacity(client.alloc, 4096);
-            try daemon.clients.append(daemon.alloc, client);
-            std.log.info("client connected fd={d} total={d}", .{ client_fd, daemon.clients.items.len });
         }
 
-        if (poll_fds.items[1].revents & (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
+        // Handle TCP server socket
+        if (daemon.tcp_fd) |tcp_fd| {
+            const tcp_poll_idx: usize = 1;
+            if (poll_fds.items[tcp_poll_idx].revents & (posix.POLL.ERR | posix.POLL.HUP | posix.POLL.NVAL) != 0) {
+                std.log.warn("TCP listener error revents={d}, disabling TCP", .{poll_fds.items[tcp_poll_idx].revents});
+                posix.close(tcp_fd);
+                daemon.tcp_fd = null;
+            } else if (poll_fds.items[tcp_poll_idx].revents & posix.POLL.IN != 0) {
+                acceptClient(daemon, tcp_fd, "tcp") catch |err| {
+                    std.log.warn("failed to accept tcp client: {s}", .{@errorName(err)});
+                };
+            }
+        }
+
+        if (poll_fds.items[pty_poll_index].revents & (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
             // Read from PTY
             var buf: [4096]u8 = undefined;
             const n_opt: ?usize = posix.read(pty_fd, &buf) catch |err| blk: {
@@ -1463,9 +1725,8 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
 
         var i: usize = daemon.clients.items.len;
         // Only iterate over clients that were present when poll_fds was constructed
-        // poll_fds contains [server, pty, client0, client1, ...]
-        // So number of clients in poll_fds is poll_fds.items.len - 2
-        const num_polled_clients = poll_fds.items.len - 2;
+        // poll_fds contains [server, (tcp?), pty, client0, client1, ...]
+        const num_polled_clients = poll_fds.items.len - client_poll_offset;
         if (i > num_polled_clients) {
             // If we have more clients than polled (i.e. we just accepted one), start from the polled ones
             i = num_polled_clients;
@@ -1474,7 +1735,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
         clients_loop: while (i > 0) {
             i -= 1;
             const client = daemon.clients.items[i];
-            const revents = poll_fds.items[i + 2].revents;
+            const revents = poll_fds.items[i + client_poll_offset].revents;
 
             if (revents & posix.POLL.IN != 0) {
                 const n = client.read_buf.read(client.socket_fd) catch |err| {
