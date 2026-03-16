@@ -41,11 +41,6 @@ const ListOptions = struct {
     json: bool = false,
 };
 
-const ListOptionError = error{
-    UnknownListOption,
-    ConflictingListOptions,
-};
-
 pub fn main() !void {
     // use c_allocator to avoid "reached unreachable code" panic in DebugAllocator when forking
     const alloc = std.heap.c_allocator;
@@ -694,48 +689,30 @@ fn printCompletions(shell: completions.Shell) !void {
     try w.interface.flush();
 }
 
-fn printListUsageError(comptime fmt: []const u8, args: anytype) !void {
-    var buf: [4096]u8 = undefined;
-    var w = std.fs.File.stderr().writer(&buf);
-    try w.interface.print("error: " ++ fmt ++ "\n", args);
-    try w.interface.flush();
-}
-
-fn applyListArg(options: *ListOptions, arg: []const u8) ListOptionError!void {
+fn applyListArg(options: *ListOptions, arg: []const u8) void {
     if (std.mem.eql(u8, arg, "--short")) {
-        if (options.json) return error.ConflictingListOptions;
         options.short = true;
+        options.json = false;
         return;
     }
     if (std.mem.eql(u8, arg, "--json")) {
-        if (options.short) return error.ConflictingListOptions;
         options.json = true;
-        return;
+        options.short = false;
     }
-    return error.UnknownListOption;
 }
 
 fn parseListOptions(args: *std.process.ArgIterator) !ListOptions {
     var options = ListOptions{};
     while (args.next()) |arg| {
-        applyListArg(&options, arg) catch |err| switch (err) {
-            error.ConflictingListOptions => {
-                try printListUsageError("list options --short and --json cannot be used together", .{});
-                std.process.exit(2);
-            },
-            error.UnknownListOption => {
-                try printListUsageError("unknown list option: {s}", .{arg});
-                std.process.exit(2);
-            },
-        };
+        applyListArg(&options, arg);
     }
     return options;
 }
 
-fn parseListOptionSlice(args: []const []const u8) ListOptionError!ListOptions {
+fn parseListOptionSlice(args: []const []const u8) ListOptions {
     var options = ListOptions{};
     for (args) |arg| {
-        try applyListArg(&options, arg);
+        applyListArg(&options, arg);
     }
     return options;
 }
@@ -774,23 +751,31 @@ fn help() !void {
 }
 
 test "parseListOptionSlice accepts supported list flags" {
-    const json_only = try parseListOptionSlice(&.{"--json"});
+    const json_only = parseListOptionSlice(&.{"--json"});
     try std.testing.expect(json_only.json);
     try std.testing.expect(!json_only.short);
 
-    const short_only = try parseListOptionSlice(&.{"--short"});
+    const short_only = parseListOptionSlice(&.{"--short"});
     try std.testing.expect(short_only.short);
     try std.testing.expect(!short_only.json);
 
-    const repeated = try parseListOptionSlice(&.{ "--json", "--json" });
+    const repeated = parseListOptionSlice(&.{ "--json", "--json" });
     try std.testing.expect(repeated.json);
     try std.testing.expect(!repeated.short);
 }
 
-test "parseListOptionSlice rejects conflicting and unknown list flags" {
-    try std.testing.expectError(error.ConflictingListOptions, parseListOptionSlice(&.{ "--json", "--short" }));
-    try std.testing.expectError(error.ConflictingListOptions, parseListOptionSlice(&.{ "--short", "--json" }));
-    try std.testing.expectError(error.UnknownListOption, parseListOptionSlice(&.{"--wat"}));
+test "parseListOptionSlice keeps last known flag and ignores unknown flags" {
+    const short_last = parseListOptionSlice(&.{ "--json", "--short" });
+    try std.testing.expect(short_last.short);
+    try std.testing.expect(!short_last.json);
+
+    const json_last = parseListOptionSlice(&.{ "--short", "--json" });
+    try std.testing.expect(json_last.json);
+    try std.testing.expect(!json_last.short);
+
+    const ignore_unknown = parseListOptionSlice(&.{ "--wat", "--json", "--tsv" });
+    try std.testing.expect(ignore_unknown.json);
+    try std.testing.expect(!ignore_unknown.short);
 }
 
 fn wait(cfg: *Cfg, session_names: std.ArrayList([]const u8)) !void {
