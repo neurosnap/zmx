@@ -443,7 +443,7 @@ const Daemon = struct {
 
             // Create TCP listener if --tcp was specified
             if (self.cfg.tcp_addr) |tcp_addr| {
-                const tcp_fd = socket.createTcpSocket(tcp_addr) catch |err| {
+                const tcp_fd = socket.createTcpSocket(self.alloc, tcp_addr) catch |err| {
                     posix.close(server_sock_fd);
                     dir.deleteFile(self.session_name) catch {};
                     std.log.err("failed to create TCP listener on {s}: {s}", .{ tcp_addr, @errorName(err) });
@@ -1127,7 +1127,7 @@ fn attachTcp(addr: []const u8) !void {
         return error.CannotAttachToSessionInSession;
     }
 
-    const client_sock = try socket.tcpConnect(addr);
+    const client_sock = try socket.tcpConnect(std.heap.c_allocator, addr);
     std.log.info("attached via tcp={s}", .{addr});
 
     var orig_termios: cross.c.termios = undefined;
@@ -1237,7 +1237,7 @@ fn runTcp(alloc: std.mem.Allocator, addr: []const u8, command_args: [][]const u8
     }
 
     // Connect via TCP and probe
-    const fd = try socket.tcpConnect(addr);
+    const fd = try socket.tcpConnect(alloc, addr);
     errdefer posix.close(fd);
 
     const info = ipc.probeSessionFd(alloc, fd) catch |err| {

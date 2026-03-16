@@ -127,8 +127,6 @@ pub fn parseTcpAddress(addr: []const u8) !struct { host: []const u8, port: u16 }
         const port_str = addr[bracket_end + 2 ..];
         const port = std.fmt.parseInt(u16, port_str, 10) catch return error.InvalidPort;
         if (port == 0) return error.InvalidPort;
-        // Validate that host is a numeric IPv6 address
-        _ = std.net.Address.parseIp6(host, port) catch return error.InvalidAddress;
         return .{ .host = host, .port = port };
     }
 
@@ -142,8 +140,6 @@ pub fn parseTcpAddress(addr: []const u8) !struct { host: []const u8, port: u16 }
     if (host.len == 0) {
         return .{ .host = "0.0.0.0", .port = port };
     }
-    // Validate that host is a numeric IPv4 address (reject hostnames like "localhost")
-    _ = std.net.Address.parseIp4(host, port) catch return error.InvalidAddress;
     return .{ .host = host, .port = port };
 }
 
@@ -152,14 +148,22 @@ pub fn setTcpNoDelay(fd: i32) !void {
     try posix.setsockopt(fd, posix.IPPROTO.TCP, TCP_NODELAY, &std.mem.toBytes(@as(c_int, 1)));
 }
 
-pub fn createTcpSocket(addr: []const u8) !i32 {
-    const parsed = try parseTcpAddress(addr);
-    const is_ipv6 = std.mem.indexOfScalar(u8, parsed.host, ':') != null;
+/// Resolve a host:port string to a socket address, supporting both numeric IPs
+/// and DNS hostnames (e.g. "host.docker.internal").
+fn resolveAddress(alloc: std.mem.Allocator, host: []const u8, port: u16) !std.net.Address {
+    // Try numeric IP first (fast path, no allocation)
+    if (std.net.Address.resolveIp(host, port)) |addr| return addr else |_| {}
 
-    var sock_addr = if (is_ipv6)
-        std.net.Address.parseIp6(parsed.host, parsed.port) catch return error.InvalidAddress
-    else
-        std.net.Address.parseIp4(parsed.host, parsed.port) catch return error.InvalidAddress;
+    // Fall back to DNS resolution
+    const list = try std.net.getAddressList(alloc, host, port);
+    defer list.deinit();
+    if (list.addrs.len == 0) return error.UnknownHostName;
+    return list.addrs[0];
+}
+
+pub fn createTcpSocket(alloc: std.mem.Allocator, addr: []const u8) !i32 {
+    const parsed = try parseTcpAddress(addr);
+    var sock_addr = try resolveAddress(alloc, parsed.host, parsed.port);
 
     const fd = try posix.socket(sock_addr.any.family, posix.SOCK.STREAM | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC, 0);
     errdefer posix.close(fd);
@@ -172,14 +176,9 @@ pub fn createTcpSocket(addr: []const u8) !i32 {
     return fd;
 }
 
-pub fn tcpConnect(addr: []const u8) !i32 {
+pub fn tcpConnect(alloc: std.mem.Allocator, addr: []const u8) !i32 {
     const parsed = try parseTcpAddress(addr);
-    const is_ipv6 = std.mem.indexOfScalar(u8, parsed.host, ':') != null;
-
-    var sock_addr = if (is_ipv6)
-        std.net.Address.parseIp6(parsed.host, parsed.port) catch return error.InvalidAddress
-    else
-        std.net.Address.parseIp4(parsed.host, parsed.port) catch return error.InvalidAddress;
+    var sock_addr = try resolveAddress(alloc, parsed.host, parsed.port);
 
     const fd = try posix.socket(sock_addr.any.family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
     errdefer posix.close(fd);
@@ -268,6 +267,8 @@ test "isTcpAddress valid inputs" {
     try std.testing.expect(isTcpAddress(":8080"));
     try std.testing.expect(isTcpAddress("[::1]:9090"));
     try std.testing.expect(isTcpAddress("[fe80::1]:443"));
+    try std.testing.expect(isTcpAddress("localhost:7777"));
+    try std.testing.expect(isTcpAddress("host.docker.internal:17777"));
 }
 
 test "isTcpAddress invalid inputs" {
@@ -277,7 +278,6 @@ test "isTcpAddress invalid inputs" {
     try std.testing.expect(!isTcpAddress("host:0"));
     try std.testing.expect(!isTcpAddress("host:99999"));
     try std.testing.expect(!isTcpAddress("host:abc"));
-    try std.testing.expect(!isTcpAddress("localhost:7777")); // hostnames rejected, numeric IPs only
     try std.testing.expect(!isTcpAddress("[::1]"));
     try std.testing.expect(!isTcpAddress("[::1]:"));
     try std.testing.expect(!isTcpAddress("[::1]:0"));
@@ -302,10 +302,19 @@ test "parseTcpAddress bare port" {
     try std.testing.expectEqual(@as(u16, 8080), result.port);
 }
 
+test "parseTcpAddress hostname" {
+    const result = try parseTcpAddress("localhost:8080");
+    try std.testing.expectEqualStrings("localhost", result.host);
+    try std.testing.expectEqual(@as(u16, 8080), result.port);
+
+    const result2 = try parseTcpAddress("host.docker.internal:17777");
+    try std.testing.expectEqualStrings("host.docker.internal", result2.host);
+    try std.testing.expectEqual(@as(u16, 17777), result2.port);
+}
+
 test "parseTcpAddress invalid formats" {
     try std.testing.expectError(error.InvalidAddress, parseTcpAddress(""));
     try std.testing.expectError(error.InvalidAddress, parseTcpAddress("no-port"));
-    try std.testing.expectError(error.InvalidAddress, parseTcpAddress("localhost:8080")); // hostnames rejected
     try std.testing.expectError(error.InvalidPort, parseTcpAddress("127.0.0.1:0"));
     try std.testing.expectError(error.InvalidPort, parseTcpAddress("127.0.0.1:"));
     try std.testing.expectError(error.InvalidPort, parseTcpAddress("127.0.0.1:abc"));
