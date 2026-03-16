@@ -212,6 +212,17 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
     var builder: std.Io.Writer.Allocating = .init(alloc);
     defer builder.deinit();
 
+    // Synchronized output (DECSET 2026) is a transient rendering handshake
+    // between a program and its current terminal client. Replaying it to a
+    // newly attached client can leave that client deferring renders until its
+    // local timeout fires, so temporarily exclude it from restored state and
+    // restore the original mode before returning.
+    const had_synchronized_output = term.modes.get(.synchronized_output);
+    if (had_synchronized_output) {
+        term.modes.set(.synchronized_output, false);
+        defer term.modes.set(.synchronized_output, true);
+    }
+
     var term_formatter = ghostty_vt.formatter.TerminalFormatter.init(term, .vt);
     term_formatter.content = .{ .selection = null };
     term_formatter.extra = .{
@@ -527,4 +538,42 @@ test "isKittyCtrlBackslash" {
     try std.testing.expect(!isKittyCtrlBackslash("\x1b[92;5:3u"));
     try std.testing.expect(!isKittyCtrlBackslash("\x1b[92;1u"));
     try std.testing.expect(!isKittyCtrlBackslash("garbage"));
+}
+
+test "serializeTerminalState excludes synchronized output replay" {
+    const alloc = std.testing.allocator;
+
+    var term = try ghostty_vt.Terminal.init(alloc, .{
+        .cols = 80,
+        .rows = 24,
+    });
+    defer term.deinit(alloc);
+
+    var stream = term.vtStream();
+    defer stream.deinit();
+
+    stream.nextSlice("\x1b[?2004h"); // Bracketed paste
+    stream.nextSlice("\x1b[?2026h"); // Synchronized output
+    stream.nextSlice("hello");
+
+    try std.testing.expect(term.modes.get(.bracketed_paste));
+    try std.testing.expect(term.modes.get(.synchronized_output));
+
+    const output = serializeTerminalState(alloc, &term) orelse return error.TestUnexpectedNull;
+    defer alloc.free(output);
+
+    try std.testing.expect(term.modes.get(.synchronized_output));
+
+    var restored = try ghostty_vt.Terminal.init(alloc, .{
+        .cols = 80,
+        .rows = 24,
+    });
+    defer restored.deinit(alloc);
+
+    var restored_stream = restored.vtStream();
+    defer restored_stream.deinit();
+    restored_stream.nextSlice(output);
+
+    try std.testing.expect(restored.modes.get(.bracketed_paste));
+    try std.testing.expect(!restored.modes.get(.synchronized_output));
 }
