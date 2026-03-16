@@ -287,14 +287,83 @@ pub fn detectShell() [:0]const u8 {
     return std.posix.getenv("SHELL") orelse "/bin/sh";
 }
 
+fn isCurrentSession(session_name: []const u8, current_session: ?[]const u8) bool {
+    return if (current_session) |current|
+        std.mem.eql(u8, current, session_name)
+    else
+        false;
+}
+
+fn sessionStatusText(session: SessionEntry) ?[]const u8 {
+    if (!session.is_error) return null;
+
+    return if (std.mem.eql(u8, session.error_name.?, "ConnectionRefused"))
+        "cleaning_up"
+    else
+        "unreachable";
+}
+
+fn endedAt(session: SessionEntry) ?u64 {
+    if (session.task_ended_at) |ended_at| {
+        if (ended_at > 0) return ended_at;
+    }
+    return null;
+}
+
+const JsonSession = struct {
+    name: []const u8,
+    current: bool,
+    pid: ?i32,
+    clients: ?usize,
+    created: ?u64,
+    start_dir: ?[]const u8,
+    cmd: ?[]const u8,
+    ended: ?u64,
+    exit_code: ?u8,
+    err: ?[]const u8,
+    status: ?[]const u8,
+};
+
+fn jsonSessionView(session: SessionEntry, current_session: ?[]const u8) JsonSession {
+    const ended = if (session.is_error) null else endedAt(session);
+    return .{
+        .name = session.name,
+        .current = isCurrentSession(session.name, current_session),
+        .pid = if (session.is_error) null else session.pid,
+        .clients = if (session.is_error) null else session.clients_len,
+        .created = if (session.is_error) null else session.created_at,
+        .start_dir = if (session.is_error) null else session.cwd,
+        .cmd = if (session.is_error) null else session.cmd,
+        .ended = ended,
+        .exit_code = if (ended == null) null else session.task_exit_code,
+        .err = if (session.is_error) session.error_name else null,
+        .status = sessionStatusText(session),
+    };
+}
+
+pub fn writeSessionJsonList(writer: *std.Io.Writer, sessions: []const SessionEntry, current_session: ?[]const u8) !void {
+    var stringify: std.json.Stringify = .{
+        .writer = writer,
+        .options = .{},
+    };
+    try stringify.beginArray();
+    for (sessions) |session| {
+        try stringify.write(jsonSessionView(session, current_session));
+    }
+    try stringify.endArray();
+    try writer.print("\n", .{});
+}
+
 /// Formats a session entry for list output (only the name when `short` is
 /// true), adding a prefix to indicate the current session, if there is one.
 pub fn writeSessionLine(writer: *std.Io.Writer, session: SessionEntry, short: bool, current_session: ?[]const u8) !void {
     const current_arrow = "→";
-    const prefix = if (current_session) |current|
-        if (std.mem.eql(u8, current, session.name)) current_arrow ++ " " else "  "
+    const prefix = if (current_session == null)
+        ""
+    else if (isCurrentSession(session.name, current_session))
+        current_arrow ++ " "
     else
-        "";
+        "  ";
 
     if (short) {
         if (session.is_error) return;
@@ -342,6 +411,52 @@ pub fn writeSessionLine(writer: *std.Io.Writer, session: SessionEntry, short: bo
         }
     }
     try writer.print("\n", .{});
+}
+
+test "writeSessionJsonList formats normal and error sessions" {
+    const sessions = [_]SessionEntry{
+        .{
+            .name = "dev",
+            .pid = 123,
+            .clients_len = 2,
+            .is_error = false,
+            .error_name = null,
+            .cmd = "bash",
+            .cwd = "/tmp/dev",
+            .created_at = 42,
+            .task_ended_at = 99,
+            .task_exit_code = 0,
+        },
+        .{
+            .name = "stale",
+            .pid = null,
+            .clients_len = null,
+            .is_error = true,
+            .error_name = "ConnectionRefused",
+            .cmd = null,
+            .cwd = null,
+            .created_at = 0,
+            .task_ended_at = 0,
+            .task_exit_code = 1,
+        },
+    };
+
+    var builder: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer builder.deinit();
+
+    try writeSessionJsonList(&builder.writer, &sessions, "dev");
+    try std.testing.expectEqualStrings(
+        "[{\"name\":\"dev\",\"current\":true,\"pid\":123,\"clients\":2,\"created\":42,\"start_dir\":\"/tmp/dev\",\"cmd\":\"bash\",\"ended\":99,\"exit_code\":0,\"err\":null,\"status\":null},{\"name\":\"stale\",\"current\":false,\"pid\":null,\"clients\":null,\"created\":null,\"start_dir\":null,\"cmd\":null,\"ended\":null,\"exit_code\":null,\"err\":\"ConnectionRefused\",\"status\":\"cleaning_up\"}]\n",
+        builder.writer.buffered(),
+    );
+}
+
+test "writeSessionJsonList formats empty session arrays" {
+    var builder: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer builder.deinit();
+
+    try writeSessionJsonList(&builder.writer, &.{}, null);
+    try std.testing.expectEqualStrings("[]\n", builder.writer.buffered());
 }
 
 test "writeSessionLine formats output for current session and short output" {

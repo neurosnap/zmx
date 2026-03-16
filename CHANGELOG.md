@@ -4,6 +4,10 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
+### Added
+
+- New list flag zmx [l]ist --json for machine-readable JSON output
+
 ### Changed
 
 - `zmx list` renamed keys and made formatting more stable

@@ -71,7 +71,7 @@ Commands:
   [a]ttach <name> [command...]   Attach to session, creating session if needed
   [r]un <name> [command...]      Send command without attaching, creating session if needed
   [d]etach                       Detach all clients from current session  (ctrl+\ for current client)
-  [l]ist [--short]               List active sessions
+  [l]ist [--short|--json]        List active sessions
   [c]ompletions <shell>          Completion scripts for shell integration (bash, zsh, or fish)
   [k]ill <name>                  Kill a session and all attached clients
   [hi]story <name> [--vt|--html] Output session scrollback (--vt or --html for escape sequences)
@@ -94,6 +94,7 @@ echo "ls -lah" | zmx r dev  # use stdin to run the command
 
 zmx r tests go test ./...   # run your tests in the background
 zmx wait tests              # waits for tests to complete
+zmx list --json | jq .      # machine-readable session list
 ```
 
 ## shell prompt

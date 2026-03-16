@@ -36,6 +36,16 @@ var sigterm_received: std.atomic.Value(bool) = std.atomic.Value(bool).init(false
 // https://github.com/ziglang/zig/blob/738d2be9d6b6ef3ff3559130c05159ef53336224/lib/std/posix.zig#L3505
 const O_NONBLOCK: usize = 1 << @bitOffsetOf(posix.O, "NONBLOCK");
 
+const ListOptions = struct {
+    short: bool = false,
+    json: bool = false,
+};
+
+const ListOptionError = error{
+    UnknownListOption,
+    ConflictingListOptions,
+};
+
 pub fn main() !void {
     // use c_allocator to avoid "reached unreachable code" panic in DebugAllocator when forking
     const alloc = std.heap.c_allocator;
@@ -59,7 +69,7 @@ pub fn main() !void {
     defer log_system.deinit();
 
     const cmd = args.next() orelse {
-        return list(&cfg, false);
+        return list(&cfg, .{});
     };
 
     if (std.mem.eql(u8, cmd, "version") or std.mem.eql(u8, cmd, "v") or std.mem.eql(u8, cmd, "-v") or std.mem.eql(u8, cmd, "--version")) {
@@ -67,8 +77,8 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "h") or std.mem.eql(u8, cmd, "-h")) {
         return help();
     } else if (std.mem.eql(u8, cmd, "list") or std.mem.eql(u8, cmd, "l")) {
-        const short = if (args.next()) |arg| std.mem.eql(u8, arg, "--short") else false;
-        return list(&cfg, short);
+        const options = try parseListOptions(&args);
+        return list(&cfg, options);
     } else if (std.mem.eql(u8, cmd, "completions") or std.mem.eql(u8, cmd, "c")) {
         const arg = args.next() orelse return;
         const shell = completions.Shell.fromString(arg) orelse return;
@@ -684,6 +694,52 @@ fn printCompletions(shell: completions.Shell) !void {
     try w.interface.flush();
 }
 
+fn printListUsageError(comptime fmt: []const u8, args: anytype) !void {
+    var buf: [4096]u8 = undefined;
+    var w = std.fs.File.stderr().writer(&buf);
+    try w.interface.print("error: " ++ fmt ++ "\n", args);
+    try w.interface.flush();
+}
+
+fn applyListArg(options: *ListOptions, arg: []const u8) ListOptionError!void {
+    if (std.mem.eql(u8, arg, "--short")) {
+        if (options.json) return error.ConflictingListOptions;
+        options.short = true;
+        return;
+    }
+    if (std.mem.eql(u8, arg, "--json")) {
+        if (options.short) return error.ConflictingListOptions;
+        options.json = true;
+        return;
+    }
+    return error.UnknownListOption;
+}
+
+fn parseListOptions(args: *std.process.ArgIterator) !ListOptions {
+    var options = ListOptions{};
+    while (args.next()) |arg| {
+        applyListArg(&options, arg) catch |err| switch (err) {
+            error.ConflictingListOptions => {
+                try printListUsageError("list options --short and --json cannot be used together", .{});
+                std.process.exit(2);
+            },
+            error.UnknownListOption => {
+                try printListUsageError("unknown list option: {s}", .{arg});
+                std.process.exit(2);
+            },
+        };
+    }
+    return options;
+}
+
+fn parseListOptionSlice(args: []const []const u8) ListOptionError!ListOptions {
+    var options = ListOptions{};
+    for (args) |arg| {
+        try applyListArg(&options, arg);
+    }
+    return options;
+}
+
 fn help() !void {
     const help_text =
         \\zmx - session persistence for terminal processes
@@ -694,7 +750,7 @@ fn help() !void {
         \\  [a]ttach <name> [command...]   Attach to session, creating session if needed
         \\  [r]un <name> [command...]      Send command without attaching, creating session if needed
         \\  [d]etach                       Detach all clients from current session (ctrl+\ for current client)
-        \\  [l]ist [--short]               List active sessions
+        \\  [l]ist [--short|--json]        List active sessions
         \\  [c]ompletions <shell>          Completion scripts for shell integration (bash, zsh, or fish)
         \\  [k]ill <name>                  Kill a session and all attached clients
         \\  [hi]story <name> [--vt|--html] Output session scrollback (--vt or --html for escape sequences)
@@ -715,6 +771,26 @@ fn help() !void {
     var w = std.fs.File.stdout().writer(&buf);
     try w.interface.print(help_text, .{});
     try w.interface.flush();
+}
+
+test "parseListOptionSlice accepts supported list flags" {
+    const json_only = try parseListOptionSlice(&.{"--json"});
+    try std.testing.expect(json_only.json);
+    try std.testing.expect(!json_only.short);
+
+    const short_only = try parseListOptionSlice(&.{"--short"});
+    try std.testing.expect(short_only.short);
+    try std.testing.expect(!short_only.json);
+
+    const repeated = try parseListOptionSlice(&.{ "--json", "--json" });
+    try std.testing.expect(repeated.json);
+    try std.testing.expect(!repeated.short);
+}
+
+test "parseListOptionSlice rejects conflicting and unknown list flags" {
+    try std.testing.expectError(error.ConflictingListOptions, parseListOptionSlice(&.{ "--json", "--short" }));
+    try std.testing.expectError(error.ConflictingListOptions, parseListOptionSlice(&.{ "--short", "--json" }));
+    try std.testing.expectError(error.UnknownListOption, parseListOptionSlice(&.{"--wat"}));
 }
 
 fn wait(cfg: *Cfg, session_names: std.ArrayList([]const u8)) !void {
@@ -814,7 +890,7 @@ fn wait(cfg: *Cfg, session_names: std.ArrayList([]const u8)) !void {
     }
 }
 
-fn list(cfg: *Cfg, short: bool) !void {
+fn list(cfg: *Cfg, options: ListOptions) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
@@ -836,7 +912,12 @@ fn list(cfg: *Cfg, short: bool) !void {
     }
 
     if (sessions.items.len == 0) {
-        if (short) return;
+        if (options.json) {
+            try w.interface.print("[]\n", .{});
+            try w.interface.flush();
+            return;
+        }
+        if (options.short) return;
         try w.interface.print("no sessions found in {s}\n", .{cfg.socket_dir});
         try w.interface.flush();
         return;
@@ -844,8 +925,14 @@ fn list(cfg: *Cfg, short: bool) !void {
 
     std.mem.sort(util.SessionEntry, sessions.items, {}, util.SessionEntry.lessThan);
 
+    if (options.json) {
+        try util.writeSessionJsonList(&w.interface, sessions.items, current_session);
+        try w.interface.flush();
+        return;
+    }
+
     for (sessions.items) |session| {
-        try util.writeSessionLine(&w.interface, session, short, current_session);
+        try util.writeSessionLine(&w.interface, session, options.short, current_session);
         try w.interface.flush();
     }
 }
