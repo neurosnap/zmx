@@ -246,8 +246,11 @@ fn parseKittyCtrlBackslash(buf: []const u8) bool {
     if (mod_encoded < 1) return false;
     const mod_raw = mod_encoded - 1;
 
-    // 5. Ctrl bit (0b100 = 4) must be set.
-    if (mod_raw & 0b100 == 0) return false;
+    // 5. Ctrl must be the only intentional modifier. Lock modifiers
+    //    (caps_lock=0b1000000, num_lock=0b10000000) are tolerated because
+    //    they are ambient state, not deliberate key combinations.
+    const intentional_mods = mod_raw & 0b00111111;
+    if (intentional_mods != 0b100) return false;
 
     // 6. Parse optional event type after ':'.
     if (pos < buf.len and buf[pos] == ':') {
@@ -634,14 +637,22 @@ test "isKittyCtrlBackslash" {
     // ctrl + caps_lock + num_lock = 1 + (4 + 64 + 128) = 197
     try expect(isKittyCtrlBackslash("\x1b[92;197u"));
 
-    // Combined modifiers: ctrl + shift = 1 + (4 + 1) = 6
-    try expect(isKittyCtrlBackslash("\x1b[92;6u"));
+    // Combined intentional modifiers — must NOT match (ctrl+\ is the
+    // detach key, not ctrl+shift+\ or ctrl+alt+\)
+    // ctrl + shift = 1 + (4 + 1) = 6
+    try expect(!isKittyCtrlBackslash("\x1b[92;6u"));
 
     // ctrl + alt = 1 + (4 + 2) = 7
-    try expect(isKittyCtrlBackslash("\x1b[92;7u"));
+    try expect(!isKittyCtrlBackslash("\x1b[92;7u"));
 
     // ctrl + super = 1 + (4 + 8) = 13
-    try expect(isKittyCtrlBackslash("\x1b[92;13u"));
+    try expect(!isKittyCtrlBackslash("\x1b[92;13u"));
+
+    // ctrl + shift + caps_lock = 1 + (1 + 4 + 64) = 70 — shift is intentional
+    try expect(!isKittyCtrlBackslash("\x1b[92;70u"));
+
+    // ctrl + shift + num_lock = 1 + (1 + 4 + 128) = 134 — shift is intentional
+    try expect(!isKittyCtrlBackslash("\x1b[92;134u"));
 
     // Modifier without ctrl bit — must NOT match
     // shift only = 1 + 1 = 2
