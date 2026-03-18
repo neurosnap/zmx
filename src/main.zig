@@ -341,9 +341,11 @@ const Daemon = struct {
     task_exit_code: ?u8 = null, // null = running or n/a, set when task completes
     task_ended_at: ?u64 = null, // timestamp when task exited
     task_command: ?[]const []const u8 = null,
+    pty_write_buf: std.ArrayList(u8) = .empty,
 
     pub fn deinit(self: *Daemon) void {
         self.clients.deinit(self.alloc);
+        self.pty_write_buf.deinit(self.alloc);
         self.alloc.free(self.socket_path);
     }
 
@@ -547,40 +549,32 @@ const Daemon = struct {
         return .{ .created = false, .is_daemon = false };
     }
 
-    /// Best-effort write to the (non-blocking) PTY fd. Retries short writes
-    /// until complete, but on WouldBlock (kernel buffer full) gives up and
-    /// drops the remainder — the daemon is single-threaded, so blocking here
-    /// to wait for POLLOUT would deadlock against a shell that's itself
-    /// blocked writing echo to a full PTY output buffer that we're not
-    /// draining. Dropping is the same trade-off the old code made implicitly
-    /// (short writes were silently truncated), just without the crash.
-    fn ptyWrite(pty_fd: i32, data: []const u8) void {
-        var remaining = data;
-        while (remaining.len > 0) {
-            const n = posix.write(pty_fd, remaining) catch |err| {
-                if (err == error.WouldBlock) {
-                    std.log.warn(
-                        "pty write dropped {d}/{d} bytes (buffer full)",
-                        .{ remaining.len, data.len },
-                    );
-                } else {
-                    std.log.warn(
-                        "pty write failed, {d} bytes lost: {s}",
-                        .{ remaining.len, @errorName(err) },
-                    );
-                }
-                return;
-            };
-            if (n == 0) return;
-            remaining = remaining[n..];
+    const PTY_WRITE_BUF_MAX = 256 * 1024;
+
+    /// Queue bytes for the PTY's stdin. Flushed by daemonLoop on POLLOUT.
+    /// Drops the payload if the buffer is over cap — same failure mode as
+    /// the old direct-write ptyWrite (drop on EAGAIN), just at a 64× higher
+    /// threshold. Capping avoids OOM when the shell stops reading; dropping
+    /// new (not old) bytes avoids tearing a partially-accepted sequence.
+    fn queuePtyInput(self: *Daemon, data: []const u8) void {
+        if (data.len == 0) return;
+        if (self.pty_write_buf.items.len + data.len > PTY_WRITE_BUF_MAX) {
+            std.log.warn(
+                "pty input dropped {d} bytes (buffer full, shell not reading)",
+                .{data.len},
+            );
+            return;
         }
+        self.pty_write_buf.appendSlice(self.alloc, data) catch |err| {
+            std.log.warn(
+                "pty input dropped {d} bytes: {s}",
+                .{ data.len, @errorName(err) },
+            );
+        };
     }
 
-    pub fn handleInput(self: *Daemon, pty_fd: i32, payload: []const u8) void {
-        _ = self;
-        if (payload.len > 0) {
-            ptyWrite(pty_fd, payload);
-        }
+    pub fn handleInput(self: *Daemon, payload: []const u8) void {
+        self.queuePtyInput(payload);
     }
 
     pub fn handleInit(
@@ -760,7 +754,7 @@ const Daemon = struct {
         }
     }
 
-    pub fn handleRun(self: *Daemon, client: *Client, pty_fd: i32, payload: []const u8) !void {
+    pub fn handleRun(self: *Daemon, client: *Client, payload: []const u8) !void {
         // Reset task tracking so the new command's exit marker is detected.
         // Without this, a second `zmx run` on the same session is ignored
         // because task_exit_code is still set from the first run.
@@ -768,9 +762,7 @@ const Daemon = struct {
         self.task_ended_at = null;
         self.is_task_mode = true;
 
-        if (payload.len > 0) {
-            ptyWrite(pty_fd, payload);
-        }
+        self.queuePtyInput(payload);
         try ipc.appendMessage(self.alloc, &client.write_buf, .Ack, "");
         client.has_pending_output = true;
         self.has_had_client = true;
@@ -1523,9 +1515,13 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
             .revents = 0,
         });
 
+        var pty_events: i16 = posix.POLL.IN;
+        if (daemon.pty_write_buf.items.len > 0) {
+            pty_events |= posix.POLL.OUT;
+        }
         try poll_fds.append(daemon.alloc, .{
             .fd = pty_fd,
-            .events = posix.POLL.IN,
+            .events = pty_events,
             .revents = 0,
         });
 
@@ -1595,8 +1591,10 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                     // This prevents shells like from fish from waiting 2s
                     // and then sending a no DA query response warning because
                     // there's no client terminal to respond to the query.
-                    if (daemon.clients.items.len == 0) {
-                        util.respondToDeviceAttributes(pty_fd, buf[0..n]);
+                    if (daemon.clients.items.len == 0 and
+                        daemon.pty_write_buf.items.len < Daemon.PTY_WRITE_BUF_MAX)
+                    {
+                        util.respondToDeviceAttributes(daemon.alloc, &daemon.pty_write_buf, buf[0..n]);
                     }
 
                     // In run mode, scan output for exit code marker
@@ -1622,6 +1620,20 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                         client.has_pending_output = true;
                     }
                 }
+            }
+        }
+
+        if (poll_fds.items[1].revents & posix.POLL.OUT != 0) {
+            while (daemon.pty_write_buf.items.len > 0) {
+                const n = posix.write(pty_fd, daemon.pty_write_buf.items) catch |err| {
+                    if (err != error.WouldBlock) {
+                        std.log.warn("pty write failed: {s}", .{@errorName(err)});
+                        daemon.pty_write_buf.clearRetainingCapacity();
+                    }
+                    break;
+                };
+                if (n == 0) break;
+                daemon.pty_write_buf.replaceRange(daemon.alloc, 0, n, &[_]u8{}) catch unreachable;
             }
         }
 
@@ -1662,7 +1674,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
 
                 while (client.read_buf.next()) |msg| {
                     switch (msg.header.tag) {
-                        .Input => daemon.handleInput(pty_fd, msg.payload),
+                        .Input => daemon.handleInput(msg.payload),
                         .Init => try daemon.handleInit(client, pty_fd, &term, msg.payload),
                         .Resize => try daemon.handleResize(pty_fd, &term, msg.payload),
                         .Detach => {
@@ -1678,7 +1690,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                         },
                         .Info => try daemon.handleInfo(client),
                         .History => try daemon.handleHistory(client, &term, msg.payload),
-                        .Run => try daemon.handleRun(client, pty_fd, msg.payload),
+                        .Run => try daemon.handleRun(client, msg.payload),
                         .Output, .Ack => {},
                         _ => std.log.warn(
                             "ignoring unknown IPC tag={d}",
