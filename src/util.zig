@@ -145,10 +145,15 @@ const DA2_QUERY_EXPLICIT = "\x1b[>0c";
 const DA1_RESPONSE = "\x1b[?62;22c";
 const DA2_RESPONSE = "\x1b[>1;10;0c";
 
-pub fn respondToDeviceAttributes(pty_fd: i32, data: []const u8) void {
+pub fn respondToDeviceAttributes(alloc: std.mem.Allocator, buf: *std.ArrayList(u8), data: []const u8) void {
     // Scan for DA queries in PTY output and respond on behalf of the terminal.
     // This handles the case where no client is attached (e.g. zmx run)
     // and the shell (e.g. fish) sends a DA query that would otherwise go unanswered.
+    //
+    // Responses are queued into the daemon's pty_write_buf (not written
+    // directly) so they don't interleave with any already-buffered input —
+    // e.g. a large `zmx run` payload still draining after the client
+    // disconnected.
     //
     // DA1 query: ESC [ c  or  ESC [ 0 c
     // DA2 query: ESC [ > c  or  ESC [ > 0 c
@@ -164,9 +169,9 @@ pub fn respondToDeviceAttributes(pty_fd: i32, data: []const u8) void {
                 continue;
             }
             if (matchSeq(data[i..], DA2_QUERY) or matchSeq(data[i..], DA2_QUERY_EXPLICIT)) {
-                _ = posix.write(pty_fd, DA2_RESPONSE) catch {};
+                buf.appendSlice(alloc, DA2_RESPONSE) catch {};
             } else if (matchSeq(data[i..], DA1_QUERY) or matchSeq(data[i..], DA1_QUERY_EXPLICIT)) {
-                _ = posix.write(pty_fd, DA1_RESPONSE) catch {};
+                buf.appendSlice(alloc, DA1_RESPONSE) catch {};
             }
         }
         i += 1;
