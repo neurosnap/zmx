@@ -138,5 +138,4 @@ const fish_completions =
     \\complete -c zmx -n "__fish_seen_subcommand_from l list" -l short -d 'Short output'
     \\complete -c zmx -n "__fish_seen_subcommand_from hi history" -l vt -d 'History format for escape sequences'
     \\complete -c zmx -n "__fish_seen_subcommand_from hi history" -l html -d 'History format for escape sequences'
-
 ;
