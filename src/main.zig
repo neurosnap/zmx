@@ -543,6 +543,29 @@ const Daemon = struct {
         std.log.debug("resize rows={d} cols={d}", .{ resize.rows, resize.cols });
     }
 
+    pub fn handleRefresh(self: *Daemon, pty_fd: i32, term: *ghostty_vt.Terminal) void {
+        const on_alt_screen = term.modes.get(.alt_screen) or
+            term.modes.get(.alt_screen_save_cursor_clear_enter);
+        const wants_focus = term.modes.get(.focus_event);
+
+        if (on_alt_screen) {
+            // Forward the focus event only if the inner application has
+            // focus reporting enabled — otherwise it opted out and we
+            // respect that. Alt screen apps don't use CPR queries for
+            // focus handling, so there is no risk of garbled responses.
+            if (wants_focus) {
+                ptyWrite(pty_fd, "\x1b[I");
+            }
+        } else {
+            // On the primary screen, send SIGWINCH to force the shell to
+            // repaint its prompt. Forwarding \x1b[I would cause concurrent
+            // repaints whose CPR responses collide.
+            posix.kill(-self.pid, posix.SIG.WINCH) catch |err| {
+                std.log.warn("failed to send SIGWINCH for refresh err={s}", .{@errorName(err)});
+            };
+        }
+    }
+
     pub fn handleDetach(self: *Daemon, client: *Client, i: usize) void {
         std.log.info("client detach fd={d}", .{client.socket_fd});
         _ = self.closeClient(client, i, false);
@@ -1052,7 +1075,11 @@ fn attach(daemon: *Daemon) !void {
 
     // Clear screen before attaching. This provides a clean slate before
     // the session restore.
-    const clear_seq = "\x1b[2J\x1b[H";
+    // Also enable focus event reporting (DECSET 1004) on the outer terminal
+    // so the client can detect when the terminal regains focus (e.g. Ghostty
+    // quick terminal toggle) and request a terminal state refresh from the
+    // daemon.
+    const clear_seq = "\x1b[2J\x1b[H" ++ "\x1b[?1004h";
     _ = try posix.write(posix.STDOUT_FILENO, clear_seq);
 
     try clientLoop(client_sock);
@@ -1273,6 +1300,14 @@ fn clientLoop(client_sock_fd: i32) !void {
                     // Check for detach sequences (ctrl+\ as first byte or Kitty escape sequence)
                     if (buf[0] == 0x1C or util.isKittyCtrlBackslash(buf[0..n])) {
                         try ipc.appendMessage(alloc, &sock_write_buf, .Detach, "");
+                    } else if (n >= 3 and buf[0] == 0x1b and buf[1] == '[' and buf[2] == 'I') {
+                        // Focus-in event (DECSET 1004): send SIGWINCH to the
+                        // shell to force a prompt repaint (e.g. after Ghostty
+                        // quick terminal toggle). We use SIGWINCH rather than
+                        // forwarding \x1b[I as Input because concurrent
+                        // SIGWINCH + focus-in repaints cause garbled CPR
+                        // responses in the prompt.
+                        try ipc.appendMessage(alloc, &sock_write_buf, .Refresh, "");
                     } else {
                         try ipc.appendMessage(alloc, &sock_write_buf, .Input, buf[0..n]);
                     }
@@ -1425,8 +1460,13 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                     std.log.info("shell exited pty_fd={d}", .{pty_fd});
                     break :daemon_loop;
                 } else {
-                    // Feed PTY output to terminal emulator for state tracking
+                    // Feed PTY output to terminal emulator for state tracking.
+                    // Detect if the inner application disables focus event
+                    // reporting (DECRST 1004) so we can re-enable it on the
+                    // outer terminal — the client needs it for focus detection.
+                    const had_focus_event = term.modes.get(.focus_event);
                     try vt_stream.nextSlice(buf[0..n]);
+                    const has_focus_event = term.modes.get(.focus_event);
                     daemon.has_pty_output = true;
 
                     // When no clients are attached, respond to terminal
@@ -1449,12 +1489,18 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                         }
                     }
 
-                    // Broadcast data to all clients
+                    // Broadcast data to all clients. If the inner application
+                    // just disabled focus events (e.g. neovim exiting),
+                    // append a DECSET 1004 re-enable so the outer terminal
+                    // keeps sending focus events to the zmx client.
                     for (daemon.clients.items) |client| {
                         ipc.appendMessage(daemon.alloc, &client.write_buf, .Output, buf[0..n]) catch |err| {
                             std.log.warn("failed to buffer output for client err={s}", .{@errorName(err)});
                             continue;
                         };
+                        if (had_focus_event and !has_focus_event) {
+                            ipc.appendMessage(daemon.alloc, &client.write_buf, .Output, "\x1b[?1004h") catch {};
+                        }
                         client.has_pending_output = true;
                     }
                 }
@@ -1509,6 +1555,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                             break :daemon_loop;
                         },
                         .Info => try daemon.handleInfo(client),
+                        .Refresh => daemon.handleRefresh(pty_fd, &term),
                         .History => try daemon.handleHistory(client, &term, msg.payload),
                         .Run => try daemon.handleRun(client, pty_fd, msg.payload),
                         .Output, .Ack => {},
