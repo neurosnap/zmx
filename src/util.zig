@@ -207,7 +207,7 @@ pub fn findTaskExitMarker(output: []const u8) ?u8 {
 ///
 /// Matches when key-code is 92 (backslash), ctrl bit is set in modifiers,
 /// and event type is press (1 or absent) or repeat (2). Rejects release (3).
-/// Tolerates additional modifiers (shift, alt, caps_lock, num_lock, etc.)
+/// Tolerates additional modifiers (caps_lock, num_lock)
 /// and alternate key sub-fields from the kitty protocol's progressive
 /// enhancement flags.
 pub fn isKittyCtrlBackslash(buf: []const u8) bool {
@@ -227,7 +227,7 @@ pub fn isKittyCtrlBackslash(buf: []const u8) bool {
 fn parseKittyCtrlBackslash(buf: []const u8) bool {
     var pos: usize = 0;
 
-    // 1. Parse key code — must be 92 (backslash).
+    // 1. Parse key code -- must be 92 (backslash).
     const key_code = parseDecimal(buf, &pos) orelse return false;
     if (key_code != 92) return false;
 
@@ -256,7 +256,7 @@ fn parseKittyCtrlBackslash(buf: []const u8) bool {
     if (pos < buf.len and buf[pos] == ':') {
         pos += 1;
         const event_type = parseDecimal(buf, &pos) orelse return false;
-        // 3 = release — reject. Accept press (1) and repeat (2).
+        // 3 = release -- reject. Accept press (1) and repeat (2).
         if (event_type == 3) return false;
     }
 
@@ -619,10 +619,10 @@ test "isKittyCtrlBackslash" {
     // Explicit press event type (:1)
     try expect(isKittyCtrlBackslash("\x1b[92;5:1u"));
 
-    // Repeat event (:2) — user holding Ctrl+\
+    // Repeat event (:2) -- user holding Ctrl+\
     try expect(isKittyCtrlBackslash("\x1b[92;5:2u"));
 
-    // Release event (:3) — must NOT trigger detach
+    // Release event (:3) -- must NOT trigger detach
     try expect(!isKittyCtrlBackslash("\x1b[92;5:3u"));
 
     // Lock modifiers: caps_lock (bit 6) changes modifier value
@@ -637,7 +637,7 @@ test "isKittyCtrlBackslash" {
     // ctrl + caps_lock + num_lock = 1 + (4 + 64 + 128) = 197
     try expect(isKittyCtrlBackslash("\x1b[92;197u"));
 
-    // Combined intentional modifiers — must NOT match (ctrl+\ is the
+    // Combined intentional modifiers -- must NOT match (ctrl+\ is the
     // detach key, not ctrl+shift+\ or ctrl+alt+\)
     // ctrl + shift = 1 + (4 + 1) = 6
     try expect(!isKittyCtrlBackslash("\x1b[92;6u"));
@@ -648,13 +648,13 @@ test "isKittyCtrlBackslash" {
     // ctrl + super = 1 + (4 + 8) = 13
     try expect(!isKittyCtrlBackslash("\x1b[92;13u"));
 
-    // ctrl + shift + caps_lock = 1 + (1 + 4 + 64) = 70 — shift is intentional
+    // ctrl + shift + caps_lock = 1 + (1 + 4 + 64) = 70 -- shift is intentional
     try expect(!isKittyCtrlBackslash("\x1b[92;70u"));
 
-    // ctrl + shift + num_lock = 1 + (1 + 4 + 128) = 134 — shift is intentional
+    // ctrl + shift + num_lock = 1 + (1 + 4 + 128) = 134 -- shift is intentional
     try expect(!isKittyCtrlBackslash("\x1b[92;134u"));
 
-    // Modifier without ctrl bit — must NOT match
+    // Modifier without ctrl bit -- must NOT match
     // shift only = 1 + 1 = 2
     try expect(!isKittyCtrlBackslash("\x1b[92;1u"));
     try expect(!isKittyCtrlBackslash("\x1b[92;2u"));
@@ -673,12 +673,12 @@ test "isKittyCtrlBackslash" {
     try expect(isKittyCtrlBackslash("\x1b[92:124;69:1u"));
     try expect(!isKittyCtrlBackslash("\x1b[92:124;69:3u"));
 
-    // Text codepoints section (flag 0b10000) — tolerated and skipped
+    // Text codepoints section (flag 0b10000) -- tolerated and skipped
     // Even though ctrl+\ text is typically empty, terminals may vary
     try expect(isKittyCtrlBackslash("\x1b[92;5;28u"));
     try expect(isKittyCtrlBackslash("\x1b[92;5;28:92u"));
 
-    // Wrong key code — must NOT match
+    // Wrong key code -- must NOT match
     try expect(!isKittyCtrlBackslash("\x1b[91;5u"));
     try expect(!isKittyCtrlBackslash("\x1b[93;5u"));
     try expect(!isKittyCtrlBackslash("\x1b[9;5u"));
