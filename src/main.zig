@@ -289,14 +289,21 @@ const PwdTrackingHandler = struct {
     }
 };
 
-fn copyFixedField(comptime max_len: usize, value: []const u8) struct { len: u16, buf: [max_len]u8 } {
+fn FixedField(comptime max_len: usize) type {
+    return struct {
+        len: u16,
+        buf: [max_len]u8,
+    };
+}
+
+fn copyFixedField(comptime max_len: usize, value: []const u8) FixedField(max_len) {
     var buf = [_]u8{0} ** max_len;
     const len: u16 = @intCast(@min(value.len, max_len));
     @memcpy(buf[0..len], value[0..len]);
     return .{ .len = len, .buf = buf };
 }
 
-fn copyOptionalFixedField(comptime max_len: usize, value: ?[]const u8) struct { len: u16, buf: [max_len]u8 } {
+fn copyOptionalFixedField(comptime max_len: usize, value: ?[]const u8) FixedField(max_len) {
     return if (value) |present|
         copyFixedField(max_len, present)
     else
