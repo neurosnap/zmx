@@ -182,9 +182,13 @@ If your terminal or shell integration already emits OSC 7, you do not need any e
 ### fish
 
 ```fish
-function __zmx_osc7_pwd --on-variable PWD
-  set -l path (python3 -c 'import os, urllib.parse; print(urllib.parse.quote(os.getcwd()))')
+function __zmx_osc7_pwd
+  set -l path (string escape --style=url -- "$PWD")
   printf '\e]7;file://localhost%s\a' "$path"
+end
+
+function __zmx_osc7_pwd_on_prompt --on-event fish_prompt
+  __zmx_osc7_pwd
 end
 ```
 
@@ -271,7 +275,8 @@ zmx-select() {
       name = pid = clients = start_dir = pwd = ""
       for (i = 1; i <= NF; i++) {
         gsub(/^[[:space:]]+/, "", $i)
-        if ($i ~ /^name=/) name = substr($i, 6)
+        if ($i ~ /^→[[:space:]]+name=/) name = substr($i, index($i, "name=") + 5)
+        else if ($i ~ /^name=/) name = substr($i, 6)
         else if ($i ~ /^pid=/) pid = substr($i, 5)
         else if ($i ~ /^clients=/) clients = substr($i, 9)
         else if ($i ~ /^start_dir=/) start_dir = substr($i, 11)
