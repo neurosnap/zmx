@@ -352,10 +352,41 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
     const output = builder.writer.buffered();
     if (output.len == 0) return null;
 
-    return alloc.dupe(u8, output) catch |err| {
+    return stripSynchronizedOutputSequences(alloc, output) catch |err| {
         std.log.warn("failed to allocate terminal state err={s}", .{@errorName(err)});
         return null;
     };
+}
+
+fn stripSynchronizedOutputSequences(alloc: std.mem.Allocator, output: []const u8) ![]u8 {
+    const set_sync = "\x1b[?2026h";
+    const reset_sync = "\x1b[?2026l";
+
+    if (std.mem.indexOf(u8, output, set_sync) == null and
+        std.mem.indexOf(u8, output, reset_sync) == null)
+    {
+        return alloc.dupe(u8, output);
+    }
+
+    var sanitized: std.Io.Writer.Allocating = .init(alloc);
+    defer sanitized.deinit();
+
+    var i: usize = 0;
+    while (i < output.len) {
+        if (std.mem.startsWith(u8, output[i..], set_sync)) {
+            i += set_sync.len;
+            continue;
+        }
+        if (std.mem.startsWith(u8, output[i..], reset_sync)) {
+            i += reset_sync.len;
+            continue;
+        }
+
+        try sanitized.writer.writeByte(output[i]);
+        i += 1;
+    }
+
+    return alloc.dupe(u8, sanitized.writer.buffered());
 }
 
 pub const HistoryFormat = enum(u8) {
