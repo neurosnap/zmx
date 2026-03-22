@@ -383,11 +383,24 @@ fn isCurrentSession(session_name: []const u8, current_session: ?[]const u8) bool
         false;
 }
 
-fn sessionStatusText(session: SessionEntry) ?[]const u8 {
+fn isConnectionRefused(session: SessionEntry) bool {
+    return session.is_error and std.mem.eql(u8, session.error_name.?, "ConnectionRefused");
+}
+
+fn jsonSessionStatusText(session: SessionEntry) ?[]const u8 {
     if (!session.is_error) return null;
 
-    return if (std.mem.eql(u8, session.error_name.?, "ConnectionRefused"))
+    return if (isConnectionRefused(session))
         "cleaning_up"
+    else
+        "unreachable";
+}
+
+fn humanSessionStatusText(session: SessionEntry) ?[]const u8 {
+    if (!session.is_error) return null;
+
+    return if (isConnectionRefused(session))
+        "cleaning up"
     else
         "unreachable";
 }
@@ -426,7 +439,7 @@ fn jsonSessionView(session: SessionEntry, current_session: ?[]const u8) JsonSess
         .ended = ended,
         .exit_code = if (ended == null) null else session.task_exit_code,
         .err = if (session.is_error) session.error_name else null,
-        .status = sessionStatusText(session),
+        .status = jsonSessionStatusText(session),
     };
 }
 
@@ -464,10 +477,7 @@ pub fn writeSessionLine(writer: *std.Io.Writer, session: SessionEntry, short: bo
         // "cleaning up" is only truthful when the probe was definitively
         // refused (socket deleted this pass). On Timeout/Unexpected the
         // daemon may just be busy, so don't lie about what we did.
-        const status = if (std.mem.eql(u8, session.error_name.?, "ConnectionRefused"))
-            "cleaning up"
-        else
-            "unreachable";
+        const status = humanSessionStatusText(session).?;
         try writer.print("{s}name={s}\terr={s}\tstatus={s}\n", .{
             prefix,
             session.name,
@@ -490,13 +500,11 @@ pub fn writeSessionLine(writer: *std.Io.Writer, session: SessionEntry, short: bo
     if (session.cmd) |cmd| {
         try writer.print("\tcmd={s}", .{cmd});
     }
-    if (session.task_ended_at) |ended_at| {
-        if (ended_at > 0) {
-            try writer.print("\tended={d}", .{ended_at});
+    if (endedAt(session)) |ended_at| {
+        try writer.print("\tended={d}", .{ended_at});
 
-            if (session.task_exit_code) |exit_code| {
-                try writer.print("\texit_code={d}", .{exit_code});
-            }
+        if (session.task_exit_code) |exit_code| {
+            try writer.print("\texit_code={d}", .{exit_code});
         }
     }
     try writer.print("\n", .{});
