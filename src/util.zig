@@ -69,23 +69,9 @@ pub fn get_session_entries(alloc: std.mem.Allocator, socket_dir: []const u8) !st
             };
             posix.close(result.fd);
 
-            // Extract cmd and cwd from the fixed-size arrays. Lengths come
-            // off the wire (u16 range), so clamp to the actual array size.
-            const cmd_len = @min(result.info.cmd_len, ipc.MAX_CMD_LEN);
-            const cwd_len = @min(result.info.cwd_len, ipc.MAX_CWD_LEN);
-            const pwd_len = @min(result.info.pwd_len, ipc.MAX_PWD_LEN);
-            const cmd: ?[]const u8 = if (cmd_len > 0)
-                alloc.dupe(u8, result.info.cmd[0..cmd_len]) catch null
-            else
-                null;
-            const cwd: ?[]const u8 = if (cwd_len > 0)
-                alloc.dupe(u8, result.info.cwd[0..cwd_len]) catch null
-            else
-                null;
-            const pwd: ?[]const u8 = if (pwd_len > 0)
-                alloc.dupe(u8, result.info.pwd[0..pwd_len]) catch null
-            else
-                null;
+            const cmd = duplicateBoundedField(alloc, &result.info.cmd, result.info.cmd_len);
+            const cwd = duplicateBoundedField(alloc, &result.info.cwd, result.info.cwd_len);
+            const pwd = duplicateBoundedField(alloc, &result.info.pwd, result.info.pwd_len);
 
             try sessions.append(alloc, .{
                 .name = name,
@@ -104,6 +90,12 @@ pub fn get_session_entries(alloc: std.mem.Allocator, socket_dir: []const u8) !st
     }
 
     return sessions;
+}
+
+fn duplicateBoundedField(alloc: std.mem.Allocator, bytes: []const u8, reported_len: usize) ?[]const u8 {
+    const len = @min(reported_len, bytes.len);
+    if (len == 0) return null;
+    return alloc.dupe(u8, bytes[0..len]) catch null;
 }
 
 pub fn parseReportedPwd(alloc: std.mem.Allocator, url: []const u8) ?[]u8 {
@@ -359,12 +351,12 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
 }
 
 fn stripSynchronizedOutputSequences(alloc: std.mem.Allocator, output: []const u8) ![]u8 {
-    const set_sync = "\x1b[?2026h";
-    const reset_sync = "\x1b[?2026l";
+    const sequences = [_][]const u8{
+        "\x1b[?2026h",
+        "\x1b[?2026l",
+    };
 
-    if (std.mem.indexOf(u8, output, set_sync) == null and
-        std.mem.indexOf(u8, output, reset_sync) == null)
-    {
+    if (!containsAnySequence(output, &sequences)) {
         return alloc.dupe(u8, output);
     }
 
@@ -373,12 +365,8 @@ fn stripSynchronizedOutputSequences(alloc: std.mem.Allocator, output: []const u8
 
     var i: usize = 0;
     while (i < output.len) {
-        if (std.mem.startsWith(u8, output[i..], set_sync)) {
-            i += set_sync.len;
-            continue;
-        }
-        if (std.mem.startsWith(u8, output[i..], reset_sync)) {
-            i += reset_sync.len;
+        if (matchingSequence(output[i..], &sequences)) |sequence| {
+            i += sequence.len;
             continue;
         }
 
@@ -387,6 +375,20 @@ fn stripSynchronizedOutputSequences(alloc: std.mem.Allocator, output: []const u8
     }
 
     return alloc.dupe(u8, sanitized.writer.buffered());
+}
+
+fn containsAnySequence(haystack: []const u8, needles: []const []const u8) bool {
+    for (needles) |needle| {
+        if (std.mem.indexOf(u8, haystack, needle) != null) return true;
+    }
+    return false;
+}
+
+fn matchingSequence(haystack: []const u8, needles: []const []const u8) ?[]const u8 {
+    for (needles) |needle| {
+        if (std.mem.startsWith(u8, haystack, needle)) return needle;
+    }
+    return null;
 }
 
 pub const HistoryFormat = enum(u8) {

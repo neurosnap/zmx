@@ -289,6 +289,20 @@ const PwdTrackingHandler = struct {
     }
 };
 
+fn copyFixedField(comptime max_len: usize, value: []const u8) struct { len: u16, buf: [max_len]u8 } {
+    var buf = [_]u8{0} ** max_len;
+    const len: u16 = @intCast(@min(value.len, max_len));
+    @memcpy(buf[0..len], value[0..len]);
+    return .{ .len = len, .buf = buf };
+}
+
+fn copyOptionalFixedField(comptime max_len: usize, value: ?[]const u8) struct { len: u16, buf: [max_len]u8 } {
+    return if (value) |present|
+        copyFixedField(max_len, present)
+    else
+        .{ .len = 0, .buf = [_]u8{0} ** max_len };
+}
+
 const Daemon = struct {
     cfg: *Cfg,
     alloc: std.mem.Allocator,
@@ -339,25 +353,32 @@ const Daemon = struct {
     }
 
     fn syncCurrentPwd(self: *Daemon, term: *const ghostty_vt.Terminal) void {
-        const next = term.getPwd();
+        self.replaceOwnedString(&self.current_pwd, term.getPwd(), "current pwd");
+    }
 
-        if (next) |pwd| {
-            if (self.current_pwd) |current| {
-                if (std.mem.eql(u8, current, pwd)) return;
+    fn replaceOwnedString(
+        self: *Daemon,
+        slot: *?[]u8,
+        next: ?[]const u8,
+        label: []const u8,
+    ) void {
+        if (next) |value| {
+            if (slot.*) |current| {
+                if (std.mem.eql(u8, current, value)) return;
                 self.alloc.free(current);
             }
 
-            self.current_pwd = self.alloc.dupe(u8, pwd) catch |err| {
-                std.log.warn("failed to persist current pwd err={s}", .{@errorName(err)});
-                self.current_pwd = null;
+            slot.* = self.alloc.dupe(u8, value) catch |err| {
+                std.log.warn("failed to persist {s} err={s}", .{ label, @errorName(err) });
+                slot.* = null;
                 return;
             };
             return;
         }
 
-        if (self.current_pwd) |current| {
+        if (slot.*) |current| {
             self.alloc.free(current);
-            self.current_pwd = null;
+            slot.* = null;
         }
     }
 
@@ -669,32 +690,21 @@ const Daemon = struct {
             }
         }
 
-        // Copy cwd
-        var cwd_buf = [_]u8{0} ** ipc.MAX_CWD_LEN;
-        const cwd_len: u16 = @intCast(@min(self.cwd.len, ipc.MAX_CWD_LEN));
-        @memcpy(cwd_buf[0..cwd_len], self.cwd[0..cwd_len]);
-
-        var pwd_buf = [_]u8{0} ** ipc.MAX_PWD_LEN;
-        const pwd_len: u16 = if (self.current_pwd) |pwd|
-            @intCast(@min(pwd.len, ipc.MAX_PWD_LEN))
-        else
-            0;
-        if (self.current_pwd) |pwd| {
-            @memcpy(pwd_buf[0..pwd_len], pwd[0..pwd_len]);
-        }
+        const cwd_field = copyFixedField(ipc.MAX_CWD_LEN, self.cwd);
+        const pwd_field = copyOptionalFixedField(ipc.MAX_PWD_LEN, self.current_pwd);
 
         const info = ipc.Info{
             .clients_len = clients_len,
             .pid = self.pid,
             .cmd_len = cmd_len,
-            .cwd_len = cwd_len,
+            .cwd_len = cwd_field.len,
             .cmd = cmd_buf,
-            .cwd = cwd_buf,
+            .cwd = cwd_field.buf,
             .created_at = self.created_at,
             .task_ended_at = self.task_ended_at orelse 0,
             .task_exit_code = self.task_exit_code orelse 0,
-            .pwd_len = pwd_len,
-            .pwd = pwd_buf,
+            .pwd_len = pwd_field.len,
+            .pwd = pwd_field.buf,
         };
         try ipc.appendMessage(self.alloc, &client.write_buf, .Info, std.mem.asBytes(&info));
         client.has_pending_output = true;
