@@ -790,9 +790,9 @@ test "serializeTerminalState excludes synchronized output replay" {
     var stream = term.vtStream();
     defer stream.deinit();
 
-    stream.nextSlice("\x1b[?2004h"); // Bracketed paste
-    stream.nextSlice("\x1b[?2026h"); // Synchronized output
-    stream.nextSlice("hello");
+    try stream.nextSlice("\x1b[?2004h"); // Bracketed paste
+    try stream.nextSlice("\x1b[?2026h"); // Synchronized output
+    try stream.nextSlice("hello");
 
     try std.testing.expect(term.modes.get(.bracketed_paste));
     try std.testing.expect(term.modes.get(.synchronized_output));
@@ -810,7 +810,7 @@ test "serializeTerminalState excludes synchronized output replay" {
 
     var restored_stream = restored.vtStream();
     defer restored_stream.deinit();
-    restored_stream.nextSlice(output);
+    try restored_stream.nextSlice(output);
 
     try std.testing.expect(restored.modes.get(.bracketed_paste));
     try std.testing.expect(!restored.modes.get(.synchronized_output));
