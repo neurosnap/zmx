@@ -254,6 +254,41 @@ const EnsureSessionResult = struct {
     is_daemon: bool,
 };
 
+const ReadonlyVtHandler = @typeInfo(@TypeOf(ghostty_vt.Terminal.vtHandler)).@"fn".return_type.?;
+
+const PwdTrackingHandler = struct {
+    alloc: std.mem.Allocator,
+    terminal: *ghostty_vt.Terminal,
+    readonly: ReadonlyVtHandler,
+
+    pub fn init(alloc: std.mem.Allocator, terminal: *ghostty_vt.Terminal) PwdTrackingHandler {
+        return .{
+            .alloc = alloc,
+            .terminal = terminal,
+            .readonly = terminal.vtHandler(),
+        };
+    }
+
+    pub fn deinit(self: *PwdTrackingHandler) void {
+        self.readonly.deinit();
+    }
+
+    pub fn vt(
+        self: *PwdTrackingHandler,
+        comptime action: ghostty_vt.StreamAction.Tag,
+        value: ghostty_vt.StreamAction.Value(action),
+    ) !void {
+        if (action == .report_pwd) {
+            const pwd = util.parseReportedPwd(self.alloc, value.url) orelse return;
+            defer self.alloc.free(pwd);
+            try self.terminal.setPwd(pwd);
+            return;
+        }
+
+        try self.readonly.vt(action, value);
+    }
+};
+
 const Daemon = struct {
     cfg: *Cfg,
     alloc: std.mem.Allocator,
@@ -264,6 +299,7 @@ const Daemon = struct {
     pid: i32,
     command: ?[]const []const u8 = null,
     cwd: []const u8 = "",
+    current_pwd: ?[]u8 = null,
     has_pty_output: bool = false,
     has_had_client: bool = false,
     created_at: u64, // unix timestamp (ns)
@@ -275,6 +311,7 @@ const Daemon = struct {
     pub fn deinit(self: *Daemon) void {
         self.clients.deinit(self.alloc);
         self.alloc.free(self.socket_path);
+        if (self.current_pwd) |pwd| self.alloc.free(pwd);
     }
 
     pub fn shutdown(self: *Daemon) void {
@@ -299,6 +336,29 @@ const Daemon = struct {
             return true;
         }
         return false;
+    }
+
+    fn syncCurrentPwd(self: *Daemon, term: *const ghostty_vt.Terminal) void {
+        const next = term.getPwd();
+
+        if (next) |pwd| {
+            if (self.current_pwd) |current| {
+                if (std.mem.eql(u8, current, pwd)) return;
+                self.alloc.free(current);
+            }
+
+            self.current_pwd = self.alloc.dupe(u8, pwd) catch |err| {
+                std.log.warn("failed to persist current pwd err={s}", .{@errorName(err)});
+                self.current_pwd = null;
+                return;
+            };
+            return;
+        }
+
+        if (self.current_pwd) |current| {
+            self.alloc.free(current);
+            self.current_pwd = null;
+        }
     }
 
     /// Runs in the forked child. Either execs or returns an error (caller
@@ -578,7 +638,7 @@ const Daemon = struct {
 
         // Build command string from args, re-quoting args that contain
         // shell-special characters so the displayed command is copy-pasteable.
-        var cmd_buf: [ipc.MAX_CMD_LEN]u8 = undefined;
+        var cmd_buf = [_]u8{0} ** ipc.MAX_CMD_LEN;
         var cmd_len: u16 = 0;
         const cur_cmd = self.command orelse self.task_command;
         if (cur_cmd) |args| {
@@ -610,9 +670,18 @@ const Daemon = struct {
         }
 
         // Copy cwd
-        var cwd_buf: [ipc.MAX_CWD_LEN]u8 = undefined;
+        var cwd_buf = [_]u8{0} ** ipc.MAX_CWD_LEN;
         const cwd_len: u16 = @intCast(@min(self.cwd.len, ipc.MAX_CWD_LEN));
         @memcpy(cwd_buf[0..cwd_len], self.cwd[0..cwd_len]);
+
+        var pwd_buf = [_]u8{0} ** ipc.MAX_PWD_LEN;
+        const pwd_len: u16 = if (self.current_pwd) |pwd|
+            @intCast(@min(pwd.len, ipc.MAX_PWD_LEN))
+        else
+            0;
+        if (self.current_pwd) |pwd| {
+            @memcpy(pwd_buf[0..pwd_len], pwd[0..pwd_len]);
+        }
 
         const info = ipc.Info{
             .clients_len = clients_len,
@@ -624,6 +693,8 @@ const Daemon = struct {
             .created_at = self.created_at,
             .task_ended_at = self.task_ended_at orelse 0,
             .task_exit_code = self.task_exit_code orelse 0,
+            .pwd_len = pwd_len,
+            .pwd = pwd_buf,
         };
         try ipc.appendMessage(self.alloc, &client.write_buf, .Info, std.mem.asBytes(&info));
         client.has_pending_output = true;
@@ -1354,7 +1425,10 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
         .max_scrollback = daemon.cfg.max_scrollback,
     });
     defer term.deinit(daemon.alloc);
-    var vt_stream = term.vtStream();
+    var vt_stream = ghostty_vt.Stream(PwdTrackingHandler).initAlloc(
+        daemon.alloc,
+        PwdTrackingHandler.init(daemon.alloc, &term),
+    );
     defer vt_stream.deinit();
 
     daemon_loop: while (daemon.running) {
@@ -1427,6 +1501,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                 } else {
                     // Feed PTY output to terminal emulator for state tracking
                     try vt_stream.nextSlice(buf[0..n]);
+                    daemon.syncCurrentPwd(&term);
                     daemon.has_pty_output = true;
 
                     // When no clients are attached, respond to terminal
@@ -1542,6 +1617,50 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
             }
         }
     }
+}
+
+test "PwdTrackingHandler updates and clears terminal pwd from OSC 7" {
+    const alloc = std.testing.allocator;
+
+    var term = try ghostty_vt.Terminal.init(alloc, .{
+        .cols = 80,
+        .rows = 24,
+    });
+    defer term.deinit(alloc);
+
+    var stream = ghostty_vt.Stream(PwdTrackingHandler).initAlloc(
+        alloc,
+        PwdTrackingHandler.init(alloc, &term),
+    );
+    defer stream.deinit();
+
+    try stream.nextSlice("\x1b]7;file:///tmp/example\x1b\\");
+    try std.testing.expectEqualStrings("/tmp/example", term.getPwd() orelse return error.TestUnexpectedResult);
+
+    try stream.nextSlice("\x1b]7;\x1b\\");
+    try std.testing.expect(term.getPwd() == null);
+}
+
+test "PwdTrackingHandler ignores unsupported OSC 7 urls" {
+    const alloc = std.testing.allocator;
+
+    var term = try ghostty_vt.Terminal.init(alloc, .{
+        .cols = 80,
+        .rows = 24,
+    });
+    defer term.deinit(alloc);
+
+    var stream = ghostty_vt.Stream(PwdTrackingHandler).initAlloc(
+        alloc,
+        PwdTrackingHandler.init(alloc, &term),
+    );
+    defer stream.deinit();
+
+    try stream.nextSlice("\x1b]7;file:///tmp/original\x1b\\");
+    try stream.nextSlice("\x1b]7;file://example.com/tmp/ignored\x1b\\");
+    try stream.nextSlice("\x1b]7;https://localhost/tmp/ignored\x1b\\");
+
+    try std.testing.expectEqualStrings("/tmp/original", term.getPwd() orelse return error.TestUnexpectedResult);
 }
 
 fn handleSigwinch(_: i32, _: *const posix.siginfo_t, _: ?*anyopaque) callconv(.c) void {

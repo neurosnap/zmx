@@ -12,6 +12,7 @@ pub const SessionEntry = struct {
     error_name: ?[]const u8,
     cmd: ?[]const u8 = null,
     cwd: ?[]const u8 = null,
+    pwd: ?[]const u8 = null,
     created_at: u64,
     task_ended_at: ?u64,
     task_exit_code: ?u8,
@@ -20,6 +21,7 @@ pub const SessionEntry = struct {
         alloc.free(self.name);
         if (self.cmd) |cmd| alloc.free(cmd);
         if (self.cwd) |cwd| alloc.free(cwd);
+        if (self.pwd) |pwd| alloc.free(pwd);
     }
 
     pub fn lessThan(_: void, a: SessionEntry, b: SessionEntry) bool {
@@ -71,12 +73,17 @@ pub fn get_session_entries(alloc: std.mem.Allocator, socket_dir: []const u8) !st
             // off the wire (u16 range), so clamp to the actual array size.
             const cmd_len = @min(result.info.cmd_len, ipc.MAX_CMD_LEN);
             const cwd_len = @min(result.info.cwd_len, ipc.MAX_CWD_LEN);
+            const pwd_len = @min(result.info.pwd_len, ipc.MAX_PWD_LEN);
             const cmd: ?[]const u8 = if (cmd_len > 0)
                 alloc.dupe(u8, result.info.cmd[0..cmd_len]) catch null
             else
                 null;
             const cwd: ?[]const u8 = if (cwd_len > 0)
                 alloc.dupe(u8, result.info.cwd[0..cwd_len]) catch null
+            else
+                null;
+            const pwd: ?[]const u8 = if (pwd_len > 0)
+                alloc.dupe(u8, result.info.pwd[0..pwd_len]) catch null
             else
                 null;
 
@@ -88,6 +95,7 @@ pub fn get_session_entries(alloc: std.mem.Allocator, socket_dir: []const u8) !st
                 .error_name = null,
                 .cmd = cmd,
                 .cwd = cwd,
+                .pwd = pwd,
                 .created_at = result.info.created_at,
                 .task_ended_at = result.info.task_ended_at,
                 .task_exit_code = result.info.task_exit_code,
@@ -96,6 +104,29 @@ pub fn get_session_entries(alloc: std.mem.Allocator, socket_dir: []const u8) !st
     }
 
     return sessions;
+}
+
+pub fn parseReportedPwd(alloc: std.mem.Allocator, url: []const u8) ?[]u8 {
+    if (url.len == 0) {
+        return alloc.dupe(u8, "") catch null;
+    }
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const uri = std.Uri.parse(url) catch return null;
+    if (!std.mem.eql(u8, uri.scheme, "file")) return null;
+
+    if (uri.host) |host_component| {
+        const host = host_component.toRawMaybeAlloc(scratch) catch return null;
+        if (host.len > 0 and !std.ascii.eqlIgnoreCase(host, "localhost")) {
+            return null;
+        }
+    }
+
+    const path = uri.path.toRawMaybeAlloc(scratch) catch return null;
+    return alloc.dupe(u8, path) catch null;
 }
 
 pub fn shellNeedsQuoting(arg: []const u8) bool {
@@ -418,6 +449,9 @@ pub fn writeSessionLine(writer: *std.Io.Writer, session: SessionEntry, short: bo
     if (session.cwd) |cwd| {
         try writer.print("\tstart_dir={s}", .{cwd});
     }
+    if (session.pwd) |pwd| {
+        try writer.print("\tpwd={s}", .{pwd});
+    }
     if (session.cmd) |cmd| {
         try writer.print("\tcmd={s}", .{cmd});
     }
@@ -449,6 +483,7 @@ test "writeSessionLine formats output for current session and short output" {
         .error_name = null,
         .cmd = null,
         .cwd = null,
+        .pwd = null,
         .created_at = 0,
         .task_ended_at = null,
         .task_exit_code = null,
@@ -472,6 +507,24 @@ test "writeSessionLine formats output for current session and short output" {
             .short = false,
             .current_session = null,
             .expected = "name=dev\tpid=123\tclients=2\tcreated=0\n",
+        },
+        .{
+            .session = .{
+                .name = "dev",
+                .pid = 123,
+                .clients_len = 2,
+                .is_error = false,
+                .error_name = null,
+                .cmd = null,
+                .cwd = "/work/start",
+                .pwd = "/work/current",
+                .created_at = 0,
+                .task_ended_at = null,
+                .task_exit_code = null,
+            },
+            .short = false,
+            .current_session = null,
+            .expected = "name=dev\tpid=123\tclients=2\tcreated=0\tstart_dir=/work/start\tpwd=/work/current\n",
         },
         .{
             .session = session,
@@ -500,6 +553,30 @@ test "writeSessionLine formats output for current session and short output" {
         try writeSessionLine(&builder.writer, case.session, case.short, case.current_session);
         try std.testing.expectEqualStrings(case.expected, builder.writer.buffered());
     }
+}
+
+test "parseReportedPwd accepts local file URLs and decodes escapes" {
+    const alloc = std.testing.allocator;
+
+    const pwd1 = parseReportedPwd(alloc, "file:///tmp/example") orelse return error.TestUnexpectedResult;
+    defer alloc.free(pwd1);
+    try std.testing.expectEqualStrings("/tmp/example", pwd1);
+
+    const pwd2 = parseReportedPwd(alloc, "file://localhost/tmp/space%20here") orelse return error.TestUnexpectedResult;
+    defer alloc.free(pwd2);
+    try std.testing.expectEqualStrings("/tmp/space here", pwd2);
+
+    const pwd3 = parseReportedPwd(alloc, "") orelse return error.TestUnexpectedResult;
+    defer alloc.free(pwd3);
+    try std.testing.expectEqualStrings("", pwd3);
+}
+
+test "parseReportedPwd rejects non-local and non-file URLs" {
+    const alloc = std.testing.allocator;
+
+    try std.testing.expect(parseReportedPwd(alloc, "file://example.com/tmp") == null);
+    try std.testing.expect(parseReportedPwd(alloc, "https://localhost/tmp") == null);
+    try std.testing.expect(parseReportedPwd(alloc, "not a url") == null);
 }
 
 test "shellNeedsQuoting" {

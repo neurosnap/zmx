@@ -41,6 +41,19 @@ pub fn getTerminalSize(fd: i32) Resize {
 
 pub const MAX_CMD_LEN = 256;
 pub const MAX_CWD_LEN = 256;
+pub const MAX_PWD_LEN = 256;
+
+const InfoV1 = extern struct {
+    clients_len: usize,
+    pid: i32,
+    cmd_len: u16,
+    cwd_len: u16,
+    cmd: [MAX_CMD_LEN]u8,
+    cwd: [MAX_CWD_LEN]u8,
+    created_at: u64,
+    task_ended_at: u64,
+    task_exit_code: u8,
+};
 
 pub const Info = extern struct {
     clients_len: usize,
@@ -52,7 +65,29 @@ pub const Info = extern struct {
     created_at: u64,
     task_ended_at: u64,
     task_exit_code: u8,
+    pwd_len: u16,
+    pwd: [MAX_PWD_LEN]u8,
 };
+
+fn decodeInfoPayload(payload: []const u8) ?Info {
+    if (payload.len == @sizeOf(Info)) {
+        return std.mem.bytesToValue(Info, payload[0..@sizeOf(Info)]);
+    }
+    if (payload.len != @sizeOf(InfoV1)) return null;
+
+    const old = std.mem.bytesToValue(InfoV1, payload[0..@sizeOf(InfoV1)]);
+    var info = std.mem.zeroes(Info);
+    info.clients_len = old.clients_len;
+    info.pid = old.pid;
+    info.cmd_len = old.cmd_len;
+    info.cwd_len = old.cwd_len;
+    info.cmd = old.cmd;
+    info.cwd = old.cwd;
+    info.created_at = old.created_at;
+    info.task_ended_at = old.task_ended_at;
+    info.task_exit_code = old.task_exit_code;
+    return info;
+}
 
 pub fn expectedLength(data: []const u8) ?usize {
     if (data.len < @sizeOf(Header)) return null;
@@ -202,13 +237,53 @@ pub fn probeSession(alloc: std.mem.Allocator, socket_path: []const u8) SessionPr
 
     while (sb.next()) |msg| {
         if (msg.header.tag == .Info) {
-            if (msg.payload.len == @sizeOf(Info)) {
+            if (decodeInfoPayload(msg.payload)) |info| {
                 return .{
                     .fd = fd,
-                    .info = std.mem.bytesToValue(Info, msg.payload[0..@sizeOf(Info)]),
+                    .info = info,
                 };
             }
         }
     }
     return error.Unexpected;
+}
+
+test "decodeInfoPayload supports old and new info payloads" {
+    const cmd = [_]u8{0} ** MAX_CMD_LEN;
+    const cwd = [_]u8{0} ** MAX_CWD_LEN;
+    const pwd = [_]u8{0} ** MAX_PWD_LEN;
+
+    const old = InfoV1{
+        .clients_len = 2,
+        .pid = 42,
+        .cmd_len = 3,
+        .cwd_len = 4,
+        .cmd = cmd,
+        .cwd = cwd,
+        .created_at = 11,
+        .task_ended_at = 22,
+        .task_exit_code = 7,
+    };
+    const decoded_old = decodeInfoPayload(std.mem.asBytes(&old)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), decoded_old.clients_len);
+    try std.testing.expectEqual(@as(i32, 42), decoded_old.pid);
+    try std.testing.expectEqual(@as(u16, 0), decoded_old.pwd_len);
+
+    const current = Info{
+        .clients_len = 3,
+        .pid = 77,
+        .cmd_len = 5,
+        .cwd_len = 6,
+        .cmd = cmd,
+        .cwd = cwd,
+        .created_at = 33,
+        .task_ended_at = 44,
+        .task_exit_code = 9,
+        .pwd_len = 8,
+        .pwd = pwd,
+    };
+    const decoded_current = decodeInfoPayload(std.mem.asBytes(&current)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 3), decoded_current.clients_len);
+    try std.testing.expectEqual(@as(i32, 77), decoded_current.pid);
+    try std.testing.expectEqual(@as(u16, 8), decoded_current.pwd_len);
 }
