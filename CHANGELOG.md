@@ -2,7 +2,7 @@
 
 Use spec: https://common-changelog.org/
 
-## Staged
+## v0.4.2 - 2026-03-18
 
 ### Added
 
@@ -11,13 +11,20 @@ Use spec: https://common-changelog.org/
 ### Changed
 
 - `zmx list` renamed keys and made formatting more stable
+- More accurate fish completions
 
 ### Fixed
 
-- `zmx run` stdin regression with ZMX_TASK_COMPLETED
+- Validate session name length against Unix socket path limit
+- Use platform-correct `O_NONBLOCK` for fcntl
+- Daemon ignore `SIGPIPE`, handle `EINTR` in poll
+- Daemon isolate forked child from parent code path and heap-alloc argv
+- `zmx run` stdin regression with `ZMX_TASK_COMPLETED`
 - `zmx run` when no client is attached, send DA response query from daemon
 - `zmx run` re-quote when using shell meta chars
 - `zmx wait` use-after-free
+- `zmx wait` time out after 3 polls if no matching sessions are found
+- `zmx list` clean up socket on `ConnectionRefused`, not `Timeout`
 
 ## v0.4.1 - 2026-02-23
 
