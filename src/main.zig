@@ -825,7 +825,7 @@ fn list(cfg: *Cfg, short: bool) !void {
     };
     defer if (current_session) |name| alloc.free(name);
     var buf: [4096]u8 = undefined;
-    var w = std.fs.File.stdout().writer(&buf);
+    var stdout = std.fs.File.stdout().writer(&buf);
 
     var sessions = try util.get_session_entries(alloc, cfg.socket_dir);
     defer {
@@ -837,16 +837,18 @@ fn list(cfg: *Cfg, short: bool) !void {
 
     if (sessions.items.len == 0) {
         if (short) return;
-        try w.interface.print("no sessions found in {s}\n", .{cfg.socket_dir});
-        try w.interface.flush();
+        var errbuf: [4096]u8 = undefined;
+        var stderr = std.fs.File.stderr().writer(&errbuf);
+        try stderr.interface.print("no sessions found in {s}\n", .{cfg.socket_dir});
+        try stderr.interface.flush();
         return;
     }
 
     std.mem.sort(util.SessionEntry, sessions.items, {}, util.SessionEntry.lessThan);
 
     for (sessions.items) |session| {
-        try util.writeSessionLine(&w.interface, session, short, current_session);
-        try w.interface.flush();
+        try util.writeSessionLine(&stdout.interface, session, short, current_session);
+        try stdout.interface.flush();
     }
 }
 
