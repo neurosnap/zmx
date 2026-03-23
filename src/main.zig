@@ -750,6 +750,10 @@ fn wait(cfg: *Cfg, session_names: std.ArrayList([]const u8)) !void {
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
 
+    var stderr_buffer: [1024]u8 = undefined;
+    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    const stderr = &stderr_writer.interface;
+
     // Highest match count seen so far. Lets us distinguish "sessions haven't
     // appeared yet" (keep polling) from "sessions we were tracking
     // disappeared" (fail -- daemon crashed or was killed).
@@ -780,8 +784,8 @@ fn wait(cfg: *Cfg, session_names: std.ArrayList([]const u8)) !void {
                 // is no longer deleted, so this session would otherwise
                 // persist as task_ended_at==0 forever → infinite "still
                 // waiting". Count it as done+failed so wait terminates.
-                try stdout.print("task unreachable: {s} ({s})\n", .{ session.name, session.error_name orelse "unknown" });
-                try stdout.flush();
+                try stderr.print("task unreachable: {s} ({s})\n", .{ session.name, session.error_name orelse "unknown" });
+                try stderr.flush();
                 agg_exit_code = 1;
                 done += 1;
                 continue;
@@ -806,8 +810,8 @@ fn wait(cfg: *Cfg, session_names: std.ArrayList([]const u8)) !void {
         // crashed and the remaining N-1 happen to be done, total==done
         // would be a false success.
         if (total < max_seen) {
-            try stdout.print("error: {d} session(s) disappeared before completing\n", .{max_seen - total});
-            try stdout.flush();
+            try stderr.print("error: {d} session(s) disappeared before completing\n", .{max_seen - total});
+            try stderr.flush();
             std.process.exit(1);
             return;
         }
@@ -827,8 +831,8 @@ fn wait(cfg: *Cfg, session_names: std.ArrayList([]const u8)) !void {
             // typo, not a slow start.
             zero_match_iters += 1;
             if (zero_match_iters >= 3) {
-                try stdout.print("error: no matching sessions found\n", .{});
-                try stdout.flush();
+                try stderr.print("error: no matching sessions found\n", .{});
+                try stderr.flush();
                 std.process.exit(2);
                 return;
             }

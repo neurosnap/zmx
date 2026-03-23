@@ -15,7 +15,7 @@
 
 ## features
 
-- Persist terminal shell sessions (pty processes)
+- Persist terminal shell sessions
 - Ability to attach and detach from a shell session without killing it
 - Native terminal scrollback
 - Multiple clients can connect to the same session
@@ -73,10 +73,10 @@ Commands:
   [r]un <name> [command...]      Send command without attaching, creating session if needed
   [d]etach                       Detach all clients from current session  (ctrl+\ for current client)
   [l]ist [--short]               List active sessions
-  [c]ompletions <shell>          Completion scripts for shell integration (bash, zsh, or fish)
   [k]ill <name>                  Kill a session and all attached clients
   [hi]story <name> [--vt|--html] Output session scrollback (--vt or --html for escape sequences)
   [w]ait <name>...               Wait for session tasks to complete
+  [c]ompletions <shell>          Completion scripts for shell integration (bash, zsh, or fish)
   [v]ersion                      Show version information
   [h]elp                         Show this help message
 ```
@@ -313,6 +313,8 @@ Host = d.*
     ControlPersist 10m
 ```
 
+Architecturally, `ssh` supports multiplexing multiple channels of communication within a single connection to a server. `ControlMaster` is the setting that tells `ssh` to multiplex multiple PTY sessions to a single server over one tcp connection. Neat!
+
 Now you can spawn as many terminal sessions as you'd like:
 
 ```bash
@@ -322,9 +324,9 @@ ssh d.pico
 ssh d.dotfiles
 ```
 
-This will create or attach to each session and since we are using `ControlMaster` the same `ssh` connection is reused for every call to `ssh` for near-instant connection times.
+Because the `attach` command is essentially an "upsert", this will create or attach to each session.
 
-Now you can use the [`autossh`](https://linux.die.net/man/1/autossh) tool to make your ssh connections auto-reconnect. For example, if you have a laptop and close/open your laptop lid it will automatically reconnect all your ssh connections:
+Now you can use the [`autossh`](https://linux.die.net/man/1/autossh) tool to make your ssh connections auto-reconnect. For example, if you have a laptop and close/open your lid it will automatically reconnect all your ssh connections:
 
 ```bash
 autossh -M 0 -q d.term
@@ -344,6 +346,8 @@ ash d.dotifles
 ```
 
 Wow! Now you can setup all your os tiling windows how you like them for your project and have as many windows as you'd like, almost replicating exactly what `tmux` does but with native windows, tabs, splits, and scrollback! It also has the added benefit of supporting all the terminal features your emulator supports, no longer restricted by what `tmux` supports.
+
+The end-game here would be to leverage your window manager's ability to automatically arrange your windows for each project with a single command.
 
 ## socket file location
 
@@ -373,7 +377,7 @@ We are evaluating what should be configurable and what should not. Every configu
 ## known issues
 
 - When upgrading versions of `zmx` where we make changes to the underlying IPC communication, it will kill all your sessions because it cannot communicate through the daemon socket properly
-- Terminal state rehydration with nested `zmx` sessions through SSH: host A `zmx` -> SSH -> host B `zmx`
+- Terminal state restoration with nested `zmx` sessions through SSH: host A `zmx` -> SSH -> host B `zmx`
   - Specifically cursor position gets corrupted
 - When re-attaching and kitty keyboard mode was previously enable, we try to re-send that CSI query to re-enable it
   - Some programs don't know how to handle that CSI query (e.g. `psql`) so when you type it echos kitty escape sequences erroneously
@@ -404,31 +408,19 @@ In this way, `ghostty-vt` doesn't sit in the middle of an active terminal sessio
 
 ## prior art
 
-Below is a list of projects that inspired me to build this project.
+Below is a list of projects that inspired me to build this project. Architecturally, `zmx` uses aspects of both projects. For example, `shpool` inspired the idea of having libghostty restore the terminal state on reattach. Abduco inspired the idea of one daemon (and unix socket) per session.
 
 ### shpool
 
-You can find the source code at this repo: https://github.com/shell-pool/shpool
+https://github.com/shell-pool/shpool
 
 `shpool` is a service that enables session persistence by allowing the creation of named shell sessions owned by `shpool` so that the session is not lost if the connection drops.
 
-`shpool` can be thought of as a lighter weight alternative to tmux or GNU screen. While tmux and screen take over the whole terminal and provide window splitting and tiling features, `shpool` only provides persistent sessions.
-
-The biggest advantage of this approach is that `shpool` does not break native scrollback or copy-paste.
-
 ### abduco
 
-You can find the source code at this repo: https://github.com/martanne/abduco
+https://github.com/martanne/abduco
 
-abduco provides session management i.e. it allows programs to be run independently from its controlling terminal. That is programs can be detached - run in the background - and then later reattached. Together with dvtm it provides a simpler and cleaner alternative to tmux or screen.
-
-### dtach
-
-You can find the source code at this repo: https://github.com/crigler/dtach
-
-A simple program that emulates the detach feature of screen.
-
-dtach is a program written in C that emulates the detach feature of screen, which allows a program to be executed in an environment that is protected from the controlling terminal. For instance, the program under the control of dtach would not be affected by the terminal being disconnected for some reason.
+abduco provides session management (i.e. it allows programs to be run independently from its controlling terminal). Together with dvtm it provides a simpler alternative to tmux or screen.
 
 ## comparison
 

@@ -2,6 +2,13 @@
 
 Use spec: https://common-changelog.org/
 
+## Staged
+
+### Fixed
+
+- `zmx list` will send "no sessions found" to stderr instead of stdout
+- `zmx wait` will send errors to stderr instead of stdout
+
 ## v0.4.2 - 2026-03-18
 
 ### Changed
