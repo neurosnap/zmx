@@ -58,7 +58,11 @@ pub fn createSocket(fname: []const u8) !i32 {
     // AF.UNIX: Unix domain socket for local IPC with client processes
     // SOCK.STREAM: Reliable, bidirectional communication
     // SOCK.NONBLOCK: Set socket to non-blocking
-    const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC, 0);
+    const fd = try posix.socket(
+        posix.AF.UNIX,
+        posix.SOCK.STREAM | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC,
+        0,
+    );
     errdefer posix.close(fd);
 
     var unix_addr = try std.net.Address.initUnix(fname);
@@ -74,7 +78,11 @@ pub const max_socket_path_len: usize = @typeInfo(
     @TypeOf(@as(posix.sockaddr.un, undefined).path),
 ).array.len - 1;
 
-pub fn getSocketPath(alloc: std.mem.Allocator, socket_dir: []const u8, session_name: []const u8) error{ NameTooLong, OutOfMemory }![]const u8 {
+pub fn getSocketPath(
+    alloc: std.mem.Allocator,
+    socket_dir: []const u8,
+    session_name: []const u8,
+) error{ NameTooLong, OutOfMemory }![]const u8 {
     const dir = socket_dir;
     const path_len = dir.len + 1 + session_name.len;
     if (path_len > max_socket_path_len) return error.NameTooLong;

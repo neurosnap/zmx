@@ -355,7 +355,12 @@ const Daemon = struct {
 
         const shell = util.detectShell();
         // Use "-shellname" as argv[0] to signal login shell (traditional method)
-        const login_shell = try std.fmt.allocPrintSentinel(alloc, "-{s}", .{std.fs.path.basename(shell)}, 0);
+        const login_shell = try std.fmt.allocPrintSentinel(
+            alloc,
+            "-{s}",
+            .{std.fs.path.basename(shell)},
+            0,
+        );
         const argv = [_:null]?[*:0]const u8{ login_shell, null };
         const err = std.posix.execveZ(shell, &argv, std.c.environ);
         std.log.err("execve failed: err={s}", .{@errorName(err)});
@@ -412,7 +417,10 @@ const Daemon = struct {
             if (ipc.probeSession(self.alloc, self.socket_path)) |result| {
                 posix.close(result.fd);
                 if (self.command != null) {
-                    std.log.warn("session already exists, ignoring command session={s}", .{self.session_name});
+                    std.log.warn(
+                        "session already exists, ignoring command session={s}",
+                        .{self.session_name},
+                    );
                 }
             } else |err| switch (err) {
                 // Daemon is definitively gone: safe to replace.
@@ -424,7 +432,10 @@ const Daemon = struct {
                 // The probe is only to decide create-vs-attach; the session
                 // exists, so proceed to attach rather than fail or orphan.
                 else => {
-                    std.log.warn("probe slow ({s}), proceeding to attach session={s}", .{ @errorName(err), self.session_name });
+                    std.log.warn(
+                        "probe slow ({s}), proceeding to attach session={s}",
+                        .{ @errorName(err), self.session_name },
+                    );
                 },
             }
         }
@@ -440,9 +451,16 @@ const Daemon = struct {
                 _ = try posix.setsid();
 
                 log_system.deinit();
-                const session_log_name = try std.fmt.allocPrint(self.alloc, "{s}.log", .{self.session_name});
+                const session_log_name = try std.fmt.allocPrint(
+                    self.alloc,
+                    "{s}.log",
+                    .{self.session_name},
+                );
                 defer self.alloc.free(session_log_name);
-                const session_log_path = try std.fs.path.join(self.alloc, &.{ self.cfg.log_dir, session_log_name });
+                const session_log_path = try std.fs.path.join(
+                    self.alloc,
+                    &.{ self.cfg.log_dir, session_log_name },
+                );
                 defer self.alloc.free(session_log_path);
                 try log_system.init(self.alloc, session_log_path);
 
@@ -490,9 +508,15 @@ const Daemon = struct {
         while (remaining.len > 0) {
             const n = posix.write(pty_fd, remaining) catch |err| {
                 if (err == error.WouldBlock) {
-                    std.log.warn("pty write dropped {d}/{d} bytes (buffer full)", .{ remaining.len, data.len });
+                    std.log.warn(
+                        "pty write dropped {d}/{d} bytes (buffer full)",
+                        .{ remaining.len, data.len },
+                    );
                 } else {
-                    std.log.warn("pty write failed, {d} bytes lost: {s}", .{ remaining.len, @errorName(err) });
+                    std.log.warn(
+                        "pty write failed, {d} bytes lost: {s}",
+                        .{ remaining.len, @errorName(err) },
+                    );
                 }
                 return;
             };
@@ -526,12 +550,18 @@ const Daemon = struct {
         // interfering with shell initialization (DA1 queries, etc.)
         if (self.has_pty_output and self.has_had_client) {
             const cursor = &term.screens.active.cursor;
-            std.log.debug("cursor before serialize: x={d} y={d} pending_wrap={}", .{ cursor.x, cursor.y, cursor.pending_wrap });
+            std.log.debug(
+                "cursor before serialize: x={d} y={d} pending_wrap={}",
+                .{ cursor.x, cursor.y, cursor.pending_wrap },
+            );
             if (util.serializeTerminalState(self.alloc, term)) |term_output| {
                 std.log.debug("serialize terminal state", .{});
                 defer self.alloc.free(term_output);
                 ipc.appendMessage(self.alloc, &client.write_buf, .Output, term_output) catch |err| {
-                    std.log.warn("failed to buffer terminal state for client err={s}", .{@errorName(err)});
+                    std.log.warn(
+                        "failed to buffer terminal state for client err={s}",
+                        .{@errorName(err)},
+                    );
                 };
                 client.has_pending_output = true;
             }
@@ -552,7 +582,12 @@ const Daemon = struct {
         std.log.debug("init resize rows={d} cols={d}", .{ resize.rows, resize.cols });
     }
 
-    pub fn handleResize(self: *Daemon, pty_fd: i32, term: *ghostty_vt.Terminal, payload: []const u8) !void {
+    pub fn handleResize(
+        self: *Daemon,
+        pty_fd: i32,
+        term: *ghostty_vt.Terminal,
+        payload: []const u8,
+    ) !void {
         if (payload.len != @sizeOf(ipc.Resize)) return;
 
         const resize = std.mem.bytesToValue(ipc.Resize, payload);
@@ -584,7 +619,8 @@ const Daemon = struct {
     pub fn handleKill(self: *Daemon) void {
         std.log.info("kill received session={s}", .{self.session_name});
         self.shutdown();
-        // gracefully shutdown shell processes, shells tend to ignore SIGTERM so we send SIGHUP instead
+        // gracefully shutdown shell processes, shells tend to ignore SIGTERM so we send SIGHUP
+        // instead
         //   https://www.gnu.org/software/bash/manual/html_node/Signals.html
         // negative pid means kill process and children
         std.log.info("sending SIGHUP session={s} pid={d}", .{ self.session_name, self.pid });
@@ -653,7 +689,12 @@ const Daemon = struct {
         client.has_pending_output = true;
     }
 
-    pub fn handleHistory(self: *Daemon, client: *Client, term: *ghostty_vt.Terminal, payload: []const u8) !void {
+    pub fn handleHistory(
+        self: *Daemon,
+        client: *Client,
+        term: *ghostty_vt.Terminal,
+        payload: []const u8,
+    ) !void {
         const format: util.HistoryFormat = if (payload.len > 0)
             std.meta.intToEnum(util.HistoryFormat, payload[0]) catch .plain
         else
@@ -784,7 +825,10 @@ fn wait(cfg: *Cfg, session_names: std.ArrayList([]const u8)) !void {
                 // is no longer deleted, so this session would otherwise
                 // persist as task_ended_at==0 forever → infinite "still
                 // waiting". Count it as done+failed so wait terminates.
-                try stderr.print("task unreachable: {s} ({s})\n", .{ session.name, session.error_name orelse "unknown" });
+                try stderr.print(
+                    "task unreachable: {s} ({s})\n",
+                    .{ session.name, session.error_name orelse "unknown" },
+                );
                 try stderr.flush();
                 agg_exit_code = 1;
                 done += 1;
@@ -810,7 +854,10 @@ fn wait(cfg: *Cfg, session_names: std.ArrayList([]const u8)) !void {
         // crashed and the remaining N-1 happen to be done, total==done
         // would be a false success.
         if (total < max_seen) {
-            try stderr.print("error: {d} session(s) disappeared before completing\n", .{max_seen - total});
+            try stderr.print(
+                "error: {d} session(s) disappeared before completing\n",
+                .{max_seen - total},
+            );
             try stderr.flush();
             std.process.exit(1);
             return;
@@ -943,7 +990,10 @@ fn kill(cfg: *Cfg, session_name: []const u8) !void {
             socket.cleanupStaleSocket(dir, session_name);
             w.interface.print("cleaned up stale session {s}\n", .{session_name}) catch {};
         } else {
-            w.interface.print("session {s} is unresponsive ({s}) -- daemon may be busy, try again or kill the process directly\n", .{ session_name, @errorName(err) }) catch {};
+            w.interface.print(
+                "session {s} is unresponsive ({s}) -- daemon may be busy, try again or kill the process directly\n",
+                .{ session_name, @errorName(err) },
+            ) catch {};
         }
         w.interface.flush() catch {};
         return;
@@ -1193,7 +1243,9 @@ fn run(daemon: *Daemon, command_args: [][]const u8) !void {
         else => return err,
     };
 
-    var poll_fds = [_]posix.pollfd{.{ .fd = probe_result.fd, .events = posix.POLL.IN, .revents = 0 }};
+    var poll_fds = [_]posix.pollfd{
+        .{ .fd = probe_result.fd, .events = posix.POLL.IN, .revents = 0 },
+    };
     const poll_result = posix.poll(&poll_fds, 5000) catch return error.PollFailed;
     if (poll_result == 0) {
         std.log.err("timeout waiting for ack", .{});
@@ -1297,7 +1349,8 @@ fn clientLoop(client_sock_fd: i32) !void {
         };
 
         // Handle stdin -> socket (Input)
-        if (poll_fds.items[0].revents & (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
+        const inp_flags = (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL);
+        if (poll_fds.items[0].revents & inp_flags != 0) {
             var buf: [4096]u8 = undefined;
             const n_opt: ?usize = posix.read(stdin_fd, &buf) catch |err| blk: {
                 if (err == error.WouldBlock) break :blk null;
@@ -1397,7 +1450,10 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
 
     daemon_loop: while (daemon.running) {
         if (sigterm_received.swap(false, .acq_rel)) {
-            std.log.info("SIGTERM received, shutting down gracefully session={s}", .{daemon.session_name});
+            std.log.info(
+                "SIGTERM received, shutting down gracefully session={s}",
+                .{daemon.session_name},
+            );
             break :daemon_loop;
         }
 
@@ -1436,7 +1492,12 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
             std.log.err("server socket error revents={d}", .{poll_fds.items[0].revents});
             break :daemon_loop;
         } else if (poll_fds.items[0].revents & posix.POLL.IN != 0) {
-            const client_fd = try posix.accept(server_sock_fd, null, null, posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC);
+            const client_fd = try posix.accept(
+                server_sock_fd,
+                null,
+                null,
+                posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC,
+            );
             const client = try daemon.alloc.create(Client);
             client.* = Client{
                 .alloc = daemon.alloc,
@@ -1446,10 +1507,14 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
             };
             client.write_buf = try std.ArrayList(u8).initCapacity(client.alloc, 4096);
             try daemon.clients.append(daemon.alloc, client);
-            std.log.info("client connected fd={d} total={d}", .{ client_fd, daemon.clients.items.len });
+            std.log.info(
+                "client connected fd={d} total={d}",
+                .{ client_fd, daemon.clients.items.len },
+            );
         }
 
-        if (poll_fds.items[1].revents & (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
+        const inp_flags = posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL;
+        if (poll_fds.items[1].revents & inp_flags != 0) {
             // Read from PTY
             var buf: [4096]u8 = undefined;
             const n_opt: ?usize = posix.read(pty_fd, &buf) catch |err| blk: {
@@ -1490,7 +1555,10 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                     // Broadcast data to all clients
                     for (daemon.clients.items) |client| {
                         ipc.appendMessage(daemon.alloc, &client.write_buf, .Output, buf[0..n]) catch |err| {
-                            std.log.warn("failed to buffer output for client err={s}", .{@errorName(err)});
+                            std.log.warn(
+                                "failed to buffer output for client err={s}",
+                                .{@errorName(err)},
+                            );
                             continue;
                         };
                         client.has_pending_output = true;
@@ -1505,7 +1573,8 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
         // So number of clients in poll_fds is poll_fds.items.len - 2
         const num_polled_clients = poll_fds.items.len - 2;
         if (i > num_polled_clients) {
-            // If we have more clients than polled (i.e. we just accepted one), start from the polled ones
+            // If we have more clients than polled (i.e. we just accepted one), start from the
+            // polled ones
             i = num_polled_clients;
         }
 
@@ -1517,7 +1586,10 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
             if (revents & posix.POLL.IN != 0) {
                 const n = client.read_buf.read(client.socket_fd) catch |err| {
                     if (err == error.WouldBlock) continue;
-                    std.log.debug("client read err={s} fd={d}", .{ @errorName(err), client.socket_fd });
+                    std.log.debug(
+                        "client read err={s} fd={d}",
+                        .{ @errorName(err), client.socket_fd },
+                    );
                     const last = daemon.closeClient(client, i, false);
                     if (last) break :daemon_loop;
                     continue;
@@ -1550,7 +1622,10 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                         .History => try daemon.handleHistory(client, &term, msg.payload),
                         .Run => try daemon.handleRun(client, pty_fd, msg.payload),
                         .Output, .Ack => {},
-                        _ => std.log.warn("ignoring unknown IPC tag={d}", .{@intFromEnum(msg.header.tag)}),
+                        _ => std.log.warn(
+                            "ignoring unknown IPC tag={d}",
+                            .{@intFromEnum(msg.header.tag)},
+                        ),
                     }
                 }
             }

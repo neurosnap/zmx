@@ -27,7 +27,10 @@ pub const SessionEntry = struct {
     }
 };
 
-pub fn get_session_entries(alloc: std.mem.Allocator, socket_dir: []const u8) !std.ArrayList(SessionEntry) {
+pub fn get_session_entries(
+    alloc: std.mem.Allocator,
+    socket_dir: []const u8,
+) !std.ArrayList(SessionEntry) {
     var dir = try std.fs.openDirAbsolute(socket_dir, .{ .iterate = true });
     defer dir.close();
     var iter = dir.iterate();
@@ -102,7 +105,8 @@ pub fn shellNeedsQuoting(arg: []const u8) bool {
     if (arg.len == 0) return true;
     for (arg) |ch| {
         switch (ch) {
-            ' ', '\t', '"', '\'', '\\', '$', '`', '!', '(', ')', '{', '}', '[', ']', '|', '&', ';', '<', '>', '?', '*', '~', '#', '\n' => return true,
+            ' ', '\t', '"', '\'', '\\', '$', '`', '!', '(', ')', '{', '}', '[', ']' => return true,
+            '|', '&', ';', '<', '>', '?', '*', '~', '#', '\n' => return true,
             else => {},
         }
     }
@@ -333,7 +337,11 @@ pub const HistoryFormat = enum(u8) {
     html = 2,
 };
 
-pub fn serializeTerminal(alloc: std.mem.Allocator, term: *ghostty_vt.Terminal, format: HistoryFormat) ?[]const u8 {
+pub fn serializeTerminal(
+    alloc: std.mem.Allocator,
+    term: *ghostty_vt.Terminal,
+    format: HistoryFormat,
+) ?[]const u8 {
     var builder: std.Io.Writer.Allocating = .init(alloc);
     defer builder.deinit();
 
@@ -378,7 +386,12 @@ pub fn detectShell() [:0]const u8 {
 
 /// Formats a session entry for list output (only the name when `short` is
 /// true), adding a prefix to indicate the current session, if there is one.
-pub fn writeSessionLine(writer: *std.Io.Writer, session: SessionEntry, short: bool, current_session: ?[]const u8) !void {
+pub fn writeSessionLine(
+    writer: *std.Io.Writer,
+    session: SessionEntry,
+    short: bool,
+    current_session: ?[]const u8,
+) !void {
     const current_arrow = "→";
     const prefix = if (current_session) |current|
         if (std.mem.eql(u8, current, session.name)) current_arrow ++ " " else "  "

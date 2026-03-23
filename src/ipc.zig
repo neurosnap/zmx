@@ -74,7 +74,12 @@ pub fn send(fd: i32, tag: Tag, data: []const u8) !void {
     }
 }
 
-pub fn appendMessage(alloc: std.mem.Allocator, list: *std.ArrayList(u8), tag: Tag, data: []const u8) !void {
+pub fn appendMessage(
+    alloc: std.mem.Allocator,
+    list: *std.ArrayList(u8),
+    tag: Tag,
+    data: []const u8,
+) !void {
     const header = Header{
         .tag = tag,
         .len = @intCast(data.len),
@@ -178,7 +183,10 @@ const SessionProbeResult = struct {
     info: Info,
 };
 
-pub fn probeSession(alloc: std.mem.Allocator, socket_path: []const u8) SessionProbeError!SessionProbeResult {
+pub fn probeSession(
+    alloc: std.mem.Allocator,
+    socket_path: []const u8,
+) SessionProbeError!SessionProbeResult {
     const timeout_ms = 1000;
     const fd = socket.sessionConnect(socket_path) catch |err| switch (err) {
         error.ConnectionRefused => return error.ConnectionRefused,
