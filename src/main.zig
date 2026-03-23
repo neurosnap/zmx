@@ -835,10 +835,12 @@ fn wait(cfg: *Cfg, session_names: std.ArrayList([]const u8)) !void {
                 continue;
             }
             if (session.task_ended_at == 0) {
-                try stdout.print("still waiting task={s}\n", .{session.name});
+                try stdout.print("waiting task={s}\n", .{session.name});
                 try stdout.flush();
                 continue;
             }
+            try stdout.print("completed task={s} exit_code={d}\n", .{ session.name, session.task_exit_code.? });
+            try stdout.flush();
             if (session.task_exit_code != 0) {
                 agg_exit_code = session.task_exit_code orelse 0;
             }
@@ -865,7 +867,11 @@ fn wait(cfg: *Cfg, session_names: std.ArrayList([]const u8)) !void {
         max_seen = total;
 
         if (total > 0 and total == done) {
-            try stdout.print("tasks completed!\n", .{});
+            if (agg_exit_code == 0) {
+                try stdout.print("task(s) completed!\n", .{});
+            } else {
+                try stdout.print("task(s) failed!\n", .{});
+            }
             try stdout.flush();
             std.process.exit(agg_exit_code);
             return;
