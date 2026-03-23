@@ -187,6 +187,9 @@ pub fn main() !void {
     }
 }
 
+/// Client represents each terminal that has connected to a session.
+///
+/// Multiple Clients can connect to a single session.
 const Client = struct {
     alloc: std.mem.Allocator,
     socket_fd: i32,
@@ -201,23 +204,16 @@ const Client = struct {
     }
 };
 
+/// Cfg is zmx's configuration container.
+///
+/// The purpose of this container is to hold anything that can be modified by the user.
 const Cfg = struct {
     socket_dir: []const u8,
     log_dir: []const u8,
     max_scrollback: usize = 10_000_000,
 
     pub fn init(alloc: std.mem.Allocator) !Cfg {
-        const tmpdir = std.mem.trimRight(u8, posix.getenv("TMPDIR") orelse "/tmp", "/");
-        const uid = posix.getuid();
-
-        const socket_dir: []const u8 = if (posix.getenv("ZMX_DIR")) |zmxdir|
-            try alloc.dupe(u8, zmxdir)
-        else if (posix.getenv("XDG_RUNTIME_DIR")) |xdg_runtime|
-            try std.fmt.allocPrint(alloc, "{s}/zmx", .{xdg_runtime})
-        else
-            try std.fmt.allocPrint(alloc, "{s}/zmx-{d}", .{ tmpdir, uid });
-        errdefer alloc.free(socket_dir);
-
+        const socket_dir = try socketDir(alloc);
         const log_dir = try std.fmt.allocPrint(alloc, "{s}/logs", .{socket_dir});
         errdefer alloc.free(log_dir);
 
@@ -229,6 +225,21 @@ const Cfg = struct {
         try cfg.mkdir();
 
         return cfg;
+    }
+
+    fn socketDir(alloc: std.mem.Allocator) ![]const u8 {
+        const tmpdir = std.mem.trimRight(u8, posix.getenv("TMPDIR") orelse "/tmp", "/");
+        const uid = posix.getuid();
+
+        const socket_dir: []const u8 = if (posix.getenv("ZMX_DIR")) |zmxdir|
+            try alloc.dupe(u8, zmxdir)
+        else if (posix.getenv("XDG_RUNTIME_DIR")) |xdg_runtime|
+            try std.fmt.allocPrint(alloc, "{s}/zmx", .{xdg_runtime})
+        else
+            try std.fmt.allocPrint(alloc, "{s}/zmx-{d}", .{ tmpdir, uid });
+        errdefer alloc.free(socket_dir);
+
+        return socket_dir;
     }
 
     pub fn deinit(self: *Cfg, alloc: std.mem.Allocator) void {
@@ -254,6 +265,14 @@ const EnsureSessionResult = struct {
     is_daemon: bool,
 };
 
+/// Daemon is responsible for managing a zmx session.
+///
+/// It holds all the state for a running session.  Instead of a single daemon for all sessions, we
+/// create a daemon for every session.  This has some benefits. The ipc communication between
+/// session clients and the daemon doesn't need to be tagged with the session name.  If a daemon
+/// crashes for one session won't crash all the other sessions.
+///
+/// Conceptually it's also much simpler to reason about.
 const Daemon = struct {
     cfg: *Cfg,
     alloc: std.mem.Allocator,
@@ -343,6 +362,7 @@ const Daemon = struct {
         std.posix.exit(1);
     }
 
+    /// spawnPty runs forkpty() and executes the shell or shell command the user provides.
     fn spawnPty(self: *Daemon) !c_int {
         const size = ipc.getTerminalSize(posix.STDOUT_FILENO);
         var ws: cross.c.struct_winsize = .{
@@ -379,6 +399,8 @@ const Daemon = struct {
         return master_fd;
     }
 
+    /// ensureSession "upserts" a session by checking if the unix socket exists already.
+    /// If not it creates one and spawns the daemon.
     fn ensureSession(self: *Daemon) !EnsureSessionResult {
         var dir = try std.fs.openDirAbsolute(self.cfg.socket_dir, .{});
         defer dir.close();
@@ -411,8 +433,10 @@ const Daemon = struct {
             std.log.info("creating session={s}", .{self.session_name});
             const server_sock_fd = try socket.createSocket(self.socket_path);
 
+            // creates the daemon
             const pid = try posix.fork();
             if (pid == 0) { // child (daemon)
+                // becomes the session leader and detaches process from its controlling terminal
                 _ = try posix.setsid();
 
                 log_system.deinit();
@@ -695,10 +719,10 @@ fn help() !void {
         \\  [r]un <name> [command...]      Send command without attaching, creating session if needed
         \\  [d]etach                       Detach all clients from current session (ctrl+\ for current client)
         \\  [l]ist [--short]               List active sessions
-        \\  [c]ompletions <shell>          Completion scripts for shell integration (bash, zsh, or fish)
         \\  [k]ill <name>                  Kill a session and all attached clients
         \\  [hi]story <name> [--vt|--html] Output session scrollback (--vt or --html for escape sequences)
         \\  [w]ait <name>...               Wait for session tasks to complete
+        \\  [c]ompletions <shell>          Completion scripts for shell integration (bash, zsh, or fish)
         \\  [v]ersion                      Show version information
         \\  [h]elp                         Show this help message
         \\
@@ -707,7 +731,7 @@ fn help() !void {
         \\  - ZMX_DIR              Controls which folder is used to store unix socket files (prio: 1)
         \\  - XDG_RUNTIME_DIR      Controls which folder is used to store unix socket files (prio: 2)
         \\  - TMPDIR               Controls which folder is used to store unix socket files (prio: 3)
-        \\  - ZMX_SESSION          This variable is injected into every zmx session automatically
+        \\  - ZMX_SESSION          The session name we inject into every zmx session automatically
         \\  - ZMX_SESSION_PREFIX   Adds this value to the start of every session name for all commands
         \\
     ;
@@ -1001,7 +1025,7 @@ fn attach(daemon: *Daemon) !void {
 
     const client_sock = try socket.sessionConnect(daemon.socket_path);
     std.log.info("attached session={s}", .{daemon.session_name});
-    //  this is typically used with tcsetattr() to modify terminal settings.
+    //  This is typically used with tcsetattr() to modify terminal settings.
     //      - you first get the current settings with tcgetattr()
     //      - modify the desired attributes in the termios structure
     //      - then apply the changes with tcsetattr().
@@ -1079,6 +1103,10 @@ fn run(daemon: *Daemon, command_args: [][]const u8) !void {
 
     const shell = util.detectShell();
     const shell_basename = std.fs.path.basename(shell);
+    // We append a task marker so we can:
+    //   - know when the command finishes
+    //   - capture its exit status
+    // This information is retrived when running `zmx list`
     const inline_task_marker = if (std.mem.eql(u8, shell_basename, "fish"))
         "; echo ZMX_TASK_COMPLETED:$status"
     else
@@ -1185,6 +1213,8 @@ fn run(daemon: *Daemon, command_args: [][]const u8) !void {
     return error.NoAckReceived;
 }
 
+/// clientLoop sends ipc commands to its corresponding daemon.  It uses poll() as its non-blocking
+/// mechanism. It will send stdin to the daemon and receive stdout from the daemon.
 fn clientLoop(client_sock_fd: i32) !void {
     // use c_allocator to avoid "reached unreachable code" panic in DebugAllocator when forking
     const alloc = std.heap.c_allocator;
@@ -1343,6 +1373,8 @@ fn clientLoop(client_sock_fd: i32) !void {
     }
 }
 
+/// dameonLoop is what the daemon runs to send and receive ipc commands from its corresponding
+/// clients.  It uses poll() as its non-blocking mechanism.
 fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
     std.log.info("daemon started session={s} pty_fd={d}", .{ daemon.session_name, pty_fd });
     setupSigtermHandler();
@@ -1554,7 +1586,7 @@ fn handleSigterm(_: i32, _: *const posix.siginfo_t, _: ?*anyopaque) callconv(.c)
     sigterm_received.store(true, .release);
 }
 
-// No SA_RESTART on these: we WANT the signal to interrupt poll() so the
+// No SA_RESTART: we want the signal to interrupt poll() so the
 // loop can check the flag. On BSD/macOS, SA_RESTART makes poll restartable,
 // which would leave an idle daemon deaf to SIGTERM until other I/O wakes it.
 fn setupSigwinchHandler() void {
