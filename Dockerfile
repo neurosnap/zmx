@@ -13,7 +13,7 @@ ENV PATH=/usr/local/zig:$PATH
 
 WORKDIR /app
 
-COPY build.zig build.zig.zon src/ /app/
+COPY . /app/
 
 RUN zig build
 

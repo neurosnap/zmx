@@ -1,7 +1,7 @@
 const std = @import("std");
 const posix = std.posix;
 
-pub fn seshPrefix() []const u8 {
+pub fn getSeshPrefix() []const u8 {
     return std.posix.getenv("ZMX_SESSION_PREFIX") orelse "";
 }
 
@@ -10,7 +10,7 @@ pub fn getSeshNameFromEnv() []const u8 {
 }
 
 pub fn getSeshName(alloc: std.mem.Allocator, sesh: []const u8) ![]const u8 {
-    const prefix = seshPrefix();
+    const prefix = getSeshPrefix();
     if (prefix.len == 0 and sesh.len == 0) {
         return error.SessionNameRequired;
     }

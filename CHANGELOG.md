@@ -4,6 +4,11 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
+### Changed
+
+- `zmx kill` now supports multiple args and it will kill sessions that match a prefix
+  - e.g. `zmx kill d.` will kill all sessions that match that prefix
+
 ### Fixed
 
 - `zmx list` will send "no sessions found" to stderr instead of stdout
