@@ -13,7 +13,10 @@ pub const LogSystem = struct {
         self.path = try alloc.dupe(u8, path);
 
         const file = std.fs.openFileAbsolute(path, .{ .mode = .read_write }) catch |err| switch (err) {
-            error.FileNotFound => try std.fs.createFileAbsolute(path, .{ .read = true, .mode = 0o640 }),
+            error.FileNotFound => try std.fs.createFileAbsolute(
+                path,
+                .{ .read = true, .mode = 0o640 },
+            ),
             else => return err,
         };
 
@@ -28,7 +31,13 @@ pub const LogSystem = struct {
         if (self.path.len > 0) self.alloc.free(self.path);
     }
 
-    pub fn log(self: *LogSystem, comptime level: std.log.Level, comptime scope: @Type(.enum_literal), comptime format: []const u8, args: anytype) void {
+    pub fn log(
+        self: *LogSystem,
+        comptime level: std.log.Level,
+        comptime scope: @Type(.enum_literal),
+        comptime format: []const u8,
+        args: anytype,
+    ) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -82,7 +91,10 @@ pub const LogSystem = struct {
             else => return err,
         };
 
-        self.file = try std.fs.createFileAbsolute(self.path, .{ .truncate = true, .read = true, .mode = 0o640 });
+        self.file = try std.fs.createFileAbsolute(
+            self.path,
+            .{ .truncate = true, .read = true, .mode = 0o640 },
+        );
         self.current_size = 0;
     }
 };
