@@ -314,13 +314,6 @@ fn copyFixedField(comptime max_len: usize, value: []const u8) FixedField(max_len
     return .{ .len = len, .buf = buf };
 }
 
-fn copyOptionalFixedField(comptime max_len: usize, value: ?[]const u8) FixedField(max_len) {
-    return if (value) |present|
-        copyFixedField(max_len, present)
-    else
-        .{ .len = 0, .buf = [_]u8{0} ** max_len };
-}
-
 /// Daemon is responsible for managing a zmx session.
 ///
 /// It holds all the state for a running session.  Instead of a single daemon for all sessions, we
@@ -379,32 +372,24 @@ const Daemon = struct {
     }
 
     fn syncCurrentPwd(self: *Daemon, term: *const ghostty_vt.Terminal) void {
-        self.replaceOwnedString(&self.current_pwd, term.getPwd(), "current pwd");
-    }
-
-    fn replaceOwnedString(
-        self: *Daemon,
-        slot: *?[]u8,
-        next: ?[]const u8,
-        label: []const u8,
-    ) void {
+        const next = term.getPwd();
         if (next) |value| {
-            if (slot.*) |current| {
+            if (self.current_pwd) |current| {
                 if (std.mem.eql(u8, current, value)) return;
                 self.alloc.free(current);
             }
 
-            slot.* = self.alloc.dupe(u8, value) catch |err| {
-                std.log.warn("failed to persist {s} err={s}", .{ label, @errorName(err) });
-                slot.* = null;
+            self.current_pwd = self.alloc.dupe(u8, value) catch |err| {
+                std.log.warn("failed to persist current pwd err={s}", .{@errorName(err)});
+                self.current_pwd = null;
                 return;
             };
             return;
         }
 
-        if (slot.*) |current| {
+        if (self.current_pwd) |current| {
             self.alloc.free(current);
-            slot.* = null;
+            self.current_pwd = null;
         }
     }
 
@@ -722,7 +707,7 @@ const Daemon = struct {
         }
 
         const cwd_field = copyFixedField(ipc.MAX_CWD_LEN, self.cwd);
-        const pwd_field = copyOptionalFixedField(ipc.MAX_PWD_LEN, self.current_pwd);
+        const pwd_field = copyFixedField(ipc.MAX_PWD_LEN, self.current_pwd orelse "");
 
         const info = ipc.Info{
             .clients_len = clients_len,
