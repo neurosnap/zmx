@@ -344,51 +344,10 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
     const output = builder.writer.buffered();
     if (output.len == 0) return null;
 
-    return stripSynchronizedOutputSequences(alloc, output) catch |err| {
+    return alloc.dupe(u8, output) catch |err| {
         std.log.warn("failed to allocate terminal state err={s}", .{@errorName(err)});
         return null;
     };
-}
-
-fn stripSynchronizedOutputSequences(alloc: std.mem.Allocator, output: []const u8) ![]u8 {
-    const sequences = [_][]const u8{
-        "\x1b[?2026h",
-        "\x1b[?2026l",
-    };
-
-    if (!containsAnySequence(output, &sequences)) {
-        return alloc.dupe(u8, output);
-    }
-
-    var sanitized: std.Io.Writer.Allocating = .init(alloc);
-    defer sanitized.deinit();
-
-    var i: usize = 0;
-    while (i < output.len) {
-        if (matchingSequence(output[i..], &sequences)) |sequence| {
-            i += sequence.len;
-            continue;
-        }
-
-        try sanitized.writer.writeByte(output[i]);
-        i += 1;
-    }
-
-    return alloc.dupe(u8, sanitized.writer.buffered());
-}
-
-fn containsAnySequence(haystack: []const u8, needles: []const []const u8) bool {
-    for (needles) |needle| {
-        if (std.mem.indexOf(u8, haystack, needle) != null) return true;
-    }
-    return false;
-}
-
-fn matchingSequence(haystack: []const u8, needles: []const []const u8) ?[]const u8 {
-    for (needles) |needle| {
-        if (std.mem.startsWith(u8, haystack, needle)) return needle;
-    }
-    return null;
 }
 
 pub const HistoryFormat = enum(u8) {
@@ -809,42 +768,4 @@ test "isKittyCtrlBackslash" {
 
     // Other CSI u sequences that happen to contain '92' elsewhere
     try expect(!isKittyCtrlBackslash("\x1b[65;92u"));
-}
-
-test "serializeTerminalState excludes synchronized output replay" {
-    const alloc = std.testing.allocator;
-
-    var term = try ghostty_vt.Terminal.init(alloc, .{
-        .cols = 80,
-        .rows = 24,
-    });
-    defer term.deinit(alloc);
-
-    var stream = term.vtStream();
-    defer stream.deinit();
-
-    try stream.nextSlice("\x1b[?2004h"); // Bracketed paste
-    try stream.nextSlice("\x1b[?2026h"); // Synchronized output
-    try stream.nextSlice("hello");
-
-    try std.testing.expect(term.modes.get(.bracketed_paste));
-    try std.testing.expect(term.modes.get(.synchronized_output));
-
-    const output = serializeTerminalState(alloc, &term) orelse return error.TestUnexpectedNull;
-    defer alloc.free(output);
-
-    try std.testing.expect(term.modes.get(.synchronized_output));
-
-    var restored = try ghostty_vt.Terminal.init(alloc, .{
-        .cols = 80,
-        .rows = 24,
-    });
-    defer restored.deinit(alloc);
-
-    var restored_stream = restored.vtStream();
-    defer restored_stream.deinit();
-    try restored_stream.nextSlice(output);
-
-    try std.testing.expect(restored.modes.get(.bracketed_paste));
-    try std.testing.expect(!restored.modes.get(.synchronized_output));
 }

@@ -173,47 +173,6 @@ description = "zmx session name"
 style = "bold magenta"
 ```
 
-## current working directory
-
-`zmx list` shows the session's current working directory as `pwd=...` when the shell reports it via OSC 7. This is best effort: if your shell or prompt does not emit OSC 7, the `pwd` field is omitted and `start_dir` remains the session creation directory.
-
-If your terminal or shell integration already emits OSC 7, you do not need any extra configuration. Otherwise you can add a small prompt hook like the following.
-
-### fish
-
-```fish
-function __zmx_osc7_pwd
-  set -l path (string escape --style=url -- "$PWD")
-  printf '\e]7;file://localhost%s\a' "$path"
-end
-
-function __zmx_osc7_pwd_on_prompt --on-event fish_prompt
-  __zmx_osc7_pwd
-end
-```
-
-### bash
-
-```bash
-__zmx_osc7_pwd() {
-  local path
-  path=$(python3 -c 'import os, urllib.parse; print(urllib.parse.quote(os.getcwd()))')
-  printf '\e]7;file://localhost%s\a' "$path"
-}
-PROMPT_COMMAND="__zmx_osc7_pwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
-```
-
-### zsh
-
-```zsh
-function __zmx_osc7_pwd() {
-  local path
-  path=$(python3 -c 'import os, urllib.parse; print(urllib.parse.quote(os.getcwd()))')
-  printf '\e]7;file://localhost%s\a' "$path"
-}
-precmd_functions+=(__zmx_osc7_pwd)
-```
-
 ## shell completion
 
 Shell auto-completion for `zmx` commands and session names can be enabled using the `completions` subcommand. Once configured, you'll get auto-complete for both local `zmx` commands and sessions:
@@ -270,22 +229,13 @@ Requires [fzf](https://github.com/junegunn/fzf).
 ```bash
 zmx-select() {
   local display
-  display=$(zmx list 2>/dev/null | awk -F '\t' '
-    {
-      name = pid = clients = start_dir = pwd = ""
-      for (i = 1; i <= NF; i++) {
-        gsub(/^[[:space:]]+/, "", $i)
-        if ($i ~ /^→[[:space:]]+name=/) name = substr($i, index($i, "name=") + 5)
-        else if ($i ~ /^name=/) name = substr($i, 6)
-        else if ($i ~ /^pid=/) pid = substr($i, 5)
-        else if ($i ~ /^clients=/) clients = substr($i, 9)
-        else if ($i ~ /^start_dir=/) start_dir = substr($i, 11)
-        else if ($i ~ /^pwd=/) pwd = substr($i, 5)
-      }
-      if (name == "") next
-      printf "%-20s  pid:%-8s  clients:%-2s  %s\n", name, pid, clients, (pwd != "" ? pwd : start_dir)
-    }
-  ')
+  display=$(zmx list 2>/dev/null | while IFS=$'\t' read -r name pid clients created dir; do
+    name=${name#session_name=}
+    pid=${pid#pid=}
+    clients=${clients#clients=}
+    dir=${dir#started_in=}
+    printf "%-20s  pid:%-8s  clients:%-2s  %s\n" "$name" "$pid" "$clients" "$dir"
+  done)
 
   local output query key selected session_name
   output=$({ [[ -n "$display" ]] && echo "$display"; } | fzf \
