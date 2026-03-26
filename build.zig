@@ -10,15 +10,6 @@ const macos_targets: []const std.Target.Query = &.{
     .{ .cpu_arch = .aarch64, .os_tag = .macos },
 };
 
-const BuildRunStdIo = if (@hasDecl(std.process, "SpawnOptions"))
-    std.process.SpawnOptions.StdIo
-else
-    std.process.Child.StdIo;
-
-fn inheritBuildRunStdIo() BuildRunStdIo {
-    return if (@hasField(BuildRunStdIo, "inherit")) .inherit else .Inherit;
-}
-
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -29,7 +20,7 @@ pub fn build(b: *std.Build) void {
     const git_sha = std.mem.trim(u8, b.runAllowFail(
         &.{ "git", "rev-parse", "--short", "HEAD" },
         &code,
-        inheritBuildRunStdIo(),
+        .Inherit,
     ) catch "unknown", "\n");
 
     const options = b.addOptions();
@@ -90,7 +81,6 @@ pub fn build(b: *std.Build) void {
         const exe_unit_tests = b.addTest(.{
             .root_module = test_module,
         });
-        exe_unit_tests.linkLibC();
         const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
         test_step.dependOn(&run_exe_unit_tests.step);
     }
