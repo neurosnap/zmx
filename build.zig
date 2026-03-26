@@ -10,24 +10,26 @@ const macos_targets: []const std.Target.Query = &.{
     .{ .cpu_arch = .aarch64, .os_tag = .macos },
 };
 
+const BuildRunStdIo = if (@hasDecl(std.process, "SpawnOptions"))
+    std.process.SpawnOptions.StdIo
+else
+    std.process.Child.StdIo;
+
+fn inheritBuildRunStdIo() BuildRunStdIo {
+    return if (@hasField(BuildRunStdIo, "inherit")) .inherit else .Inherit;
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const version = b.option([]const u8, "version", "Version string for release") orelse
         @as([]const u8, @import("build.zig.zon").version);
 
-    const stdio_type = if (@hasDecl(std.process, "SpawnOptions"))
-        std.process.SpawnOptions.StdIo
-    else
-        std.process.Child.StdIo;
-    const inherit_stdio: stdio_type =
-        if (@hasField(stdio_type, "inherit")) .inherit else .Inherit;
-
     var code: u8 = 0;
     const git_sha = std.mem.trim(u8, b.runAllowFail(
         &.{ "git", "rev-parse", "--short", "HEAD" },
         &code,
-        inherit_stdio,
+        inheritBuildRunStdIo(),
     ) catch "unknown", "\n");
 
     const options = b.addOptions();

@@ -281,16 +281,17 @@ fn flushBufferedWithWriter(
 ) !FlushBufferedResult {
     if (buf.items.len == 0) return .drained;
 
-    const n = writeFn(writer_ctx, buf.items) catch |err| switch (err) {
+    const written = writeFn(writer_ctx, buf.items) catch |err| switch (err) {
         error.WouldBlock => return .pending,
         error.ConnectionResetByPeer, error.BrokenPipe => return .closed,
         else => return err,
     };
 
-    if (n == 0) return .pending;
+    if (written == 0) return .pending;
 
-    try buf.replaceRange(alloc, 0, n, &[_]u8{});
-    return if (buf.items.len == 0) .drained else .pending;
+    try buf.replaceRange(alloc, 0, written, &[_]u8{});
+    if (buf.items.len == 0) return .drained;
+    return .pending;
 }
 
 fn flushBufferedFd(
