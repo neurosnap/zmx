@@ -263,6 +263,44 @@ const Client = struct {
     }
 };
 
+const FlushBufferedResult = enum {
+    drained,
+    pending,
+    closed,
+};
+
+fn writeToFd(fd: i32, data: []const u8) !usize {
+    return posix.write(fd, data);
+}
+
+fn flushBufferedWithWriter(
+    alloc: std.mem.Allocator,
+    buf: *std.ArrayList(u8),
+    writer_ctx: anytype,
+    comptime writeFn: fn (@TypeOf(writer_ctx), []const u8) anyerror!usize,
+) !FlushBufferedResult {
+    if (buf.items.len == 0) return .drained;
+
+    const n = writeFn(writer_ctx, buf.items) catch |err| switch (err) {
+        error.WouldBlock => return .pending,
+        error.ConnectionResetByPeer, error.BrokenPipe => return .closed,
+        else => return err,
+    };
+
+    if (n == 0) return .pending;
+
+    try buf.replaceRange(alloc, 0, n, &[_]u8{});
+    return if (buf.items.len == 0) .drained else .pending;
+}
+
+fn flushBufferedFd(
+    alloc: std.mem.Allocator,
+    fd: i32,
+    buf: *std.ArrayList(u8),
+) !FlushBufferedResult {
+    return flushBufferedWithWriter(alloc, buf, fd, writeToFd);
+}
+
 /// Cfg is zmx's configuration container.
 ///
 /// The purpose of this container is to hold anything that can be modified by the user.
@@ -1634,19 +1672,13 @@ fn clientLoop(client_sock_fd: i32) !ClientResult {
             }
         }
 
-        // Handle socket write (flush buffered messages to daemon)
-        if (poll_fds.items[1].revents & posix.POLL.OUT != 0) {
-            if (sock_write_buf.items.len > 0) {
-                const n = posix.write(client_sock_fd, sock_write_buf.items) catch |err| blk: {
-                    if (err == error.WouldBlock) break :blk 0;
-                    if (err == error.ConnectionResetByPeer or err == error.BrokenPipe) {
-                        return ClientResult{ .kind = .detach, .session_name = null };
-                    }
-                    return err;
-                };
-                if (n > 0) {
-                    try sock_write_buf.replaceRange(alloc, 0, n, &[_]u8{});
-                }
+        // POLLOUT is only a wakeup for continued draining. If this loop appended
+        // new bytes earlier in the same iteration, try a non-blocking flush now
+        // so single-key inputs like Ctrl-L do not wait for the next poll cycle.
+        if (sock_write_buf.items.len > 0) {
+            switch (try flushBufferedFd(alloc, client_sock_fd, &sock_write_buf)) {
+                .drained, .pending => {},
+                .closed => return ClientResult{ .kind = .detach, .session_name = null },
             }
         }
 
@@ -1887,22 +1919,15 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                 }
             }
 
-            if (revents & posix.POLL.OUT != 0) {
-                // Flush pending output buffers
-                const n = posix.write(client.socket_fd, client.write_buf.items) catch |err| blk: {
-                    if (err == error.WouldBlock) break :blk 0;
-                    // Error on write, close client
-                    const last = daemon.closeClient(client, i, false);
-                    if (last) break :daemon_loop;
-                    continue;
-                };
-
-                if (n > 0) {
-                    client.write_buf.replaceRange(daemon.alloc, 0, n, &[_]u8{}) catch unreachable;
-                }
-
-                if (client.write_buf.items.len == 0) {
-                    client.has_pending_output = false;
+            if (client.write_buf.items.len > 0) {
+                switch (try flushBufferedFd(daemon.alloc, client.socket_fd, &client.write_buf)) {
+                    .drained => client.has_pending_output = false,
+                    .pending => client.has_pending_output = true,
+                    .closed => {
+                        const last = daemon.closeClient(client, i, false);
+                        if (last) break :daemon_loop;
+                        continue;
+                    },
                 }
             }
 
@@ -1912,6 +1937,75 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
             }
         }
     }
+}
+
+test "flushBufferedFd drains writable file descriptor immediately" {
+    const alloc = std.testing.allocator;
+    const pipe_fds = try posix.pipe();
+    defer posix.close(pipe_fds[0]);
+    defer posix.close(pipe_fds[1]);
+
+    var buf = try std.ArrayList(u8).initCapacity(alloc, 16);
+    defer buf.deinit(alloc);
+    try buf.appendSlice(alloc, "ctrl-l");
+
+    try std.testing.expectEqual(
+        FlushBufferedResult.drained,
+        try flushBufferedFd(alloc, pipe_fds[1], &buf),
+    );
+    try std.testing.expectEqual(@as(usize, 0), buf.items.len);
+
+    var read_buf: [16]u8 = undefined;
+    const n = try posix.read(pipe_fds[0], &read_buf);
+    try std.testing.expectEqualStrings("ctrl-l", read_buf[0..n]);
+}
+
+test "flushBufferedFd leaves bytes queued when writer would block" {
+    const alloc = std.testing.allocator;
+    const pipe_fds = try posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
+    defer posix.close(pipe_fds[0]);
+    defer posix.close(pipe_fds[1]);
+
+    var fill_buf = [_]u8{0} ** 4096;
+    while (true) {
+        _ = posix.write(pipe_fds[1], &fill_buf) catch |err| switch (err) {
+            error.WouldBlock => break,
+            else => return err,
+        };
+    }
+
+    var buf = try std.ArrayList(u8).initCapacity(alloc, 16);
+    defer buf.deinit(alloc);
+    try buf.appendSlice(alloc, "clear");
+
+    try std.testing.expectEqual(
+        FlushBufferedResult.pending,
+        try flushBufferedFd(alloc, pipe_fds[1], &buf),
+    );
+    try std.testing.expectEqualStrings("clear", buf.items);
+}
+
+test "flushBufferedWithWriter keeps unwritten tail after partial write" {
+    const alloc = std.testing.allocator;
+
+    const PartialWriter = struct {
+        limit: usize,
+
+        fn write(self: *@This(), data: []const u8) !usize {
+            return @min(self.limit, data.len);
+        }
+    };
+
+    var writer = PartialWriter{ .limit = 3 };
+    var buf = try std.ArrayList(u8).initCapacity(alloc, 16);
+    defer buf.deinit(alloc);
+    try buf.appendSlice(alloc, "clear-screen");
+
+    try std.testing.expectEqual(
+        FlushBufferedResult.pending,
+        try flushBufferedWithWriter(alloc, &buf, &writer, PartialWriter.write),
+    );
+    try std.testing.expectEqualStrings("ar-screen", buf.items);
 }
 
 fn handleSigwinch(_: i32, _: *const posix.siginfo_t, _: ?*anyopaque) callconv(.c) void {

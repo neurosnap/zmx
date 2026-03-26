@@ -16,11 +16,18 @@ pub fn build(b: *std.Build) void {
     const version = b.option([]const u8, "version", "Version string for release") orelse
         @as([]const u8, @import("build.zig.zon").version);
 
+    const stdio_type = if (@hasDecl(std.process, "SpawnOptions"))
+        std.process.SpawnOptions.StdIo
+    else
+        std.process.Child.StdIo;
+    const inherit_stdio: stdio_type =
+        if (@hasField(stdio_type, "inherit")) .inherit else .Inherit;
+
     var code: u8 = 0;
     const git_sha = std.mem.trim(u8, b.runAllowFail(
         &.{ "git", "rev-parse", "--short", "HEAD" },
         &code,
-        .Inherit,
+        inherit_stdio,
     ) catch "unknown", "\n");
 
     const options = b.addOptions();
@@ -81,6 +88,7 @@ pub fn build(b: *std.Build) void {
         const exe_unit_tests = b.addTest(.{
             .root_module = test_module,
         });
+        exe_unit_tests.linkLibC();
         const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
         test_step.dependOn(&run_exe_unit_tests.step);
     }
