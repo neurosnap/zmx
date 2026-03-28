@@ -13,6 +13,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Zig
         uses: mlugg/setup-zig@v2
@@ -21,24 +23,33 @@ jobs:
 
       - name: Extract version from tag
         id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: |
+          FULL="${GITHUB_REF_NAME#v}"
+          BASE=$(echo "$FULL" | sed 's/-kkl\..*//')
+          echo "full=$FULL" >> "$GITHUB_OUTPUT"
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
 
       - name: Patch ghostty dependency
         run: ./patch-ghostty-build.sh
 
+      - name: Delete local tag before build
+        run: |
+          # Ghostty's build system runs git tag detection and panics if
+          # it finds a tag that doesn't match vX.Y.Z. Delete our tag
+          # locally so ghostty only sees upstream's clean tags.
+          git tag -d "$GITHUB_REF_NAME" 2>/dev/null || true
+
       - name: Build release binaries
-        run: zig build release -Dversion=${{ steps.version.outputs.version }}
+        run: zig build release -Dversion=${{ steps.version.outputs.base }}
 
       - name: Codesign macOS binaries
         run: |
-          # Extract, sign, repack each macOS tarball
           for arch in aarch64 x86_64; do
-            tarball="zig-out/dist/zmx-${{ steps.version.outputs.version }}-macos-${arch}.tar.gz"
+            tarball="zig-out/dist/zmx-${{ steps.version.outputs.base }}-macos-${arch}.tar.gz"
             tmpdir=$(mktemp -d)
             tar xzf "$tarball" -C "$tmpdir"
             codesign -s - "$tmpdir/zmx"
             tar czf "$tarball" -C "$tmpdir" zmx
-            # Regenerate checksum
             shasum -a 256 "$tarball" > "${tarball}.sha256"
             rm -rf "$tmpdir"
           done
@@ -46,19 +57,17 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: zmx ${{ steps.version.outputs.version }}
+          name: zmx ${{ steps.version.outputs.full }}
           body: |
-            KnickKnackLabs fork of [zmx](https://github.com/neurosnap/zmx) ${{ steps.version.outputs.version }}.
-
-            See [patches](https://github.com/KnickKnackLabs/zmx#patches) for what's different from upstream.
+            KnickKnackLabs fork of [zmx](https://github.com/neurosnap/zmx) v${{ steps.version.outputs.base }} with [patches](https://github.com/KnickKnackLabs/zmx#patches).
 
             ## Install
 
             ```bash
             # macOS (Apple Silicon)
-            curl -sL https://github.com/KnickKnackLabs/zmx/releases/download/${{ github.ref_name }}/zmx-${{ steps.version.outputs.version }}-macos-aarch64.tar.gz | tar xz -C ~/.local/bin/
+            curl -sL https://github.com/KnickKnackLabs/zmx/releases/download/${{ github.ref_name }}/zmx-${{ steps.version.outputs.base }}-macos-aarch64.tar.gz | tar xz -C ~/.local/bin/
 
             # Linux (x86_64)
-            curl -sL https://github.com/KnickKnackLabs/zmx/releases/download/${{ github.ref_name }}/zmx-${{ steps.version.outputs.version }}-linux-x86_64.tar.gz | tar xz -C ~/.local/bin/
+            curl -sL https://github.com/KnickKnackLabs/zmx/releases/download/${{ github.ref_name }}/zmx-${{ steps.version.outputs.base }}-linux-x86_64.tar.gz | tar xz -C ~/.local/bin/
             ```
           files: zig-out/dist/*
