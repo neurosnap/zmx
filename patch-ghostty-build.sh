@@ -12,11 +12,25 @@
 # the practical solution for a small dependency build-system fix.
 set -euo pipefail
 
-# Ensure dependencies are fetched
-zig build --fetch 2>/dev/null || true
+# Ensure dependencies are fetched. The build will likely fail (that's
+# why we're patching), but it downloads the dependency first.
+echo "Fetching dependencies..."
+zig build --fetch=all 2>/dev/null || zig build --fetch 2>/dev/null || zig build 2>/dev/null || true
 
-# Find ghostty's build.zig in the zig cache
-GHOSTTY_BUILD=$(find ~/.cache/zig/p .zig-cache/p 2>/dev/null -maxdepth 2 -name "build.zig" -path "*/ghostty-*" -print -quit)
+# Find ghostty's build.zig in the zig cache.
+# Check both the global cache (~/.cache/zig) and the local cache (.zig-cache).
+# CI runners may use either depending on ZIG_GLOBAL_CACHE_DIR.
+echo "Searching for ghostty build.zig..."
+GHOSTTY_BUILD=""
+for search_dir in .zig-cache/p ~/.cache/zig/p; do
+  if [ -d "$search_dir" ]; then
+    found=$(find "$search_dir" -maxdepth 2 -name "build.zig" -path "*/ghostty-*" -print -quit 2>/dev/null)
+    if [ -n "$found" ]; then
+      GHOSTTY_BUILD="$found"
+      break
+    fi
+  fi
+done
 
 if [ -z "$GHOSTTY_BUILD" ]; then
   echo "Error: could not find ghostty build.zig in zig cache" >&2
