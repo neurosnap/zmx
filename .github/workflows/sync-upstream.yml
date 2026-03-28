@@ -1,0 +1,104 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    # Check daily at 06:00 UTC
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: upstream
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/neurosnap/zmx.git || true
+          git fetch upstream --tags
+
+      - name: Check for new upstream commits
+        id: check
+        run: |
+          LOCAL=$(git rev-parse upstream)
+          REMOTE=$(git rev-parse upstream/main)
+          if [ "$LOCAL" = "$REMOTE" ]; then
+            echo "up-to-date=true" >> "$GITHUB_OUTPUT"
+            echo "No new upstream commits"
+          else
+            echo "up-to-date=false" >> "$GITHUB_OUTPUT"
+            echo "New upstream commits detected"
+            git log --oneline "$LOCAL..$REMOTE"
+          fi
+
+      - name: Fast-forward upstream branch
+        if: steps.check.outputs.up-to-date == 'false'
+        run: |
+          git merge --ff-only upstream/main
+          git push origin upstream
+          git push origin --tags
+
+      - name: Rebase main onto upstream
+        if: steps.check.outputs.up-to-date == 'false'
+        run: |
+          git checkout main
+          git rebase upstream || {
+            echo "::error::Rebase failed — manual intervention needed"
+            git rebase --abort
+            gh issue create \
+              --title "Upstream sync: rebase conflict" \
+              --body "Automatic rebase of main onto upstream failed. Manual rebase needed.
+
+          Upstream advanced to $(git rev-parse upstream/main).
+
+          To resolve:
+          \`\`\`bash
+          git fetch origin
+          git checkout main
+          git rebase origin/upstream
+          # resolve conflicts
+          git push --force-with-lease origin main
+          \`\`\`" \
+              --label "upstream-sync"
+            exit 1
+          }
+          git push --force-with-lease origin main
+
+      - name: Check for new upstream tag
+        if: steps.check.outputs.up-to-date == 'false'
+        id: tag
+        run: |
+          # Find the latest v* tag on upstream
+          LATEST=$(git tag -l 'v*' --sort=-v:refname | head -1)
+          # Check if we already have a kkl release for this version
+          VERSION="${LATEST#v}"
+          if gh release view "v${VERSION}-kkl.1" >/dev/null 2>&1; then
+            echo "Already have a release for $VERSION"
+            echo "new-tag=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "New upstream tag: $LATEST"
+            echo "new-tag=true" >> "$GITHUB_OUTPUT"
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+            echo "tag=v${VERSION}-kkl.1" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag and trigger release
+        if: steps.tag.outputs.new-tag == 'true'
+        run: |
+          git tag "${{ steps.tag.outputs.tag }}" main
+          git push origin "${{ steps.tag.outputs.tag }}"
+        # This push triggers the release workflow

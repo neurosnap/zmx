@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build release binaries
+        run: zig build release -Dversion=${{ steps.version.outputs.version }}
+
+      - name: Codesign macOS binaries
+        run: |
+          # Extract, sign, repack each macOS tarball
+          for arch in aarch64 x86_64; do
+            tarball="zig-out/dist/zmx-${{ steps.version.outputs.version }}-macos-${arch}.tar.gz"
+            tmpdir=$(mktemp -d)
+            tar xzf "$tarball" -C "$tmpdir"
+            codesign -s - "$tmpdir/zmx"
+            tar czf "$tarball" -C "$tmpdir" zmx
+            # Regenerate checksum
+            shasum -a 256 "$tarball" > "${tarball}.sha256"
+            rm -rf "$tmpdir"
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: zmx ${{ steps.version.outputs.version }}
+          body: |
+            KnickKnackLabs fork of [zmx](https://github.com/neurosnap/zmx) ${{ steps.version.outputs.version }}.
+
+            See [patches](https://github.com/KnickKnackLabs/zmx#patches) for what's different from upstream.
+
+            ## Install
+
+            ```bash
+            # macOS (Apple Silicon)
+            curl -sL https://github.com/KnickKnackLabs/zmx/releases/download/${{ github.ref_name }}/zmx-${{ steps.version.outputs.version }}-macos-aarch64.tar.gz | tar xz -C ~/.local/bin/
+
+            # Linux (x86_64)
+            curl -sL https://github.com/KnickKnackLabs/zmx/releases/download/${{ github.ref_name }}/zmx-${{ steps.version.outputs.version }}-linux-x86_64.tar.gz | tar xz -C ~/.local/bin/
+            ```
+          files: zig-out/dist/*
