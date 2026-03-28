@@ -23,6 +23,9 @@ jobs:
         id: version
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
+      - name: Patch ghostty dependency
+        run: ./patch-ghostty-build.sh
+
       - name: Build release binaries
         run: zig build release -Dversion=${{ steps.version.outputs.version }}
 
