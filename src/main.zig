@@ -699,8 +699,12 @@ const Daemon = struct {
             );
             if (util.serializeTerminalState(self.alloc, term)) |term_output| {
                 std.log.debug("serialize terminal state", .{});
+                // Rewrite OSC 133;A to include redraw=0 so the outer terminal
+                // does not clear prompt lines on resize (issue #111).
+                const restore_data = util.rewritePromptRedraw(self.alloc, term_output) orelse term_output;
                 defer self.alloc.free(term_output);
-                ipc.appendMessage(self.alloc, &client.write_buf, .Output, term_output) catch |err| {
+                defer if (restore_data.ptr != term_output.ptr) self.alloc.free(restore_data);
+                ipc.appendMessage(self.alloc, &client.write_buf, .Output, restore_data) catch |err| {
                     std.log.warn(
                         "failed to buffer terminal state for client err={s}",
                         .{@errorName(err)},
@@ -725,6 +729,13 @@ const Daemon = struct {
                 .ws_ypixel = 0,
             };
             _ = cross.c.ioctl(pty_fd, cross.c.TIOCSWINSZ, &ws);
+            // Disable prompt_redraw before resize. The daemon's internal terminal
+            // would otherwise clear prompt lines expecting the shell to redraw them,
+            // but the shell's redraw goes to the PTY (forwarded to clients), not to
+            // this daemon terminal. The clearing corrupts the daemon's snapshot state.
+            const saved_prompt_redraw = term.flags.shell_redraws_prompt;
+            term.flags.shell_redraws_prompt = .false;
+            defer term.flags.shell_redraws_prompt = saved_prompt_redraw;
             try term.resize(self.alloc, resize.cols, resize.rows);
 
             // Mark that we've had a client init, so subsequent clients get terminal state
@@ -756,6 +767,10 @@ const Daemon = struct {
             .ws_ypixel = 0,
         };
         _ = cross.c.ioctl(pty_fd, cross.c.TIOCSWINSZ, &ws);
+        // Disable prompt_redraw before resize (same rationale as handleInit).
+        const saved_prompt_redraw = term.flags.shell_redraws_prompt;
+        term.flags.shell_redraws_prompt = .false;
+        defer term.flags.shell_redraws_prompt = saved_prompt_redraw;
         try term.resize(self.alloc, resize.cols, resize.rows);
         std.log.debug("resize rows={d} cols={d}", .{ resize.rows, resize.cols });
     }
@@ -1817,9 +1832,13 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                         }
                     }
 
-                    // Broadcast data to all clients
+                    // Broadcast data to all clients.
+                    // Rewrite OSC 133;A to include redraw=0 so the outer terminal
+                    // does not clear prompt lines on resize (issue #111).
+                    const broadcast_data = util.rewritePromptRedraw(daemon.alloc, buf[0..n]) orelse buf[0..n];
+                    defer if (broadcast_data.ptr != buf[0..n].ptr) daemon.alloc.free(broadcast_data);
                     for (daemon.clients.items) |client| {
-                        ipc.appendMessage(daemon.alloc, &client.write_buf, .Output, buf[0..n]) catch |err| {
+                        ipc.appendMessage(daemon.alloc, &client.write_buf, .Output, broadcast_data) catch |err| {
                             std.log.warn(
                                 "failed to buffer output for client err={s}",
                                 .{@errorName(err)},
