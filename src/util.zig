@@ -258,6 +258,71 @@ pub fn rewritePromptRedraw(alloc: std.mem.Allocator, data: []const u8) ?[]const 
     return result.toOwnedSlice(alloc) catch null;
 }
 
+test "rewritePromptRedraw: no OSC 133;A returns null" {
+    const result = rewritePromptRedraw(std.testing.allocator, "hello world");
+    try std.testing.expect(result == null);
+}
+
+test "rewritePromptRedraw: injects redraw=0 with BEL terminator" {
+    const input = "\x1b]133;A\x07";
+    const result = rewritePromptRedraw(std.testing.allocator, input).?;
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("\x1b]133;A;redraw=0\x07", result);
+}
+
+test "rewritePromptRedraw: injects redraw=0 with ST terminator" {
+    const input = "\x1b]133;A\x1b\\";
+    const result = rewritePromptRedraw(std.testing.allocator, input).?;
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("\x1b]133;A;redraw=0\x1b\\", result);
+}
+
+test "rewritePromptRedraw: replaces existing redraw=1" {
+    const input = "\x1b]133;A;redraw=1\x07";
+    const result = rewritePromptRedraw(std.testing.allocator, input).?;
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("\x1b]133;A;redraw=0\x07", result);
+}
+
+test "rewritePromptRedraw: replaces existing redraw=last" {
+    const input = "\x1b]133;A;redraw=last\x07";
+    const result = rewritePromptRedraw(std.testing.allocator, input).?;
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("\x1b]133;A;redraw=0\x07", result);
+}
+
+test "rewritePromptRedraw: preserves redraw=0 (no-op)" {
+    const result = rewritePromptRedraw(std.testing.allocator, "\x1b]133;A;redraw=0\x07");
+    try std.testing.expect(result == null);
+}
+
+test "rewritePromptRedraw: preserves other parameters" {
+    const input = "\x1b]133;A;aid=14;cl=line\x07";
+    const result = rewritePromptRedraw(std.testing.allocator, input).?;
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("\x1b]133;A;aid=14;cl=line;redraw=0\x07", result);
+}
+
+test "rewritePromptRedraw: handles multiple markers" {
+    const input = "before\x1b]133;A\x07middle\x1b]133;A;redraw=1\x07after";
+    const result = rewritePromptRedraw(std.testing.allocator, input).?;
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("before\x1b]133;A;redraw=0\x07middle\x1b]133;A;redraw=0\x07after", result);
+}
+
+test "rewritePromptRedraw: does not touch OSC 133;B or 133;C" {
+    const input = "\x1b]133;B\x07\x1b]133;C\x07";
+    const result = rewritePromptRedraw(std.testing.allocator, input);
+    try std.testing.expect(result == null);
+}
+
+test "rewritePromptRedraw: embedded in larger output" {
+    const input = "some output\r\n\x1b]133;A\x07prompt$ \x1b]133;B\x07";
+    const result = rewritePromptRedraw(std.testing.allocator, input).?;
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("some output\r\n\x1b]133;A;redraw=0\x07prompt$ \x1b]133;B\x07", result);
+}
+
 pub fn findTaskExitMarker(output: []const u8) ?u8 {
     const marker = "ZMX_TASK_COMPLETED:";
 
