@@ -529,8 +529,8 @@ const Daemon = struct {
                 defer {
                     self.handleKill();
                     self.deinit();
-                    _ = posix.waitpid(self.pid, 0);
                     posix.close(pty_fd);
+                    _ = posix.waitpid(self.pid, 0);
                     posix.close(server_sock_fd);
                     std.log.info("deleting socket file session_name={s}", .{self.session_name});
                     dir.deleteFile(self.session_name) catch |err| {
