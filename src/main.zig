@@ -176,12 +176,16 @@ pub fn main() !void {
             }
             args_raw.deinit(alloc);
         }
+        var force = false;
         while (args.next()) |session_name| {
+            if (std.mem.eql(u8, session_name, "--force")) {
+                force = true;
+                continue;
+            }
             const sesh = try socket.getSeshName(alloc, session_name);
             try args_raw.append(alloc, sesh);
         }
-        // if no args are provided we assume they want to wait for all sessions matching the
-        // prefix.
+        // if no args are provided we assume they want to kill all sessions matching the prefix.
         if (args_raw.items.len == 0) {
             const prefix = socket.getSeshPrefix();
             if (prefix.len == 0) {
@@ -196,21 +200,23 @@ pub fn main() !void {
             }
             sessions.deinit(alloc);
         }
+
         for (sessions.items) |session| {
             for (args_raw.items) |prefix| {
-                if (std.mem.startsWith(u8, session.name, prefix)) {
-                    kill(&cfg, session.name) catch |err| {
-                        try stderr.print(
-                            "failed to kill session={s}: {s}\n",
-                            .{ session.name, @errorName(err) },
-                        );
-                        try stderr.flush();
-                    };
-                    break;
+                if (!std.mem.startsWith(u8, session.name, prefix)) {
+                    continue;
                 }
+
+                kill(&cfg, session.name, force) catch |err| {
+                    try stderr.print(
+                        "failed to kill session={s}: {s}\n",
+                        .{ session.name, @errorName(err) },
+                    );
+                    try stderr.flush();
+                };
+                break;
             }
         }
-        return;
     } else if (std.mem.eql(u8, cmd, "wait") or std.mem.eql(u8, cmd, "w")) {
         var args_raw: std.ArrayList([]const u8) = .empty;
         defer {
@@ -803,7 +809,7 @@ fn help() !void {
         \\  [r]un <name> [command...]      Send command without attaching, creating session if needed
         \\  [d]etach                       Detach all clients from current session (ctrl+\ for current client)
         \\  [l]ist [--short]               List active sessions
-        \\  [k]ill <name>...               Kill a session and all attached clients
+        \\  [k]ill <name>... [--force]     Kill a session and all attached clients
         \\  [hi]story <name> [--vt|--html] Output session scrollback (--vt or --html for escape sequences)
         \\  [w]ait <name>...               Wait for session tasks to complete
         \\  [c]ompletions <shell>          Completion scripts for shell integration (bash, zsh, or fish)
@@ -1009,7 +1015,7 @@ fn detachAll(cfg: *Cfg) !void {
     };
 }
 
-fn kill(cfg: *Cfg, session_name: []const u8) !void {
+fn kill(cfg: *Cfg, session_name: []const u8, force: bool) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
@@ -1035,12 +1041,12 @@ fn kill(cfg: *Cfg, session_name: []const u8) !void {
         std.log.err("session unresponsive: {s}", .{@errorName(err)});
         var buf: [4096]u8 = undefined;
         var w = std.fs.File.stdout().writer(&buf);
-        if (err == error.ConnectionRefused) {
+        if (force or err == error.ConnectionRefused) {
             socket.cleanupStaleSocket(dir, session_name);
             w.interface.print("cleaned up stale session {s}\n", .{session_name}) catch {};
         } else {
             w.interface.print(
-                "session {s} is unresponsive ({s}) -- daemon may be busy, try again or kill the process directly\n",
+                "session {s} is unresponsive ({s})\ndaemon may be busy: try again, add `--force` flag, or kill the process directly\n",
                 .{ session_name, @errorName(err) },
             ) catch {};
         }
