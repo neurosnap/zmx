@@ -211,6 +211,50 @@ pub fn main() !void {
             }
         }
         return;
+    } else if (std.mem.eql(u8, cmd, "rm")) {
+        var stderr_buffer: [1024]u8 = undefined;
+        var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+        const stderr = &stderr_writer.interface;
+
+        var args_raw: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (args_raw.items) |sesh| {
+                alloc.free(sesh);
+            }
+            args_raw.deinit(alloc);
+        }
+        while (args.next()) |session_name| {
+            const sesh = try socket.getSeshName(alloc, session_name);
+            try args_raw.append(alloc, sesh);
+        }
+        // Unlike kill/wait, rm does not fall back to getSeshPrefix() when
+        // called with no arguments. Removing all prefix-matching sessions
+        // by default is too destructive.
+        if (args_raw.items.len == 0) {
+            return error.SessionNameRequired;
+        }
+        var sessions = try util.get_session_entries(alloc, cfg.socket_dir);
+        defer {
+            for (sessions.items) |session| {
+                session.deinit(alloc);
+            }
+            sessions.deinit(alloc);
+        }
+        for (sessions.items) |session| {
+            for (args_raw.items) |prefix| {
+                if (std.mem.startsWith(u8, session.name, prefix)) {
+                    rm(&cfg, session.name) catch |err| {
+                        try stderr.print(
+                            "failed to remove session={s}: {s}\n",
+                            .{ session.name, @errorName(err) },
+                        );
+                        try stderr.flush();
+                    };
+                    break;
+                }
+            }
+        }
+        return;
     } else if (std.mem.eql(u8, cmd, "wait") or std.mem.eql(u8, cmd, "w")) {
         var args_raw: std.ArrayList([]const u8) = .empty;
         defer {
@@ -804,6 +848,7 @@ fn help() !void {
         \\  [d]etach                       Detach all clients from current session (ctrl+\ for current client)
         \\  [l]ist [--short]               List active sessions
         \\  [k]ill <name>...               Kill a session and all attached clients
+        \\  rm <name>...                   Remove a session (kill if running, delete socket)
         \\  [hi]story <name> [--vt|--html] Output session scrollback (--vt or --html for escape sequences)
         \\  [w]ait <name>...               Wait for session tasks to complete
         \\  [c]ompletions <shell>          Completion scripts for shell integration (bash, zsh, or fish)
@@ -1057,6 +1102,74 @@ fn kill(cfg: *Cfg, session_name: []const u8) !void {
     var buf: [100]u8 = undefined;
     var w = std.fs.File.stdout().writer(&buf);
     try w.interface.print("killed session {s}\n", .{session_name});
+    try w.interface.flush();
+}
+
+fn rm(cfg: *Cfg, session_name: []const u8) !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    const socket_path = socket.getSocketPath(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
+        error.NameTooLong => return socket.printSessionNameTooLong(session_name, cfg.socket_dir),
+        error.OutOfMemory => return err,
+    };
+    defer alloc.free(socket_path);
+
+    var dir = try std.fs.openDirAbsolute(cfg.socket_dir, .{});
+    defer dir.close();
+
+    const exists = try socket.sessionExists(dir, session_name);
+    if (!exists) {
+        var buf: [4096]u8 = undefined;
+        var w = std.fs.File.stderr().writer(&buf);
+        w.interface.print("error: session \"{s}\" does not exist\n", .{session_name}) catch {};
+        w.interface.flush() catch {};
+        return error.SessionNotFound;
+    }
+
+    std.log.info("removing session={s}", .{session_name});
+
+    // Best-effort graceful shutdown: if the daemon is responsive, send
+    // Kill so it can clean up (close clients, SIGHUP child, delete its
+    // own socket). If not responsive, skip to force-cleanup.
+    if (ipc.probeSession(alloc, socket_path)) |result| {
+        ipc.send(result.fd, .Kill, "") catch |err| {
+            std.log.debug("kill send failed for {s}: {s}", .{ session_name, @errorName(err) });
+        };
+        posix.close(result.fd);
+
+        // Poll for the daemon to clean up its own socket, rather than
+        // sleeping a fixed duration. 50ms polls, 500ms max.
+        // If the daemon doesn't clean up in time, we force-delete below.
+        // This may orphan the daemon process, which is acceptable for rm
+        // semantics -- the user explicitly asked for removal.
+        var waited: u64 = 0;
+        const poll_interval = 50 * std.time.ns_per_ms;
+        const max_wait = 500 * std.time.ns_per_ms;
+        while (waited < max_wait) {
+            std.Thread.sleep(poll_interval);
+            waited += poll_interval;
+            const still_exists = socket.sessionExists(dir, session_name) catch break;
+            if (!still_exists) break;
+        }
+    } else |err| {
+        std.log.debug("probe failed for {s}: {s}", .{ session_name, @errorName(err) });
+    }
+
+    // Delete the socket file if it still exists (daemon may have already
+    // cleaned it up during graceful shutdown, or may be unresponsive).
+    dir.deleteFile(session_name) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => {
+            std.log.warn("failed to delete socket file err={s}", .{@errorName(err)});
+            return err;
+        },
+    };
+
+    var buf: [256]u8 = undefined;
+    var w = std.fs.File.stdout().writer(&buf);
+    try w.interface.print("removed session {s}\n", .{session_name});
     try w.interface.flush();
 }
 
