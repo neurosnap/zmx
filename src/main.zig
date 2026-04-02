@@ -3,6 +3,7 @@ const posix = std.posix;
 const builtin = @import("builtin");
 const build_options = @import("build_options");
 const ghostty_vt = @import("ghostty-vt");
+const clap = @import("clap");
 const ipc = @import("ipc.zig");
 const log = @import("log.zig");
 const completions = @import("completions.zig");
@@ -36,6 +37,103 @@ var sigterm_received: std.atomic.Value(bool) = std.atomic.Value(bool).init(false
 // https://github.com/ziglang/zig/blob/738d2be9d6b6ef3ff3559130c05159ef53336224/lib/std/posix.zig#L3505
 const O_NONBLOCK: usize = 1 << @bitOffsetOf(posix.O, "NONBLOCK");
 
+// ---------------------------------------------------------------------------
+// CLI definitions (zig-clap)
+// ---------------------------------------------------------------------------
+
+const Command = enum {
+    attach,
+    run,
+    detach,
+    list,
+    completions,
+    kill,
+    history,
+    wait,
+    version,
+    help,
+};
+
+/// Parse a command name, accepting both full names and short aliases.
+fn parseCommand(in: []const u8) error{NameNotPartOfEnum}!Command {
+    const aliases = .{
+        .{ "attach", Command.attach },
+        .{ "a", Command.attach },
+        .{ "run", Command.run },
+        .{ "r", Command.run },
+        .{ "detach", Command.detach },
+        .{ "d", Command.detach },
+        .{ "list", Command.list },
+        .{ "l", Command.list },
+        .{ "completions", Command.completions },
+        .{ "c", Command.completions },
+        .{ "kill", Command.kill },
+        .{ "k", Command.kill },
+        .{ "history", Command.history },
+        .{ "hi", Command.history },
+        .{ "wait", Command.wait },
+        .{ "w", Command.wait },
+        .{ "version", Command.version },
+        .{ "v", Command.version },
+        .{ "help", Command.help },
+        .{ "h", Command.help },
+    };
+    inline for (aliases) |entry| {
+        if (std.mem.eql(u8, in, entry[0])) return entry[1];
+    }
+    return error.NameNotPartOfEnum;
+}
+
+/// Top-level parameters: --help, --version, and the subcommand positional.
+const main_params = clap.parseParamsComptime(
+    \\-h, --help     Display this help message
+    \\-v, --version  Show version information
+    \\<command>
+    \\
+);
+
+const main_parsers = .{
+    .command = parseCommand,
+};
+
+/// Parameters for `list`.
+const list_params = clap.parseParamsComptime(
+    \\-h, --help    Display this help message
+    \\    --short   Use short output format
+    \\
+);
+
+/// Parameters for `history`.
+const history_params = clap.parseParamsComptime(
+    \\-h, --help   Display this help message
+    \\    --vt     Output with VT escape sequences
+    \\    --html   Output as HTML
+    \\<str>
+    \\
+);
+
+/// Parameters for `kill`.
+const kill_params = clap.parseParamsComptime(
+    \\-h, --help    Display this help message
+    \\    --force   Force kill by removing the socket file
+    \\<str>...
+    \\
+);
+
+/// Parameters for `completions`.
+const completions_params = clap.parseParamsComptime(
+    \\-h, --help   Display this help message
+    \\<str>
+    \\
+);
+
+fn isHelpFlag(arg: ?[]const u8) bool {
+    if (arg) |a| {
+        return std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h");
+    }
+    return false;
+}
+
 pub fn main() !void {
     // use c_allocator to avoid "reached unreachable code" panic in DebugAllocator when forking
     const alloc = std.heap.c_allocator;
@@ -48,7 +146,7 @@ pub fn main() !void {
 
     var args = try std.process.argsWithAllocator(alloc);
     defer args.deinit();
-    _ = args.skip(); // skip program name
+    _ = args.next(); // skip program name
 
     var cfg = try Cfg.init(alloc);
     defer cfg.deinit(alloc);
@@ -58,189 +156,290 @@ pub fn main() !void {
     try log_system.init(alloc, log_path);
     defer log_system.deinit();
 
-    const cmd = args.next() orelse {
-        return list(&cfg, false);
-    };
-
-    if (std.mem.eql(u8, cmd, "version") or std.mem.eql(u8, cmd, "v") or std.mem.eql(u8, cmd, "-v") or std.mem.eql(u8, cmd, "--version")) {
-        return printVersion(&cfg);
-    } else if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "h") or std.mem.eql(u8, cmd, "-h")) {
-        return help();
-    } else if (std.mem.eql(u8, cmd, "list") or std.mem.eql(u8, cmd, "l")) {
-        const short = if (args.next()) |arg| std.mem.eql(u8, arg, "--short") else false;
-        return list(&cfg, short);
-    } else if (std.mem.eql(u8, cmd, "completions") or std.mem.eql(u8, cmd, "c")) {
-        const arg = args.next() orelse return;
-        const shell = completions.Shell.fromString(arg) orelse return;
-        return printCompletions(shell);
-    } else if (std.mem.eql(u8, cmd, "detach") or std.mem.eql(u8, cmd, "d")) {
-        return detachAll(&cfg);
-    } else if (std.mem.eql(u8, cmd, "history") or std.mem.eql(u8, cmd, "hi")) {
-        var session_name: ?[]const u8 = null;
-        var format: util.HistoryFormat = .plain;
-        while (args.next()) |arg| {
-            if (std.mem.eql(u8, arg, "--vt")) {
-                format = .vt;
-            } else if (std.mem.eql(u8, arg, "--html")) {
-                format = .html;
-            } else if (session_name == null) {
-                session_name = arg;
-            }
-        }
-        const sesh_env = socket.getSeshNameFromEnv();
-        const sesh = try socket.getSeshName(alloc, session_name orelse sesh_env);
-        defer alloc.free(sesh);
-        return history(&cfg, sesh, format);
-    } else if (std.mem.eql(u8, cmd, "attach") or std.mem.eql(u8, cmd, "a")) {
-        const session_name = args.next() orelse "";
-
-        var command_args: std.ArrayList([]const u8) = .empty;
-        defer command_args.deinit(alloc);
-        while (args.next()) |arg| {
-            try command_args.append(alloc, arg);
-        }
-
-        const clients = try std.ArrayList(*Client).initCapacity(alloc, 10);
-        var command: ?[][]const u8 = null;
-        if (command_args.items.len > 0) {
-            command = command_args.items;
-        }
-
-        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const cwd = std.posix.getcwd(&cwd_buf) catch "";
-
-        const sesh = try socket.getSeshName(alloc, session_name);
-        defer alloc.free(sesh);
-        var daemon = Daemon{
-            .running = true,
-            .cfg = &cfg,
-            .alloc = alloc,
-            .clients = clients,
-            .session_name = sesh,
-            .socket_path = undefined,
-            .pid = undefined,
-            .command = command,
-            .cwd = cwd,
-            .created_at = @intCast(std.time.timestamp()),
-        };
-        daemon.socket_path = socket.getSocketPath(alloc, cfg.socket_dir, sesh) catch |err| switch (err) {
-            error.NameTooLong => return socket.printSessionNameTooLong(sesh, cfg.socket_dir),
-            error.OutOfMemory => return err,
-        };
-        std.log.info("socket path={s}", .{daemon.socket_path});
-        return attach(&daemon);
-    } else if (std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "r")) {
-        const session_name = args.next() orelse "";
-
-        var cmd_args_raw: std.ArrayList([]const u8) = .empty;
-        defer cmd_args_raw.deinit(alloc);
-        while (args.next()) |arg| {
-            try cmd_args_raw.append(alloc, arg);
-        }
-        const clients = try std.ArrayList(*Client).initCapacity(alloc, 10);
-
-        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const cwd = std.posix.getcwd(&cwd_buf) catch "";
-
-        const sesh = try socket.getSeshName(alloc, session_name);
-        defer alloc.free(sesh);
-        var daemon = Daemon{
-            .running = true,
-            .cfg = &cfg,
-            .alloc = alloc,
-            .clients = clients,
-            .session_name = sesh,
-            .socket_path = undefined,
-            .pid = undefined,
-            .command = null,
-            .cwd = cwd,
-            .created_at = @intCast(std.time.timestamp()),
-            .is_task_mode = true,
-            .task_command = cmd_args_raw.items,
-        };
-        daemon.socket_path = socket.getSocketPath(alloc, cfg.socket_dir, sesh) catch |err| switch (err) {
-            error.NameTooLong => return socket.printSessionNameTooLong(sesh, cfg.socket_dir),
-            error.OutOfMemory => return err,
-        };
-        std.log.info("socket path={s}", .{daemon.socket_path});
-        return run(&daemon, cmd_args_raw.items);
-    } else if (std.mem.eql(u8, cmd, "kill") or std.mem.eql(u8, cmd, "k")) {
+    // Parse top-level: --help, --version, and the subcommand.
+    // terminating_positional stops parsing after the command so the remaining
+    // iterator can be consumed by each subcommand handler.
+    var diag = clap.Diagnostic{};
+    var res = clap.parseEx(clap.Help, &main_params, main_parsers, &args, .{
+        .diagnostic = &diag,
+        .allocator = alloc,
+        .terminating_positional = 0,
+    }) catch |err| {
         var stderr_buffer: [1024]u8 = undefined;
         var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
         const stderr = &stderr_writer.interface;
-
-        var args_raw: std.ArrayList([]const u8) = .empty;
-        defer {
-            for (args_raw.items) |sesh| {
-                alloc.free(sesh);
-            }
-            args_raw.deinit(alloc);
+        if (err == error.NameNotPartOfEnum) {
+            // The user typed an unknown command. diag.arg isn't populated for
+            // positional value-parse errors, so report generically.
+            stderr.print("Unknown command. Run 'zmx --help' for usage information.\n", .{}) catch {};
+        } else {
+            diag.reportToFile(.stderr(), err) catch {};
         }
-        var force = false;
-        while (args.next()) |session_name| {
-            if (std.mem.eql(u8, session_name, "--force")) {
-                force = true;
-                continue;
+        stderr.flush() catch {};
+        return;
+    };
+    defer res.deinit();
+
+    if (res.args.help != 0) return help();
+    if (res.args.version != 0) return printVersion(&cfg);
+
+    const command = res.positionals[0] orelse return list(&cfg, false);
+
+    switch (command) {
+        .help => return help(),
+        .version => return printVersion(&cfg),
+        .detach => {
+            if (isHelpFlag(args.next())) {
+                return subcommandUsage("detach", "", "Detach all clients from current session (ctrl+\\ for current client)");
             }
+            return detachAll(&cfg);
+        },
+
+        .list => {
+            var list_diag = clap.Diagnostic{};
+            var list_res = clap.parseEx(clap.Help, &list_params, clap.parsers.default, &args, .{
+                .diagnostic = &list_diag,
+                .allocator = alloc,
+            }) catch |err| {
+                list_diag.reportToFile(.stderr(), err) catch {};
+                return;
+            };
+            defer list_res.deinit();
+
+            if (list_res.args.help != 0) {
+                return subcommandUsage("list", "[--short]", "List active sessions");
+            }
+            return list(&cfg, list_res.args.short != 0);
+        },
+
+        .completions => {
+            var comp_diag = clap.Diagnostic{};
+            var comp_res = clap.parseEx(clap.Help, &completions_params, clap.parsers.default, &args, .{
+                .diagnostic = &comp_diag,
+                .allocator = alloc,
+            }) catch |err| {
+                comp_diag.reportToFile(.stderr(), err) catch {};
+                return;
+            };
+            defer comp_res.deinit();
+
+            if (comp_res.args.help != 0) {
+                return subcommandUsage("completions", "<shell>", "Completion scripts for shell integration (bash, zsh, or fish)");
+            }
+            const arg = comp_res.positionals[0] orelse return;
+            const shell = completions.Shell.fromString(arg) orelse return;
+            return printCompletions(shell);
+        },
+
+        .history => {
+            var hist_diag = clap.Diagnostic{};
+            var hist_res = clap.parseEx(clap.Help, &history_params, clap.parsers.default, &args, .{
+                .diagnostic = &hist_diag,
+                .allocator = alloc,
+            }) catch |err| {
+                hist_diag.reportToFile(.stderr(), err) catch {};
+                return;
+            };
+            defer hist_res.deinit();
+
+            if (hist_res.args.help != 0) {
+                return subcommandUsage("history", "<name> [--vt|--html]", "Output session scrollback");
+            }
+
+            var format: util.HistoryFormat = .plain;
+            if (hist_res.args.vt != 0) format = .vt;
+            if (hist_res.args.html != 0) format = .html;
+
+            const sesh_env = socket.getSeshNameFromEnv();
+            const sesh = try socket.getSeshName(alloc, hist_res.positionals[0] orelse sesh_env);
+            defer alloc.free(sesh);
+            return history(&cfg, sesh, format);
+        },
+
+        .attach => {
+            const first_arg = args.next();
+            if (isHelpFlag(first_arg)) {
+                return subcommandUsage("attach", "<name> [command...]", "Attach to session, creating session if needed");
+            }
+            const session_name = first_arg orelse "";
+
+            var command_args: std.ArrayList([]const u8) = .empty;
+            defer command_args.deinit(alloc);
+            while (args.next()) |arg| {
+                try command_args.append(alloc, arg);
+            }
+
+            const clients = try std.ArrayList(*Client).initCapacity(alloc, 10);
+            var cmd: ?[][]const u8 = null;
+            if (command_args.items.len > 0) {
+                cmd = command_args.items;
+            }
+
+            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const cwd = std.posix.getcwd(&cwd_buf) catch "";
+
             const sesh = try socket.getSeshName(alloc, session_name);
-            try args_raw.append(alloc, sesh);
-        }
-        // if no args are provided we assume they want to kill all sessions matching the prefix.
-        if (args_raw.items.len == 0) {
-            const prefix = socket.getSeshPrefix();
-            if (prefix.len == 0) {
-                return error.SessionNameRequired;
-            }
-            try args_raw.append(alloc, try alloc.dupe(u8, prefix));
-        }
-        var sessions = try util.get_session_entries(alloc, cfg.socket_dir);
-        defer {
-            for (sessions.items) |session| {
-                session.deinit(alloc);
-            }
-            sessions.deinit(alloc);
-        }
+            defer alloc.free(sesh);
+            var daemon = Daemon{
+                .running = true,
+                .cfg = &cfg,
+                .alloc = alloc,
+                .clients = clients,
+                .session_name = sesh,
+                .socket_path = undefined,
+                .pid = undefined,
+                .command = cmd,
+                .cwd = cwd,
+                .created_at = @intCast(std.time.timestamp()),
+            };
+            daemon.socket_path = socket.getSocketPath(alloc, cfg.socket_dir, sesh) catch |err| switch (err) {
+                error.NameTooLong => return socket.printSessionNameTooLong(sesh, cfg.socket_dir),
+                error.OutOfMemory => return err,
+            };
+            std.log.info("socket path={s}", .{daemon.socket_path});
+            return attach(&daemon);
+        },
 
-        for (sessions.items) |session| {
-            for (args_raw.items) |prefix| {
-                if (!std.mem.startsWith(u8, session.name, prefix)) {
-                    continue;
+        .run => {
+            const first_arg = args.next();
+            if (isHelpFlag(first_arg)) {
+                return subcommandUsage("run", "<name> [command...]", "Send command without attaching, creating session if needed");
+            }
+            const session_name = first_arg orelse "";
+
+            var cmd_args_raw: std.ArrayList([]const u8) = .empty;
+            defer cmd_args_raw.deinit(alloc);
+            while (args.next()) |arg| {
+                try cmd_args_raw.append(alloc, arg);
+            }
+            const clients = try std.ArrayList(*Client).initCapacity(alloc, 10);
+
+            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const cwd = std.posix.getcwd(&cwd_buf) catch "";
+
+            const sesh = try socket.getSeshName(alloc, session_name);
+            defer alloc.free(sesh);
+            var daemon = Daemon{
+                .running = true,
+                .cfg = &cfg,
+                .alloc = alloc,
+                .clients = clients,
+                .session_name = sesh,
+                .socket_path = undefined,
+                .pid = undefined,
+                .command = null,
+                .cwd = cwd,
+                .created_at = @intCast(std.time.timestamp()),
+                .is_task_mode = true,
+                .task_command = cmd_args_raw.items,
+            };
+            daemon.socket_path = socket.getSocketPath(alloc, cfg.socket_dir, sesh) catch |err| switch (err) {
+                error.NameTooLong => return socket.printSessionNameTooLong(sesh, cfg.socket_dir),
+                error.OutOfMemory => return err,
+            };
+            std.log.info("socket path={s}", .{daemon.socket_path});
+            return run(&daemon, cmd_args_raw.items);
+        },
+
+        .kill => {
+            var kill_diag = clap.Diagnostic{};
+            var kill_res = clap.parseEx(clap.Help, &kill_params, clap.parsers.default, &args, .{
+                .diagnostic = &kill_diag,
+                .allocator = alloc,
+            }) catch |err| {
+                kill_diag.reportToFile(.stderr(), err) catch {};
+                return;
+            };
+            defer kill_res.deinit();
+
+            if (kill_res.args.help != 0) {
+                return subcommandUsage("kill", "<name>... [--force]", "Kill a session and all attached clients");
+            }
+
+            const force = kill_res.args.force != 0;
+
+            var stderr_buffer: [1024]u8 = undefined;
+            var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+            const stderr = &stderr_writer.interface;
+
+            var args_raw: std.ArrayList([]const u8) = .empty;
+            defer {
+                for (args_raw.items) |sesh| {
+                    alloc.free(sesh);
                 }
+                args_raw.deinit(alloc);
+            }
+            for (kill_res.positionals[0]) |session_name| {
+                const sesh = try socket.getSeshName(alloc, session_name);
+                try args_raw.append(alloc, sesh);
+            }
+            // if no args are provided we assume they want to kill all sessions matching the
+            // prefix.
+            if (args_raw.items.len == 0) {
+                const prefix = socket.getSeshPrefix();
+                if (prefix.len == 0) {
+                    return error.SessionNameRequired;
+                }
+                try args_raw.append(alloc, try alloc.dupe(u8, prefix));
+            }
+            var sessions = try util.get_session_entries(alloc, cfg.socket_dir);
+            defer {
+                for (sessions.items) |session| {
+                    session.deinit(alloc);
+                }
+                sessions.deinit(alloc);
+            }
+            for (sessions.items) |session| {
+                for (args_raw.items) |prefix| {
+                    if (!std.mem.startsWith(u8, session.name, prefix)) {
+                        continue;
+                    }
+                    kill(&cfg, session.name, force) catch |err| {
+                        try stderr.print(
+                            "failed to kill session={s}: {s}\n",
+                            .{ session.name, @errorName(err) },
+                        );
+                        try stderr.flush();
+                    };
+                    break;
+                }
+            }
+            return;
+        },
 
-                kill(&cfg, session.name, force) catch |err| {
-                    try stderr.print(
-                        "failed to kill session={s}: {s}\n",
-                        .{ session.name, @errorName(err) },
-                    );
-                    try stderr.flush();
-                };
-                break;
+        .wait => {
+            const first_arg = args.next();
+            if (isHelpFlag(first_arg)) {
+                return subcommandUsage("wait", "<name>...", "Wait for session tasks to complete");
             }
-        }
-    } else if (std.mem.eql(u8, cmd, "wait") or std.mem.eql(u8, cmd, "w")) {
-        var args_raw: std.ArrayList([]const u8) = .empty;
-        defer {
-            for (args_raw.items) |sesh| {
-                alloc.free(sesh);
+
+            var args_raw: std.ArrayList([]const u8) = .empty;
+            defer {
+                for (args_raw.items) |sesh| {
+                    alloc.free(sesh);
+                }
+                args_raw.deinit(alloc);
             }
-            args_raw.deinit(alloc);
-        }
-        while (args.next()) |session_name| {
-            const sesh = try socket.getSeshName(alloc, session_name);
-            try args_raw.append(alloc, sesh);
-        }
-        // if no args are provided we assume they want to wait for all sessions matching the
-        // prefix.
-        if (args_raw.items.len == 0) {
-            const prefix = socket.getSeshPrefix();
-            if (prefix.len == 0) {
-                return error.SessionNameRequired;
+            // Include the first arg we already consumed (if it wasn't --help)
+            if (first_arg) |fa| {
+                const sesh = try socket.getSeshName(alloc, fa);
+                try args_raw.append(alloc, sesh);
             }
-            try args_raw.append(alloc, prefix);
-        }
-        return wait(&cfg, args_raw);
-    } else {
-        return help();
+            while (args.next()) |session_name| {
+                const sesh = try socket.getSeshName(alloc, session_name);
+                try args_raw.append(alloc, sesh);
+            }
+            // if no args are provided we assume they want to wait for all sessions matching the
+            // prefix.
+            if (args_raw.items.len == 0) {
+                const prefix = socket.getSeshPrefix();
+                if (prefix.len == 0) {
+                    return error.SessionNameRequired;
+                }
+                try args_raw.append(alloc, prefix);
+            }
+            return wait(&cfg, args_raw);
+        },
     }
 }
 
@@ -812,6 +1011,21 @@ fn printCompletions(shell: completions.Shell) !void {
     var buf: [8192]u8 = undefined;
     var w = std.fs.File.stdout().writer(&buf);
     try w.interface.print("{s}\n", .{script});
+    try w.interface.flush();
+}
+
+fn subcommandUsage(name: []const u8, args_text: []const u8, description: []const u8) !void {
+    var buf: [4096]u8 = undefined;
+    var w = std.fs.File.stdout().writer(&buf);
+    try w.interface.print(
+        \\
+        \\Usage: zmx {s} {s}
+        \\
+        \\  {s}
+        \\
+        \\Run 'zmx --help' for global usage information.
+        \\
+    , .{ name, args_text, description });
     try w.interface.flush();
 }
 

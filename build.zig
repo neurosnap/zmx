@@ -36,6 +36,11 @@ pub fn build(b: *std.Build) void {
     });
     exe_mod.addOptions("build_options", options);
 
+    {
+        const clap_dep = b.dependency("clap", .{});
+        exe_mod.addImport("clap", clap_dep.module("clap"));
+    }
+
     if (b.lazyDependency("ghostty", .{
         .target = target,
         .optimize = optimize,
@@ -104,6 +109,11 @@ pub fn build(b: *std.Build) void {
                 .optimize = .ReleaseSafe,
             });
             release_mod.addOptions("build_options", options);
+
+            {
+                const clap_dep = b.dependency("clap", .{});
+                release_mod.addImport("clap", clap_dep.module("clap"));
+            }
 
             if (b.lazyDependency("ghostty", .{
                 .target = resolved,

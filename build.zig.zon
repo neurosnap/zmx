@@ -8,6 +8,10 @@
             .url = "git+https://github.com/ghostty-org/ghostty.git?ref=HEAD#c61f184069336c61f7840e2268c6f4dc183b60af",
             .hash = "ghostty-1.3.0-dev-5UdBC0h6TwSwECcK25wXYZkpJ2TrATdQx8jqy9bVGWyV",
         },
+        .clap = .{
+            .url = "https://github.com/Hejsil/zig-clap/archive/refs/tags/0.11.0.tar.gz",
+            .hash = "clap-0.11.0-oBajB-HnAQDPCKYzwF7rO3qDFwRcD39Q0DALlTSz5H7e",
+        },
     },
     .paths = .{
         "build.zig",

@@ -29,7 +29,7 @@ const bash_completions =
     \\  cur="${COMP_WORDS[COMP_CWORD]}"
     \\  prev="${COMP_WORDS[COMP_CWORD-1]}"
     \\
-    \\  local commands="attach run detach list completions kill history version help"
+    \\  local commands="attach run detach list completions kill history wait version help"
     \\
     \\  if [[ $COMP_CWORD -eq 1 ]]; then
     \\    COMPREPLY=($(compgen -W "$commands" -- "$cur"))
@@ -37,7 +37,7 @@ const bash_completions =
     \\  fi
     \\
     \\  case "$prev" in
-    \\    attach|run|kill|history)
+    \\    attach|run|kill|history|wait)
     \\      local sessions=$(zmx list --short 2>/dev/null | tr '\n' ' ')
     \\      COMPREPLY=($(compgen -W "$sessions" -- "$cur"))
     \\      ;;
@@ -77,6 +77,7 @@ const zsh_completions =
     \\        'completions:Shell completion scripts'
     \\        'kill:Kill a session'
     \\        'history:Output session scrollback'
+    \\        'wait:Wait for session tasks to complete'
     \\        'version:Show version'
     \\        'help:Show help message'
     \\      )
@@ -84,7 +85,7 @@ const zsh_completions =
     \\      ;;
     \\    args)
     \\      case $words[2] in
-    \\        attach|a|kill|k|run|r|history|hi)
+    \\        attach|a|kill|k|run|r|history|hi|wait|w)
     \\          _zmx_sessions
     \\          ;;
     \\        completions|c)
