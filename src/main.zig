@@ -134,6 +134,52 @@ fn isHelpFlag(arg: ?[]const u8) bool {
     return false;
 }
 
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+test "parseCommand — full names" {
+    try std.testing.expectEqual(Command.attach, try parseCommand("attach"));
+    try std.testing.expectEqual(Command.run, try parseCommand("run"));
+    try std.testing.expectEqual(Command.detach, try parseCommand("detach"));
+    try std.testing.expectEqual(Command.list, try parseCommand("list"));
+    try std.testing.expectEqual(Command.completions, try parseCommand("completions"));
+    try std.testing.expectEqual(Command.kill, try parseCommand("kill"));
+    try std.testing.expectEqual(Command.history, try parseCommand("history"));
+    try std.testing.expectEqual(Command.wait, try parseCommand("wait"));
+    try std.testing.expectEqual(Command.version, try parseCommand("version"));
+    try std.testing.expectEqual(Command.help, try parseCommand("help"));
+}
+
+test "parseCommand — aliases" {
+    try std.testing.expectEqual(Command.attach, try parseCommand("a"));
+    try std.testing.expectEqual(Command.run, try parseCommand("r"));
+    try std.testing.expectEqual(Command.detach, try parseCommand("d"));
+    try std.testing.expectEqual(Command.list, try parseCommand("l"));
+    try std.testing.expectEqual(Command.completions, try parseCommand("c"));
+    try std.testing.expectEqual(Command.kill, try parseCommand("k"));
+    try std.testing.expectEqual(Command.history, try parseCommand("hi"));
+    try std.testing.expectEqual(Command.wait, try parseCommand("w"));
+    try std.testing.expectEqual(Command.version, try parseCommand("v"));
+    try std.testing.expectEqual(Command.help, try parseCommand("h"));
+}
+
+test "parseCommand — unknown commands" {
+    try std.testing.expectError(error.NameNotPartOfEnum, parseCommand("foo"));
+    try std.testing.expectError(error.NameNotPartOfEnum, parseCommand(""));
+    try std.testing.expectError(error.NameNotPartOfEnum, parseCommand("att"));
+    try std.testing.expectError(error.NameNotPartOfEnum, parseCommand("ATTACH"));
+}
+
+test "isHelpFlag" {
+    try std.testing.expect(isHelpFlag("--help"));
+    try std.testing.expect(isHelpFlag("-h"));
+    try std.testing.expect(!isHelpFlag(null));
+    try std.testing.expect(!isHelpFlag("--version"));
+    try std.testing.expect(!isHelpFlag("help"));
+    try std.testing.expect(!isHelpFlag(""));
+}
+
 pub fn main() !void {
     // use c_allocator to avoid "reached unreachable code" panic in DebugAllocator when forking
     const alloc = std.heap.c_allocator;
