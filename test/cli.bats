@@ -153,22 +153,22 @@ load test_helper
 # Error handling
 # ============================================================================
 
-@test "unknown command: reports error" {
+@test "unknown command: reports error and exits non-zero" {
   run "$ZMX" foo
-  [ "$status" -eq 0 ]
+  [ "$status" -ne 0 ]
   [[ "$output" == *"Unknown command"* ]]
   [[ "$output" == *"--help"* ]]
 }
 
-@test "unknown top-level flag: reports error" {
+@test "unknown top-level flag: reports error and exits non-zero" {
   run "$ZMX" --bogus
-  [ "$status" -eq 0 ]
+  [ "$status" -ne 0 ]
   [[ "$output" == *"Invalid argument"* ]]
 }
 
-@test "list with unknown flag: reports error" {
+@test "list with unknown flag: reports error and exits non-zero" {
   run "$ZMX" list --bogus
-  [ "$status" -eq 0 ]
+  [ "$status" -ne 0 ]
   [[ "$output" == *"Invalid argument"* ]]
 }
 
@@ -178,16 +178,22 @@ load test_helper
   [[ "$output" == *"--force"* ]]
 }
 
-@test "kill with unknown flag: reports error" {
+@test "kill with unknown flag: reports error and exits non-zero" {
   run "$ZMX" kill --bogus
-  [ "$status" -eq 0 ]
+  [ "$status" -ne 0 ]
   [[ "$output" == *"Invalid argument"* ]]
 }
 
-@test "list with unexpected positional: reports error" {
+@test "list with unexpected positional: reports error and exits non-zero" {
   run "$ZMX" list blah
-  [ "$status" -eq 0 ]
+  [ "$status" -ne 0 ]
   [[ "$output" == *"Invalid argument"* ]]
+}
+
+@test "history --vt --html: mutually exclusive flags error" {
+  run "$ZMX" history test --vt --html
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"mutually exclusive"* ]]
 }
 
 # ============================================================================

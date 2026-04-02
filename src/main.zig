@@ -222,7 +222,7 @@ pub fn main() !void {
             diag.reportToFile(.stderr(), err) catch {};
         }
         stderr.flush() catch {};
-        return;
+        std.process.exit(1);
     };
     defer res.deinit();
 
@@ -248,7 +248,7 @@ pub fn main() !void {
                 .allocator = alloc,
             }) catch |err| {
                 list_diag.reportToFile(.stderr(), err) catch {};
-                return;
+                std.process.exit(1);
             };
             defer list_res.deinit();
 
@@ -265,7 +265,7 @@ pub fn main() !void {
                 .allocator = alloc,
             }) catch |err| {
                 comp_diag.reportToFile(.stderr(), err) catch {};
-                return;
+                std.process.exit(1);
             };
             defer comp_res.deinit();
 
@@ -284,7 +284,7 @@ pub fn main() !void {
                 .allocator = alloc,
             }) catch |err| {
                 hist_diag.reportToFile(.stderr(), err) catch {};
-                return;
+                std.process.exit(1);
             };
             defer hist_res.deinit();
 
@@ -293,6 +293,11 @@ pub fn main() !void {
             }
 
             var format: util.HistoryFormat = .plain;
+            if (hist_res.args.vt != 0 and hist_res.args.html != 0) {
+                const msg = "error: --vt and --html are mutually exclusive\n";
+                std.fs.File.stderr().writeAll(msg) catch {};
+                std.process.exit(1);
+            }
             if (hist_res.args.vt != 0) format = .vt;
             if (hist_res.args.html != 0) format = .html;
 
@@ -394,7 +399,7 @@ pub fn main() !void {
                 .allocator = alloc,
             }) catch |err| {
                 kill_diag.reportToFile(.stderr(), err) catch {};
-                return;
+                std.process.exit(1);
             };
             defer kill_res.deinit();
 
