@@ -240,9 +240,11 @@ pub fn main() !void {
             }
             sessions.deinit(alloc);
         }
+        var matched: bool = false;
         for (sessions.items) |session| {
             for (args_raw.items) |prefix| {
                 if (std.mem.startsWith(u8, session.name, prefix)) {
+                    matched = true;
                     rm(&cfg, session.name) catch |err| {
                         try stderr.print(
                             "failed to remove session={s}: {s}\n",
@@ -253,6 +255,16 @@ pub fn main() !void {
                     break;
                 }
             }
+        }
+        if (!matched) {
+            try stderr.print("error: no sessions matching", .{});
+            for (args_raw.items, 0..) |prefix, i| {
+                if (i > 0) try stderr.print(",", .{});
+                try stderr.print(" \"{s}\"", .{prefix});
+            }
+            try stderr.print("\n", .{});
+            try stderr.flush();
+            return error.SessionNotFound;
         }
         return;
     } else if (std.mem.eql(u8, cmd, "wait") or std.mem.eql(u8, cmd, "w")) {
