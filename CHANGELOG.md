@@ -4,6 +4,12 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
+### Added
+
+- New client leader policy: last client to send user input bytes (non-ansi escape codes) becomes the leader
+  - The client leader controls resizing and any other terminal state changes
+  - Non-leader clients are read-only until they send user input bytes and takeover leadership
+
 ### Changed
 
 - `zmx kill` now supports multiple args and it will kill sessions that match a prefix

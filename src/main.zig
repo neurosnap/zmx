@@ -122,6 +122,7 @@ pub fn main() !void {
             .command = command,
             .cwd = cwd,
             .created_at = @intCast(std.time.timestamp()),
+            .leader_client_fd = null,
         };
         daemon.socket_path = socket.getSocketPath(alloc, cfg.socket_dir, sesh) catch |err| switch (err) {
             error.NameTooLong => return socket.printSessionNameTooLong(sesh, cfg.socket_dir),
@@ -157,6 +158,7 @@ pub fn main() !void {
             .created_at = @intCast(std.time.timestamp()),
             .is_task_mode = true,
             .task_command = cmd_args_raw.items,
+            .leader_client_fd = undefined,
         };
         daemon.socket_path = socket.getSocketPath(alloc, cfg.socket_dir, sesh) catch |err| switch (err) {
             error.NameTooLong => return socket.printSessionNameTooLong(sesh, cfg.socket_dir),
@@ -334,6 +336,7 @@ const Daemon = struct {
     cfg: *Cfg,
     alloc: std.mem.Allocator,
     clients: std.ArrayList(*Client),
+    leader_client_fd: ?i32,
     session_name: []const u8,
     socket_path: []const u8,
     running: bool,
@@ -356,7 +359,7 @@ const Daemon = struct {
     }
 
     pub fn shutdown(self: *Daemon) void {
-        std.log.info("shutting down daemon session_name={s}", .{self.session_name});
+        std.log.info("shutting down daemon session={s}", .{self.session_name});
         self.running = false;
 
         for (self.clients.items) |client| {
@@ -538,7 +541,7 @@ const Daemon = struct {
                     posix.close(pty_fd);
                     _ = posix.waitpid(self.pid, 0);
                     posix.close(server_sock_fd);
-                    std.log.info("deleting socket file session_name={s}", .{self.session_name});
+                    std.log.info("deleting socket file session={s}", .{self.session_name});
                     dir.deleteFile(self.session_name) catch |err| {
                         std.log.warn("failed to delete socket file err={s}", .{@errorName(err)});
                     };
@@ -571,6 +574,7 @@ const Daemon = struct {
             );
             return;
         }
+        std.log.debug("buffering pty input data={x}", .{data});
         self.pty_write_buf.appendSlice(self.alloc, data) catch |err| {
             std.log.warn(
                 "pty input dropped {d} bytes: {s}",
@@ -579,8 +583,50 @@ const Daemon = struct {
         };
     }
 
-    pub fn handleInput(self: *Daemon, payload: []const u8) void {
-        self.queuePtyInput(payload);
+    pub fn handleInput(self: *Daemon, client: *Client, payload: []const u8) !void {
+        // client is leader, send entire payload (ansi escape codes + text)
+        if (self.leader_client_fd == client.socket_fd) {
+            self.queuePtyInput(payload);
+            return;
+        }
+
+        // quick check to see if a newline happened so we can set that client to leader
+        // without creating a ghostty vt
+        if (std.mem.indexOfScalar(u8, payload, '\r')) |_| {
+            std.log.info(
+                "setting new leader session={s} client_fd={d}",
+                .{ self.session_name, client.socket_fd },
+            );
+            self.leader_client_fd = client.socket_fd;
+            self.queuePtyInput(payload);
+            return;
+        }
+
+        // check if leader needs to be updated
+        // this is probably really ineffecient but it was the easiest and most robust way
+        // to strip ansi escape codes and only detect plain text to determine if we need
+        // to set a new leader
+        var termx = try ghostty_vt.Terminal.init(client.alloc, .{
+            .cols = 80,
+            .rows = 24,
+        });
+        defer termx.deinit(client.alloc);
+        var vt_stream = termx.vtStream();
+        defer vt_stream.deinit();
+        try vt_stream.nextSlice(payload);
+        if (util.serializeTerminal(client.alloc, &termx, .plain)) |output| {
+            defer client.alloc.free(output);
+            // if there's no text output then this client is effectively read-only until they type
+            if (output.len > 0) {
+                std.log.info(
+                    "setting new leader session={s} client_fd={d}",
+                    .{ self.session_name, client.socket_fd },
+                );
+                self.leader_client_fd = client.socket_fd;
+                // new leader is set to this client so send *entire* payload
+                self.queuePtyInput(payload);
+            }
+        }
     }
 
     pub fn handleInit(
@@ -591,6 +637,10 @@ const Daemon = struct {
         payload: []const u8,
     ) !void {
         if (payload.len != @sizeOf(ipc.Resize)) return;
+        // no leader is set so set one
+        if (self.leader_client_fd == null) {
+            self.leader_client_fd = client.socket_fd;
+        }
 
         const resize = std.mem.bytesToValue(ipc.Resize, payload);
 
@@ -635,11 +685,21 @@ const Daemon = struct {
 
     pub fn handleResize(
         self: *Daemon,
+        client: *Client,
         pty_fd: i32,
         term: *ghostty_vt.Terminal,
         payload: []const u8,
     ) !void {
         if (payload.len != @sizeOf(ipc.Resize)) return;
+        if (self.leader_client_fd == null) {
+            std.log.info(
+                "setting new leader session={s} client_fd={d}",
+                .{ self.session_name, client.socket_fd },
+            );
+            self.leader_client_fd = client.socket_fd;
+        }
+        // only leader can resize
+        if (self.leader_client_fd != client.socket_fd) return;
 
         const resize = std.mem.bytesToValue(ipc.Resize, payload);
         var ws: cross.c.struct_winsize = .{
@@ -654,7 +714,15 @@ const Daemon = struct {
     }
 
     pub fn handleDetach(self: *Daemon, client: *Client, i: usize) void {
-        std.log.info("client detach fd={d}", .{client.socket_fd});
+        std.log.info("client detach session={s} fd={d}", .{ self.session_name, client.socket_fd });
+        // leader is trying to disconnect, remove ref and let another client claim leader on input
+        if (self.leader_client_fd == client.socket_fd) {
+            std.log.info(
+                "unsetting leader session={s} fd={d}",
+                .{ self.session_name, client.socket_fd },
+            );
+            self.leader_client_fd = null;
+        }
         _ = self.closeClient(client, i, false);
     }
 
@@ -1680,9 +1748,9 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
 
                 while (client.read_buf.next()) |msg| {
                     switch (msg.header.tag) {
-                        .Input => daemon.handleInput(msg.payload),
+                        .Input => try daemon.handleInput(client, msg.payload),
                         .Init => try daemon.handleInit(client, pty_fd, &term, msg.payload),
-                        .Resize => try daemon.handleResize(pty_fd, &term, msg.payload),
+                        .Resize => try daemon.handleResize(client, pty_fd, &term, msg.payload),
                         .Detach => {
                             daemon.handleDetach(client, i);
                             break :clients_loop;
