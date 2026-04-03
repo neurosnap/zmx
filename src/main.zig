@@ -635,6 +635,27 @@ const Daemon = struct {
         }
     }
 
+    pub fn handleSwitch(self: *Daemon, session_name: []const u8) !void {
+        for (self.clients.items) |client| {
+            if (self.leader_client_fd == client.socket_fd) {
+                ipc.appendMessage(
+                    self.alloc,
+                    &client.write_buf,
+                    .Switch,
+                    session_name,
+                ) catch |err| {
+                    std.log.warn(
+                        "failed to buffer terminal state for client err={s}",
+                        .{@errorName(err)},
+                    );
+                };
+                client.has_pending_output = true;
+                return;
+            }
+        }
+        return error.NoLeaderFound;
+    }
+
     pub fn handleInit(
         self: *Daemon,
         client: *Client,
@@ -1197,10 +1218,46 @@ fn history(cfg: *Cfg, session_name: []const u8, format: util.HistoryFormat) !voi
     }
 }
 
+fn switchSesh(daemon: *Daemon, current_sesh: []const u8) !void {
+    // we want daemon.session_name because that's the session name the user provided during zmx attach
+    // instead of the name of the session they are currently inside of.
+    const next_session = daemon.session_name;
+
+    const socket_path = socket.getSocketPath(daemon.alloc, daemon.cfg.socket_dir, current_sesh) catch |err| switch (err) {
+        error.NameTooLong => return socket.printSessionNameTooLong(current_sesh, daemon.cfg.socket_dir),
+        error.OutOfMemory => return err,
+    };
+    defer daemon.alloc.free(socket_path);
+
+    var dir = try std.fs.openDirAbsolute(daemon.cfg.socket_dir, .{});
+    defer dir.close();
+
+    const exists = try socket.sessionExists(dir, current_sesh);
+    if (!exists) {
+        var buf: [4096]u8 = undefined;
+        var w = std.fs.File.stderr().writer(&buf);
+        w.interface.print("error: session \"{s}\" does not exist\n", .{current_sesh}) catch {};
+        w.interface.flush() catch {};
+        return error.SessionNotFound;
+    }
+    const result = ipc.probeSession(daemon.alloc, socket_path) catch |err| {
+        std.log.err("session unresponsive: {s}", .{@errorName(err)});
+        if (err == error.ConnectionRefused) socket.cleanupStaleSocket(dir, current_sesh);
+        return;
+    };
+    defer posix.close(result.fd);
+
+    ipc.send(result.fd, .Switch, next_session) catch |err| switch (err) {
+        error.BrokenPipe, error.ConnectionResetByPeer => return,
+        else => return err,
+    };
+}
+
 fn attach(daemon: *Daemon) !void {
     const sesh = socket.getSeshNameFromEnv();
     if (sesh.len > 0) {
-        return error.CannotAttachToSessionInSession;
+        return switchSesh(daemon, sesh);
+        // return error.CannotAttachToSessionInSession;
     }
 
     const result = try daemon.ensureSession();
@@ -1264,7 +1321,42 @@ fn attach(daemon: *Daemon) !void {
     const clear_seq = "\x1b[2J\x1b[H";
     _ = try posix.write(posix.STDOUT_FILENO, clear_seq);
 
-    try clientLoop(client_sock);
+    const looper = try clientLoop(client_sock);
+    switch (looper.kind) {
+        .detach => return,
+        .switch_session => {
+            if (looper.session_name) |session_name| {
+                var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const cwd = std.posix.getcwd(&cwd_buf) catch "";
+                const target_path = socket.getSocketPath(
+                    daemon.alloc,
+                    daemon.cfg.socket_dir,
+                    session_name,
+                ) catch |err| switch (err) {
+                    error.NameTooLong => return socket.printSessionNameTooLong(
+                        session_name,
+                        daemon.cfg.socket_dir,
+                    ),
+                    error.OutOfMemory => return err,
+                };
+
+                const clients = try std.ArrayList(*Client).initCapacity(daemon.alloc, 10);
+                var target_daemon = Daemon{
+                    .running = true,
+                    .cfg = daemon.cfg,
+                    .alloc = daemon.alloc,
+                    .clients = clients,
+                    .session_name = session_name,
+                    .socket_path = target_path,
+                    .pid = undefined,
+                    .cwd = cwd,
+                    .created_at = @intCast(std.time.timestamp()),
+                    .leader_client_fd = null,
+                };
+                return attach(&target_daemon);
+            }
+        },
+    }
 }
 
 fn run(daemon: *Daemon, command_args: [][]const u8) !void {
@@ -1398,9 +1490,17 @@ fn run(daemon: *Daemon, command_args: [][]const u8) !void {
     return error.NoAckReceived;
 }
 
+const ClientResult = struct {
+    kind: enum {
+        detach,
+        switch_session,
+    },
+    session_name: ?[]const u8,
+};
+
 /// clientLoop sends ipc commands to its corresponding daemon.  It uses poll() as its non-blocking
 /// mechanism. It will send stdin to the daemon and receive stdout from the daemon.
-fn clientLoop(client_sock_fd: i32) !void {
+fn clientLoop(client_sock_fd: i32) !ClientResult {
     // use c_allocator to avoid "reached unreachable code" panic in DebugAllocator when forking
     const alloc = std.heap.c_allocator;
     defer posix.close(client_sock_fd);
@@ -1496,7 +1596,7 @@ fn clientLoop(client_sock_fd: i32) !void {
                     }
                 } else {
                     // EOF on stdin
-                    return;
+                    return ClientResult{ .kind = .detach, .session_name = null };
                 }
             }
         }
@@ -1506,13 +1606,14 @@ fn clientLoop(client_sock_fd: i32) !void {
             const n = read_buf.read(client_sock_fd) catch |err| {
                 if (err == error.WouldBlock) continue;
                 if (err == error.ConnectionResetByPeer or err == error.BrokenPipe) {
-                    return;
+                    return ClientResult{ .kind = .detach, .session_name = null };
                 }
                 std.log.err("daemon read err={s}", .{@errorName(err)});
                 return err;
             };
             if (n == 0) {
-                return; // Server closed connection
+                // Server closed connection
+                return ClientResult{ .kind = .detach, .session_name = null };
             }
 
             while (read_buf.next()) |msg| {
@@ -1533,6 +1634,9 @@ fn clientLoop(client_sock_fd: i32) !void {
                             std.mem.asBytes(&next_size),
                         );
                     },
+                    .Switch => {
+                        return ClientResult{ .kind = .switch_session, .session_name = try alloc.dupe(u8, msg.payload) };
+                    },
                     else => {},
                 }
             }
@@ -1544,7 +1648,7 @@ fn clientLoop(client_sock_fd: i32) !void {
                 const n = posix.write(client_sock_fd, sock_write_buf.items) catch |err| blk: {
                     if (err == error.WouldBlock) break :blk 0;
                     if (err == error.ConnectionResetByPeer or err == error.BrokenPipe) {
-                        return;
+                        return ClientResult{ .kind = .detach, .session_name = null };
                     }
                     return err;
                 };
@@ -1565,7 +1669,7 @@ fn clientLoop(client_sock_fd: i32) !void {
         }
 
         if (poll_fds.items[1].revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
-            return;
+            return ClientResult{ .kind = .detach, .session_name = null };
         }
     }
 }
@@ -1766,6 +1870,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                     switch (msg.header.tag) {
                         .Input => try daemon.handleInput(client, msg.payload),
                         .Init => try daemon.handleInit(client, pty_fd, &term, msg.payload),
+                        .Switch => try daemon.handleSwitch(msg.payload),
                         .Resize => try daemon.handleResize(client, pty_fd, &term, msg.payload),
                         .Detach => {
                             daemon.handleDetach(client, i);
