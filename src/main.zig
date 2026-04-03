@@ -1261,7 +1261,62 @@ fn attach(daemon: *Daemon) !void {
     const clear_seq = "\x1b[2J\x1b[H";
     _ = try posix.write(posix.STDOUT_FILENO, clear_seq);
 
-    try clientLoop(client_sock);
+    const alloc = daemon.alloc;
+
+    const looper = try clientLoop(client_sock);
+    switch (looper) {
+        .detach => return,
+        .cycle_session => {
+            var sessions = try util.get_session_entries(alloc, daemon.cfg.socket_dir);
+            defer {
+                for (sessions.items) |session| {
+                    session.deinit(alloc);
+                }
+                sessions.deinit(alloc);
+            }
+
+            if (sessions.items.len == 1) {
+                return;
+            }
+
+            std.mem.sort(util.SessionEntry, sessions.items, {}, util.SessionEntry.lessThan);
+
+            var found: usize = 0;
+            for (sessions.items, 0..) |session, idx| {
+                if (std.mem.eql(u8, session.name, daemon.session_name)) {
+                    found = idx;
+                }
+            }
+            if (found == sessions.items.len-1) {
+                found = 0;
+            } else {
+                found += 1;
+            }
+
+            const target = sessions.items[found].name;
+            const target_path = socket.getSocketPath(alloc, daemon.cfg.socket_dir, target) catch |err| switch (err) {
+                error.NameTooLong => return socket.printSessionNameTooLong(target, daemon.cfg.socket_dir),
+                error.OutOfMemory => return err,
+            };
+
+            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const cwd = std.posix.getcwd(&cwd_buf) catch "";
+
+            const clients = try std.ArrayList(*Client).initCapacity(alloc, 10);
+            var target_daemon = Daemon{
+                .running = true,
+                .cfg = daemon.cfg,
+                .alloc = alloc,
+                .clients = clients,
+                .session_name = target,
+                .socket_path = target_path,
+                .pid = undefined,
+                .cwd = cwd,
+                .created_at = @intCast(std.time.timestamp()),
+            };
+            return attach(&target_daemon);
+        },
+    }
 }
 
 fn run(daemon: *Daemon, command_args: [][]const u8) !void {
@@ -1397,7 +1452,12 @@ fn run(daemon: *Daemon, command_args: [][]const u8) !void {
 
 /// clientLoop sends ipc commands to its corresponding daemon.  It uses poll() as its non-blocking
 /// mechanism. It will send stdin to the daemon and receive stdout from the daemon.
-fn clientLoop(client_sock_fd: i32) !void {
+const ClientResult = enum {
+    detach,
+    cycle_session,
+};
+
+fn clientLoop(client_sock_fd: i32) !ClientResult {
     // use c_allocator to avoid "reached unreachable code" panic in DebugAllocator when forking
     const alloc = std.heap.c_allocator;
     defer posix.close(client_sock_fd);
@@ -1487,13 +1547,15 @@ fn clientLoop(client_sock_fd: i32) !void {
                 if (n > 0) {
                     // Check for detach sequences (ctrl+\ as first byte or Kitty escape sequence)
                     if (buf[0] == 0x1C or util.isKittyCtrlBackslash(buf[0..n])) {
-                        try ipc.appendMessage(alloc, &sock_write_buf, .Detach, "");
+                        return .detach;
+                    } else if (buf[0] == 0x1D or util.isKittyCtrlRightBracket(buf[0..n])) {
+                        return .cycle_session;
                     } else {
                         try ipc.appendMessage(alloc, &sock_write_buf, .Input, buf[0..n]);
                     }
                 } else {
                     // EOF on stdin
-                    return;
+                    return .detach;
                 }
             }
         }
@@ -1503,13 +1565,13 @@ fn clientLoop(client_sock_fd: i32) !void {
             const n = read_buf.read(client_sock_fd) catch |err| {
                 if (err == error.WouldBlock) continue;
                 if (err == error.ConnectionResetByPeer or err == error.BrokenPipe) {
-                    return;
+                    return .detach;
                 }
                 std.log.err("daemon read err={s}", .{@errorName(err)});
                 return err;
             };
             if (n == 0) {
-                return; // Server closed connection
+                return .detach; // Server closed connection
             }
 
             while (read_buf.next()) |msg| {
@@ -1530,7 +1592,7 @@ fn clientLoop(client_sock_fd: i32) !void {
                 const n = posix.write(client_sock_fd, sock_write_buf.items) catch |err| blk: {
                     if (err == error.WouldBlock) break :blk 0;
                     if (err == error.ConnectionResetByPeer or err == error.BrokenPipe) {
-                        return;
+                        return .detach;
                     }
                     return err;
                 };
@@ -1551,9 +1613,10 @@ fn clientLoop(client_sock_fd: i32) !void {
         }
 
         if (poll_fds.items[1].revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
-            return;
+            return .detach;
         }
     }
+    return .detach;
 }
 
 /// dameonLoop is what the daemon runs to send and receive ipc commands from its corresponding

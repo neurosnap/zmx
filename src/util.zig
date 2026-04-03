@@ -220,25 +220,33 @@ pub fn findTaskExitMarker(output: []const u8) ?u8 {
 /// and alternate key sub-fields from the kitty protocol's progressive
 /// enhancement flags.
 pub fn isKittyCtrlBackslash(buf: []const u8) bool {
-    // Scan for any CSI u sequence encoding Ctrl+\ in the buffer.
+    return isKittyCtrlKey(buf, 92);
+}
+
+pub fn isKittyCtrlRightBracket(buf: []const u8) bool {
+    return isKittyCtrlKey(buf, 93);
+}
+
+fn isKittyCtrlKey(buf: []const u8, key_code: u32) bool {
+    // Scan for any CSI u sequence encoding the given Ctrl+key in the buffer.
     // The sequence can appear at any offset (e.g. preceded by other input).
     var i: usize = 0;
     while (i + 2 < buf.len) : (i += 1) {
         if (buf[i] == 0x1b and buf[i + 1] == '[') {
-            if (parseKittyCtrlBackslash(buf[i + 2 ..])) return true;
+            if (parseKittyCtrlKey(buf[i + 2 ..], key_code)) return true;
         }
     }
     return false;
 }
 
 /// Parse a CSI u sequence (after the `\x1b[` prefix) and return true if it
-/// encodes a Ctrl+\ press or repeat event.
-fn parseKittyCtrlBackslash(buf: []const u8) bool {
+/// encodes a Ctrl+key press or repeat event for the given key code.
+fn parseKittyCtrlKey(buf: []const u8, expected_key: u32) bool {
     var pos: usize = 0;
 
-    // 1. Parse key code -- must be 92 (backslash).
+    // 1. Parse key code.
     const key_code = parseDecimal(buf, &pos) orelse return false;
-    if (key_code != 92) return false;
+    if (key_code != expected_key) return false;
 
     // 2. Skip any ':alternate-key' sub-fields (shifted key, base layout key).
     while (pos < buf.len and buf[pos] == ':') {
