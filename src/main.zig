@@ -336,6 +336,8 @@ const Daemon = struct {
     cfg: *Cfg,
     alloc: std.mem.Allocator,
     clients: std.ArrayList(*Client),
+    // This control which client is the leader.  The leader controls terminal state and
+    // cols/rows of session.
     leader_client_fd: ?i32,
     session_name: []const u8,
     socket_path: []const u8,
