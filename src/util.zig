@@ -220,24 +220,22 @@ pub fn findTaskExitMarker(output: []const u8) ?u8 {
 /// and alternate key sub-fields from the kitty protocol's progressive
 /// enhancement flags.
 pub fn isKittyCtrlBackslash(buf: []const u8) bool {
-    return isKittyCtrlKey(buf, 92);
+    return detectCsiKeyPress(buf, 92, 0b100);
 }
 
-fn isKittyCtrlKey(buf: []const u8, key_code: u32) bool {
+fn detectCsiKeyPress(buf: []const u8, expected_key: u32, expected_mods: u32) bool {
     // Scan for any CSI u sequence encoding the given Ctrl+key in the buffer.
     // The sequence can appear at any offset (e.g. preceded by other input).
     var i: usize = 0;
     while (i + 2 < buf.len) : (i += 1) {
         if (buf[i] == 0x1b and buf[i + 1] == '[') {
-            if (parseKittyCtrlKey(buf[i + 2 ..], key_code)) return true;
+            if (isKeyPressed(buf[i + 2 ..], expected_key, expected_mods)) return true;
         }
     }
     return false;
 }
 
-/// Parse a CSI u sequence (after the `\x1b[` prefix) and return true if it
-/// encodes a Ctrl+key press or repeat event for the given key code.
-fn parseKittyCtrlKey(buf: []const u8, expected_key: u32) bool {
+fn isKeyPressed(buf: []const u8, expected_key: u32, expected_mods: u32) bool {
     var pos: usize = 0;
 
     // 1. Parse key code.
@@ -259,11 +257,11 @@ fn parseKittyCtrlKey(buf: []const u8, expected_key: u32) bool {
     if (mod_encoded < 1) return false;
     const mod_raw = mod_encoded - 1;
 
-    // 5. Ctrl must be the only intentional modifier. Lock modifiers
+    // 5. Only accept intentional modifiers. Lock modifiers
     //    (caps_lock=0b1000000, num_lock=0b10000000) are tolerated because
     //    they are ambient state, not deliberate key combinations.
     const intentional_mods = mod_raw & 0b00111111;
-    if (intentional_mods != 0b100) return false;
+    if (intentional_mods != expected_mods) return false;
 
     // 6. Parse optional event type after ':'.
     if (pos < buf.len and buf[pos] == ':') {
@@ -735,9 +733,9 @@ test "serializeTerminalState excludes synchronized output replay" {
     var stream = term.vtStream();
     defer stream.deinit();
 
-    stream.nextSlice("\x1b[?2004h"); // Bracketed paste
-    stream.nextSlice("\x1b[?2026h"); // Synchronized output
-    stream.nextSlice("hello");
+    try stream.nextSlice("\x1b[?2004h"); // Bracketed paste
+    try stream.nextSlice("\x1b[?2026h"); // Synchronized output
+    try stream.nextSlice("hello");
 
     try std.testing.expect(term.modes.get(.bracketed_paste));
     try std.testing.expect(term.modes.get(.synchronized_output));
@@ -755,7 +753,7 @@ test "serializeTerminalState excludes synchronized output replay" {
 
     var restored_stream = restored.vtStream();
     defer restored_stream.deinit();
-    restored_stream.nextSlice(output);
+    try restored_stream.nextSlice(output);
 
     try std.testing.expect(restored.modes.get(.bracketed_paste));
     try std.testing.expect(!restored.modes.get(.synchronized_output));

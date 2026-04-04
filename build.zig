@@ -64,8 +64,22 @@ pub fn build(b: *std.Build) void {
     // Test
     {
         const test_step = b.step("test", "Run unit tests");
+        const test_module = b.addModule("test", .{
+            .root_source_file = b.path("src/test.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        if (b.lazyDependency("ghostty", .{
+            .target = target,
+            .optimize = optimize,
+        })) |dep| {
+            test_module.addImport(
+                "ghostty-vt",
+                dep.module("ghostty-vt"),
+            );
+        }
         const exe_unit_tests = b.addTest(.{
-            .root_module = exe_mod,
+            .root_module = test_module,
         });
         const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
         test_step.dependOn(&run_exe_unit_tests.step);
