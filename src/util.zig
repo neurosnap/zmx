@@ -218,7 +218,7 @@ pub fn isCtrlBackslash(buf: []const u8) bool {
 
 /// Detects vt100 or kitty keyboard protocol escape sequence for up arrow.
 pub fn isUpArrow(buf: []const u8) bool {
-    return std.mem.eql(u8, buf, "\x1b[A") or std.mem.eql(u8, buf, "\x1b[26;1u");
+    return std.mem.eql(u8, buf, "\x1b[A") or std.mem.eql(u8, buf, "\x1b[1;1:1A");
 }
 
 fn isKeyPressed(buf: []const u8, expected_key: u32, expected_mods: u32) bool {
