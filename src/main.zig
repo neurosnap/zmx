@@ -586,6 +586,7 @@ const Daemon = struct {
     }
 
     pub fn handleInput(self: *Daemon, client: *Client, payload: []const u8) !void {
+        std.log.debug("buffering pty input data={x}", .{payload});
         // client is leader, send entire payload (ansi escape codes + text)
         if (self.leader_client_fd == client.socket_fd) {
             self.queuePtyInput(payload);
@@ -594,7 +595,9 @@ const Daemon = struct {
 
         // quick check to see if a newline happened so we can set that client to leader
         // without creating a ghostty vt
-        if (std.mem.indexOfScalar(u8, payload, '\r')) |_| {
+        const isNewline = std.mem.indexOfScalar(u8, payload, '\r') != null;
+        const isUpArrow = std.mem.eql(u8, payload, "\x1b[A") or util.isUpArrow(payload);
+        if (isNewline or isUpArrow) {
             std.log.info(
                 "setting new leader session={s} client_fd={d}",
                 .{ self.session_name, client.socket_fd },
@@ -1486,7 +1489,7 @@ fn clientLoop(client_sock_fd: i32) !void {
             if (n_opt) |n| {
                 if (n > 0) {
                     // Check for detach sequences (ctrl+\ as first byte or Kitty escape sequence)
-                    if (buf[0] == 0x1C or util.isKittyCtrlBackslash(buf[0..n])) {
+                    if (util.isCtrlBackslash(buf[0..n])) {
                         try ipc.appendMessage(alloc, &sock_write_buf, .Detach, "");
                     } else {
                         try ipc.appendMessage(alloc, &sock_write_buf, .Input, buf[0..n]);

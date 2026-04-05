@@ -211,31 +211,35 @@ pub fn findTaskExitMarker(output: []const u8) ?u8 {
 }
 
 /// Detects Kitty keyboard protocol escape sequence for Ctrl+\.
-/// Parses the general CSI u form:
-///   CSI key-code[:alternates] ; modifiers[:event-type] [; text-codepoints] u
-///
-/// Matches when key-code is 92 (backslash), ctrl bit is set in modifiers,
-/// and event type is press (1 or absent) or repeat (2). Rejects release (3).
-/// Tolerates additional modifiers (caps_lock, num_lock)
-/// and alternate key sub-fields from the kitty protocol's progressive
-/// enhancement flags.
-pub fn isKittyCtrlBackslash(buf: []const u8) bool {
-    return detectCsiKeyPress(buf, 92, 0b100);
+pub fn isCtrlBackslash(buf: []const u8) bool {
+    if (buf.len == 0) return false;
+    return buf[0] == 0x1C or isKeyPressed(buf, 0x5c, 0b100);
 }
 
-fn detectCsiKeyPress(buf: []const u8, expected_key: u32, expected_mods: u32) bool {
-    // Scan for any CSI u sequence encoding the given Ctrl+key in the buffer.
-    // The sequence can appear at any offset (e.g. preceded by other input).
+/// Detects vt100 or kitty keyboard protocol escape sequence for up arrow.
+pub fn isUpArrow(buf: []const u8) bool {
+    return std.mem.eql(u8, buf, "\x1b[A") or std.mem.eql(u8, buf, "\x1b[26;1u");
+}
+
+fn isKeyPressed(buf: []const u8, expected_key: u32, expected_mods: u32) bool {
+    // Scan for any CSI u sequence encoding in the buffer.
     var i: usize = 0;
     while (i + 2 < buf.len) : (i += 1) {
         if (buf[i] == 0x1b and buf[i + 1] == '[') {
-            if (isKeyPressed(buf[i + 2 ..], expected_key, expected_mods)) return true;
+            if (keypressWithMod(buf[i + 2 ..], expected_key, expected_mods)) return true;
         }
     }
     return false;
 }
 
-fn isKeyPressed(buf: []const u8, expected_key: u32, expected_mods: u32) bool {
+/// Parses the general CSI u form:
+///   CSI key-code[:alternates] ; modifiers[:event-type] [; text-codepoints] u
+///
+/// Event type is press (1 or absent) or repeat (2). Rejects release (3).
+/// Tolerates additional modifiers (caps_lock, num_lock)
+/// and alternate key sub-fields from the kitty protocol's progressive
+/// enhancement flags.
+fn keypressWithMod(buf: []const u8, expected_key: u32, expected_mods: u32) bool {
     var pos: usize = 0;
 
     // 1. Parse key code.
@@ -261,7 +265,7 @@ fn isKeyPressed(buf: []const u8, expected_key: u32, expected_mods: u32) bool {
     //    (caps_lock=0b1000000, num_lock=0b10000000) are tolerated because
     //    they are ambient state, not deliberate key combinations.
     const intentional_mods = mod_raw & 0b00111111;
-    if (intentional_mods != expected_mods) return false;
+    if (expected_mods > 0 and expected_mods != intentional_mods) return false;
 
     // 6. Parse optional event type after ':'.
     if (pos < buf.len and buf[pos] == ':') {
@@ -634,95 +638,95 @@ test "shellQuote" {
     try std.testing.expectEqualStrings("'hello'", plain);
 }
 
-test "isKittyCtrlBackslash" {
+test "isCtrlBackslash" {
     const expect = std.testing.expect;
 
     // Basic: ctrl only (modifier 5 = 1 + 4)
-    try expect(isKittyCtrlBackslash("\x1b[92;5u"));
+    try expect(isCtrlBackslash("\x1b[92;5u"));
 
     // Explicit press event type (:1)
-    try expect(isKittyCtrlBackslash("\x1b[92;5:1u"));
+    try expect(isCtrlBackslash("\x1b[92;5:1u"));
 
     // Repeat event (:2) -- user holding Ctrl+\
-    try expect(isKittyCtrlBackslash("\x1b[92;5:2u"));
+    try expect(isCtrlBackslash("\x1b[92;5:2u"));
 
     // Release event (:3) -- must NOT trigger detach
-    try expect(!isKittyCtrlBackslash("\x1b[92;5:3u"));
+    try expect(!isCtrlBackslash("\x1b[92;5:3u"));
 
     // Lock modifiers: caps_lock (bit 6) changes modifier value
     // ctrl + caps_lock = 1 + (4 + 64) = 69
-    try expect(isKittyCtrlBackslash("\x1b[92;69u"));
-    try expect(isKittyCtrlBackslash("\x1b[92;69:1u"));
-    try expect(!isKittyCtrlBackslash("\x1b[92;69:3u"));
+    try expect(isCtrlBackslash("\x1b[92;69u"));
+    try expect(isCtrlBackslash("\x1b[92;69:1u"));
+    try expect(!isCtrlBackslash("\x1b[92;69:3u"));
 
     // ctrl + num_lock = 1 + (4 + 128) = 133
-    try expect(isKittyCtrlBackslash("\x1b[92;133u"));
+    try expect(isCtrlBackslash("\x1b[92;133u"));
 
     // ctrl + caps_lock + num_lock = 1 + (4 + 64 + 128) = 197
-    try expect(isKittyCtrlBackslash("\x1b[92;197u"));
+    try expect(isCtrlBackslash("\x1b[92;197u"));
 
     // Combined intentional modifiers -- must NOT match (ctrl+\ is the
     // detach key, not ctrl+shift+\ or ctrl+alt+\)
     // ctrl + shift = 1 + (4 + 1) = 6
-    try expect(!isKittyCtrlBackslash("\x1b[92;6u"));
+    try expect(!isCtrlBackslash("\x1b[92;6u"));
 
     // ctrl + alt = 1 + (4 + 2) = 7
-    try expect(!isKittyCtrlBackslash("\x1b[92;7u"));
+    try expect(!isCtrlBackslash("\x1b[92;7u"));
 
     // ctrl + super = 1 + (4 + 8) = 13
-    try expect(!isKittyCtrlBackslash("\x1b[92;13u"));
+    try expect(!isCtrlBackslash("\x1b[92;13u"));
 
     // ctrl + shift + caps_lock = 1 + (1 + 4 + 64) = 70 -- shift is intentional
-    try expect(!isKittyCtrlBackslash("\x1b[92;70u"));
+    try expect(!isCtrlBackslash("\x1b[92;70u"));
 
     // ctrl + shift + num_lock = 1 + (1 + 4 + 128) = 134 -- shift is intentional
-    try expect(!isKittyCtrlBackslash("\x1b[92;134u"));
+    try expect(!isCtrlBackslash("\x1b[92;134u"));
 
     // Modifier without ctrl bit -- must NOT match
     // shift only = 1 + 1 = 2
-    try expect(!isKittyCtrlBackslash("\x1b[92;1u"));
-    try expect(!isKittyCtrlBackslash("\x1b[92;2u"));
+    try expect(!isCtrlBackslash("\x1b[92;1u"));
+    try expect(!isCtrlBackslash("\x1b[92;2u"));
 
     // Alternate key sub-fields (report_alternates flag)
     // shifted key | (124): \x1b[92:124;5u
-    try expect(isKittyCtrlBackslash("\x1b[92:124;5u"));
+    try expect(isCtrlBackslash("\x1b[92:124;5u"));
 
     // base layout key only (non-US keyboard): \x1b[92::92;5u
-    try expect(isKittyCtrlBackslash("\x1b[92::92;5u"));
+    try expect(isCtrlBackslash("\x1b[92::92;5u"));
 
     // both shifted and base layout: \x1b[92:124:92;5u
-    try expect(isKittyCtrlBackslash("\x1b[92:124:92;5u"));
+    try expect(isCtrlBackslash("\x1b[92:124:92;5u"));
 
     // Alternate keys + lock modifiers + event type
-    try expect(isKittyCtrlBackslash("\x1b[92:124;69:1u"));
-    try expect(!isKittyCtrlBackslash("\x1b[92:124;69:3u"));
+    try expect(isCtrlBackslash("\x1b[92:124;69:1u"));
+    try expect(!isCtrlBackslash("\x1b[92:124;69:3u"));
 
     // Text codepoints section (flag 0b10000) -- tolerated and skipped
     // Even though ctrl+\ text is typically empty, terminals may vary
-    try expect(isKittyCtrlBackslash("\x1b[92;5;28u"));
-    try expect(isKittyCtrlBackslash("\x1b[92;5;28:92u"));
+    try expect(isCtrlBackslash("\x1b[92;5;28u"));
+    try expect(isCtrlBackslash("\x1b[92;5;28:92u"));
 
     // Wrong key code -- must NOT match
-    try expect(!isKittyCtrlBackslash("\x1b[91;5u"));
-    try expect(!isKittyCtrlBackslash("\x1b[93;5u"));
-    try expect(!isKittyCtrlBackslash("\x1b[9;5u"));
-    try expect(!isKittyCtrlBackslash("\x1b[920;5u"));
+    try expect(!isCtrlBackslash("\x1b[91;5u"));
+    try expect(!isCtrlBackslash("\x1b[93;5u"));
+    try expect(!isCtrlBackslash("\x1b[9;5u"));
+    try expect(!isCtrlBackslash("\x1b[920;5u"));
 
     // Sequence embedded in larger buffer (e.g., preceded by other input)
-    try expect(isKittyCtrlBackslash("abc\x1b[92;5u"));
-    try expect(isKittyCtrlBackslash("\x1b[A\x1b[92;5u"));
+    try expect(isCtrlBackslash("abc\x1b[92;5u"));
+    try expect(isCtrlBackslash("\x1b[A\x1b[92;5u"));
 
     // Garbage / malformed inputs
-    try expect(!isKittyCtrlBackslash("garbage"));
-    try expect(!isKittyCtrlBackslash(""));
-    try expect(!isKittyCtrlBackslash("\x1b["));
-    try expect(!isKittyCtrlBackslash("\x1b[92"));
-    try expect(!isKittyCtrlBackslash("\x1b[92;"));
-    try expect(!isKittyCtrlBackslash("\x1b[92;u"));
-    try expect(!isKittyCtrlBackslash("\x1b[;5u"));
+    try expect(!isCtrlBackslash("garbage"));
+    try expect(!isCtrlBackslash(""));
+    try expect(!isCtrlBackslash("\x1b["));
+    try expect(!isCtrlBackslash("\x1b[92"));
+    try expect(!isCtrlBackslash("\x1b[92;"));
+    try expect(!isCtrlBackslash("\x1b[92;u"));
+    try expect(!isCtrlBackslash("\x1b[;5u"));
 
     // Other CSI u sequences that happen to contain '92' elsewhere
-    try expect(!isKittyCtrlBackslash("\x1b[65;92u"));
+    try expect(!isCtrlBackslash("\x1b[65;92u"));
 }
 
 test "serializeTerminalState excludes synchronized output replay" {
