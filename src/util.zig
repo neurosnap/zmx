@@ -315,9 +315,67 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
         term.modes.set(.synchronized_output, false);
     }
 
-    var term_formatter = ghostty_vt.formatter.TerminalFormatter.init(term, .vt);
-    term_formatter.content = .{ .selection = null };
-    term_formatter.extra = .{
+    const pages = &term.screens.active.pages;
+    const screen_top = pages.getTopLeft(.screen);
+    const active_top = pages.getTopLeft(.active);
+    const has_scrollback = !screen_top.eql(active_top);
+
+    // Two-phase serialization to preserve scrollback without corrupting
+    // cursor positions. This matters for nested zmx sessions (zmx→SSH→zmx)
+    // where the outer daemon's ghostty-vt accumulates inner session scrollback.
+    //
+    // Phase 1: Emit scrollback content (plain text with styles, no terminal extras).
+    // These lines scroll past the visible area into the terminal's scrollback buffer.
+    // Phase 2: Clear visible screen, then emit visible content with full extras.
+    // The clear ensures visible content starts from a clean slate regardless of
+    // how much scrollback preceded it. CUP cursor positioning is then correct.
+    //
+    // See: https://github.com/neurosnap/zmx/issues/31
+
+    // Phase 1: scrollback only (if any exists)
+    if (has_scrollback) {
+        if (active_top.up(1)) |sb_bottom_row| {
+            var sb_bottom = sb_bottom_row;
+            sb_bottom.x = @intCast(pages.cols - 1);
+
+            var scroll_fmt = ghostty_vt.formatter.TerminalFormatter.init(term, .vt);
+            scroll_fmt.content = .{ .selection = ghostty_vt.Selection.init(
+                screen_top,
+                sb_bottom,
+                false,
+            ) };
+            scroll_fmt.extra = .none; // no modes, cursor, keyboard — just content
+            scroll_fmt.format(&builder.writer) catch |err| {
+                std.log.warn("failed to format scrollback err={s}", .{@errorName(err)});
+            };
+        }
+
+        // Clear visible screen after scrollback. \x1b[2J clears only the visible
+        // rows (not the scrollback buffer). \x1b[H homes the cursor. \x1b[0m resets
+        // SGR style so phase 1 styles don't bleed into phase 2.
+        builder.writer.writeAll("\x1b[2J\x1b[H\x1b[0m") catch {};
+    }
+
+    // Phase 2: visible screen with full extras (modes, cursor, keyboard, etc.)
+    var vis_fmt = ghostty_vt.formatter.TerminalFormatter.init(term, .vt);
+
+    // Restrict content to the active viewport only
+    const active_tl = pages.pin(.{ .active = .{ .x = 0, .y = 0 } });
+    const active_br = pages.pin(.{ .active = .{
+        .x = @intCast(pages.cols - 1),
+        .y = @intCast(pages.rows - 1),
+    } });
+
+    if (active_tl != null and active_br != null) {
+        vis_fmt.content = .{ .selection = ghostty_vt.Selection.init(
+            active_tl.?,
+            active_br.?,
+            false,
+        ) };
+    }
+    // Fallback: if pins are somehow invalid, use null selection (all content)
+
+    vis_fmt.extra = .{
         .palette = false,
         .modes = true,
         .scrolling_region = true,
@@ -327,7 +385,7 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
         .screen = .all,
     };
 
-    term_formatter.format(&builder.writer) catch |err| {
+    vis_fmt.format(&builder.writer) catch |err| {
         std.log.warn("failed to format terminal state err={s}", .{@errorName(err)});
         return null;
     };
@@ -755,4 +813,308 @@ test "serializeTerminalState excludes synchronized output replay" {
     // but NOT synchronized output (DECSET 2026)
     try std.testing.expect(std.mem.indexOf(u8, output, "\x1b[?2004h") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "\x1b[?2026h") == null);
+}
+
+// ---------------------------------------------------------------------------
+// Integration tests: serializeTerminalState roundtrip verification
+//
+// These tests exercise the ghostty-vt roundtrip pattern:
+//   1. Create Terminal A, feed VT sequences (scrollback, markers, cursor)
+//   2. Serialize A via serializeTerminalState()
+//   3. Create Terminal B (same dimensions), feed serialized bytes
+//   4. Compare B's screen content and cursor with A's
+//
+// This verifies that what the user sees after re-attach matches what the
+// daemon's terminal state actually contains — including in nested sessions
+// (zmx→SSH→zmx) where serialized state flows through multiple layers.
+// ---------------------------------------------------------------------------
+
+fn testCreateTerminal(alloc: std.mem.Allocator, cols: u16, rows: u16, vt_data: []const u8) !ghostty_vt.Terminal {
+    var term = try ghostty_vt.Terminal.init(alloc, .{
+        .cols = cols,
+        .rows = rows,
+        .max_scrollback = 10_000_000,
+    });
+    if (vt_data.len > 0) {
+        var stream = term.vtStream();
+        defer stream.deinit();
+        try stream.nextSlice(vt_data);
+    }
+    return term;
+}
+
+fn expectScreensMatch(alloc: std.mem.Allocator, expected: *ghostty_vt.Terminal, actual: *ghostty_vt.Terminal) !void {
+    const exp_str = try expected.plainString(alloc);
+    defer alloc.free(exp_str);
+    const act_str = try actual.plainString(alloc);
+    defer alloc.free(act_str);
+    try std.testing.expectEqualStrings(exp_str, act_str);
+}
+
+fn expectCursorAt(term: *ghostty_vt.Terminal, row: usize, col: usize) !void {
+    const cursor = &term.screens.active.cursor;
+    try std.testing.expectEqual(col, cursor.x);
+    try std.testing.expectEqual(row, cursor.y);
+}
+
+fn serializeRoundtrip(alloc: std.mem.Allocator, source: *ghostty_vt.Terminal) !ghostty_vt.Terminal {
+    const serialized = serializeTerminalState(alloc, source) orelse
+        return error.SerializationFailed;
+    defer alloc.free(serialized);
+
+    var dest = try ghostty_vt.Terminal.init(alloc, .{
+        .cols = source.screens.active.pages.cols,
+        .rows = source.screens.active.pages.rows,
+        .max_scrollback = 10_000_000,
+    });
+    var stream = dest.vtStream();
+    defer stream.deinit();
+    try stream.nextSlice(serialized);
+    return dest;
+}
+
+fn expectMarkerAtRow(alloc: std.mem.Allocator, term: *ghostty_vt.Terminal, marker: []const u8, expected_row: usize) !void {
+    const plain = try term.plainString(alloc);
+    defer alloc.free(plain);
+    var row: usize = 0;
+    var iter = std.mem.splitScalar(u8, plain, '\n');
+    while (iter.next()) |line| {
+        if (std.mem.indexOf(u8, line, marker) != null) {
+            try std.testing.expectEqual(expected_row, row);
+            return;
+        }
+        row += 1;
+    }
+    std.debug.print("marker '{s}' not found in terminal output\n", .{marker});
+    return error.TestExpectedEqual;
+}
+
+test "serializeTerminalState roundtrip preserves cursor position" {
+    const alloc = std.testing.allocator;
+
+    var term = try testCreateTerminal(alloc, 80, 24,
+        "\x1b[2J" ++ // clear
+        "\x1b[10;20H" // cursor at row 10, col 20 (1-indexed)
+    );
+    defer term.deinit(alloc);
+
+    try expectCursorAt(&term, 9, 19); // 0-indexed
+
+    var client = try serializeRoundtrip(alloc, &term);
+    defer client.deinit(alloc);
+
+    try expectCursorAt(&client, 9, 19);
+}
+
+test "serializeTerminalState roundtrip preserves CUP-positioned markers" {
+    const alloc = std.testing.allocator;
+
+    var term = try testCreateTerminal(alloc, 80, 24,
+        "\x1b[2J" ++
+        "\x1b[2;5HMARK_A" ++
+        "\x1b[6;15HMARK_B" ++
+        "\x1b[10;30HMARK_C" ++
+        "\x1b[14;50HMARK_D" ++
+        "\x1b[16;20H"
+    );
+    defer term.deinit(alloc);
+
+    var client = try serializeRoundtrip(alloc, &term);
+    defer client.deinit(alloc);
+
+    try expectScreensMatch(alloc, &term, &client);
+    try expectMarkerAtRow(alloc, &client, "MARK_A", 1);
+    try expectMarkerAtRow(alloc, &client, "MARK_B", 5);
+    try expectMarkerAtRow(alloc, &client, "MARK_C", 9);
+    try expectMarkerAtRow(alloc, &client, "MARK_D", 13);
+    try expectCursorAt(&client, 15, 19);
+}
+
+test "serializeTerminalState with scrollback preserves visible content" {
+    const alloc = std.testing.allocator;
+
+    var term = try testCreateTerminal(alloc, 80, 24, "");
+    defer term.deinit(alloc);
+
+    var stream = term.vtStream();
+    defer stream.deinit();
+
+    // Generate 80 lines of scrollback (more than 24 visible rows)
+    var buf: [32]u8 = undefined;
+    for (0..80) |i| {
+        const line = std.fmt.bufPrint(&buf, "SCROLL_{d}\r\n", .{i}) catch unreachable;
+        try stream.nextSlice(line);
+    }
+
+    // Clear screen and place markers at specific positions
+    try stream.nextSlice(
+        "\x1b[2J" ++
+        "\x1b[2;5HMARK_A" ++
+        "\x1b[6;15HMARK_B" ++
+        "\x1b[10;30HMARK_C" ++
+        "\x1b[16;20H"
+    );
+
+    // Verify source terminal has scrollback
+    const pages = &term.screens.active.pages;
+    const has_scrollback = !pages.getTopLeft(.screen).eql(pages.getTopLeft(.active));
+    try std.testing.expect(has_scrollback);
+
+    // Roundtrip: serialize → feed into fresh terminal
+    var client = try serializeRoundtrip(alloc, &term);
+    defer client.deinit(alloc);
+
+    // Visible content must match (this is the core cursor corruption test)
+    try expectScreensMatch(alloc, &term, &client);
+    try expectMarkerAtRow(alloc, &client, "MARK_A", 1);
+    try expectMarkerAtRow(alloc, &client, "MARK_B", 5);
+    try expectMarkerAtRow(alloc, &client, "MARK_C", 9);
+    try expectCursorAt(&client, 15, 19);
+}
+
+test "serializeTerminalState nested roundtrip preserves content" {
+    // Simulates: inner zmx → serialized state → outer ghostty-vt → serialized again → client
+    // This is the exact nested session scenario (zmx → SSH → zmx).
+    const alloc = std.testing.allocator;
+
+    // "Inner" terminal with scrollback + markers
+    var inner = try testCreateTerminal(alloc, 80, 24, "");
+    defer inner.deinit(alloc);
+
+    {
+        var inner_stream = inner.vtStream();
+        defer inner_stream.deinit();
+        var buf: [32]u8 = undefined;
+        for (0..60) |i| {
+            const line = std.fmt.bufPrint(&buf, "SCROLL_{d}\r\n", .{i}) catch unreachable;
+            try inner_stream.nextSlice(line);
+        }
+        try inner_stream.nextSlice(
+            "\x1b[2J" ++
+            "\x1b[3;10HINNER_A" ++
+            "\x1b[12;25HINNER_B" ++
+            "\x1b[20;5H"
+        );
+    }
+
+    // Record inner's ground truth
+    const inner_cursor_x = inner.screens.active.cursor.x;
+    const inner_cursor_y = inner.screens.active.cursor.y;
+
+    // Serialize inner (simulates inner daemon re-attach to inner client)
+    const inner_serialized = serializeTerminalState(alloc, &inner) orelse
+        return error.SerializationFailed;
+    defer alloc.free(inner_serialized);
+
+    // "Outer" terminal processes inner's serialized output
+    var outer = try testCreateTerminal(alloc, 80, 24, "");
+    defer outer.deinit(alloc);
+
+    {
+        var outer_stream = outer.vtStream();
+        defer outer_stream.deinit();
+        try outer_stream.nextSlice(inner_serialized);
+    }
+
+    // Serialize outer (simulates outer daemon re-attach after detach)
+    var client = try serializeRoundtrip(alloc, &outer);
+    defer client.deinit(alloc);
+
+    // Client must see the same content as inner's visible screen
+    try expectScreensMatch(alloc, &inner, &client);
+    try expectCursorAt(&client, inner_cursor_y, inner_cursor_x);
+    try expectMarkerAtRow(alloc, &client, "INNER_A", 2);
+    try expectMarkerAtRow(alloc, &client, "INNER_B", 11);
+}
+
+test "serializeTerminalState alternate screen not leaked" {
+    const alloc = std.testing.allocator;
+
+    var term = try testCreateTerminal(alloc, 80, 24,
+        "\x1b[?1049h" ++ // enter alt screen
+        "\x1b[2J\x1b[3;10HALT_MARK" ++ // write on alt screen
+        "\x1b[?1049l" ++ // exit alt screen
+        "\x1b[2J\x1b[2;5HMAIN_MARK\x1b[8;20H" // write on main screen
+    );
+    defer term.deinit(alloc);
+
+    var client = try serializeRoundtrip(alloc, &term);
+    defer client.deinit(alloc);
+
+    try expectScreensMatch(alloc, &term, &client);
+
+    const plain = try client.plainString(alloc);
+    defer alloc.free(plain);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "ALT_MARK") == null);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "MAIN_MARK") != null);
+}
+
+test "serializeTerminalState size mismatch roundtrip" {
+    const alloc = std.testing.allocator;
+
+    var term = try testCreateTerminal(alloc, 80, 30,
+        "\x1b[2J" ++
+        "\x1b[3;10HSIZE_A" ++
+        "\x1b[12;20HSIZE_B" ++
+        "\x1b[20;40HSIZE_C" ++
+        "\x1b[15;15H"
+    );
+    defer term.deinit(alloc);
+
+    // Resize to 24 rows (simulates outer terminal being smaller)
+    try term.resize(alloc, 80, 24);
+
+    var client = try serializeRoundtrip(alloc, &term);
+    defer client.deinit(alloc);
+
+    try expectScreensMatch(alloc, &term, &client);
+    try expectCursorAt(&client, term.screens.active.cursor.y, term.screens.active.cursor.x);
+}
+
+test "serializeTerminalState scrollback + size mismatch nested roundtrip" {
+    const alloc = std.testing.allocator;
+
+    var inner = try testCreateTerminal(alloc, 80, 30, "");
+    defer inner.deinit(alloc);
+
+    {
+        var inner_stream = inner.vtStream();
+        defer inner_stream.deinit();
+        var buf: [32]u8 = undefined;
+        for (0..80) |i| {
+            const line = std.fmt.bufPrint(&buf, "LINE_{d}\r\n", .{i}) catch unreachable;
+            try inner_stream.nextSlice(line);
+        }
+        try inner_stream.nextSlice(
+            "\x1b[2J" ++
+            "\x1b[3;10HSTRESS_A" ++
+            "\x1b[12;25HSTRESS_B" ++
+            "\x1b[16;20H"
+        );
+    }
+
+    // Resize inner to 24 rows (outer terminal is smaller)
+    try inner.resize(alloc, 80, 24);
+
+    const inner_cursor_x = inner.screens.active.cursor.x;
+    const inner_cursor_y = inner.screens.active.cursor.y;
+
+    // Inner serialize → outer processes → outer serialize → client
+    const inner_ser = serializeTerminalState(alloc, &inner) orelse
+        return error.SerializationFailed;
+    defer alloc.free(inner_ser);
+
+    var outer = try testCreateTerminal(alloc, 80, 24, "");
+    defer outer.deinit(alloc);
+    {
+        var outer_stream = outer.vtStream();
+        defer outer_stream.deinit();
+        try outer_stream.nextSlice(inner_ser);
+    }
+
+    var client = try serializeRoundtrip(alloc, &outer);
+    defer client.deinit(alloc);
+
+    try expectScreensMatch(alloc, &inner, &client);
+    try expectCursorAt(&client, inner_cursor_y, inner_cursor_x);
 }
