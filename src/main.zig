@@ -642,12 +642,6 @@ const Daemon = struct {
         payload: []const u8,
     ) !void {
         if (payload.len != @sizeOf(ipc.Resize)) return;
-        // no leader is set so set one
-        if (self.leader_client_fd == null) {
-            self.leader_client_fd = client.socket_fd;
-        }
-
-        const resize = std.mem.bytesToValue(ipc.Resize, payload);
 
         // Serialize terminal state BEFORE resize to capture correct cursor position.
         // Resizing triggers reflow which can move the cursor, and the shell's
@@ -673,19 +667,32 @@ const Daemon = struct {
             }
         }
 
-        var ws: cross.c.struct_winsize = .{
-            .ws_row = resize.rows,
-            .ws_col = resize.cols,
-            .ws_xpixel = 0,
-            .ws_ypixel = 0,
-        };
-        _ = cross.c.ioctl(pty_fd, cross.c.TIOCSWINSZ, &ws);
-        try term.resize(self.alloc, resize.cols, resize.rows);
+        // no leader is set so set one
+        if (self.leader_client_fd == null) {
+            std.log.info(
+                "setting new leader session={s} client_fd={d}",
+                .{ self.session_name, client.socket_fd },
+            );
+            self.leader_client_fd = client.socket_fd;
+        }
 
-        // Mark that we've had a client init, so subsequent clients get terminal state
-        self.has_had_client = true;
+        // only resize if leader
+        if (self.leader_client_fd == client.socket_fd) {
+            const resize = std.mem.bytesToValue(ipc.Resize, payload);
+            var ws: cross.c.struct_winsize = .{
+                .ws_row = resize.rows,
+                .ws_col = resize.cols,
+                .ws_xpixel = 0,
+                .ws_ypixel = 0,
+            };
+            _ = cross.c.ioctl(pty_fd, cross.c.TIOCSWINSZ, &ws);
+            try term.resize(self.alloc, resize.cols, resize.rows);
 
-        std.log.debug("init resize rows={d} cols={d}", .{ resize.rows, resize.cols });
+            // Mark that we've had a client init, so subsequent clients get terminal state
+            self.has_had_client = true;
+
+            std.log.debug("init resize rows={d} cols={d}", .{ resize.rows, resize.cols });
+        }
     }
 
     pub fn handleResize(
