@@ -1244,6 +1244,9 @@ fn attach(daemon: *Daemon) !void {
             // Restore pre-attach Kitty keyboard protocol mode so Ctrl combos
             // return to legacy encoding in the user's outer shell.
             "\x1b[<u" ++
+            // Force xterm modifyOtherKeys off so an inner program that left
+            // it on doesn't corrupt ctrl input in the outer shell after detach.
+            "\x1b[>4;0m" ++
             "\x1b[?25h";
         _ = posix.write(posix.STDOUT_FILENO, restore_seq) catch {};
     }
