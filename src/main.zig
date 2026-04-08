@@ -2303,7 +2303,7 @@ fn attach(daemon: *Daemon) !void {
         if (stdin_is_tty) {
             _ = cross.c.tcsetattr(posix.STDIN_FILENO, cross.c.TCSAFLUSH, &orig_termios);
         }
-        // Reset terminal modes on detach:
+        // Reset terminal modes on detach
         const restore_seq = "\x1bc";
         _ = posix.write(posix.STDOUT_FILENO, restore_seq) catch {};
     }
