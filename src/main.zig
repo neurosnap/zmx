@@ -319,11 +319,6 @@ const Cfg = struct {
     }
 };
 
-const EnsureSessionResult = struct {
-    created: bool,
-    is_daemon: bool,
-};
-
 /// Daemon is responsible for managing a zmx session.
 ///
 /// It holds all the state for a running session.  Instead of a single daemon for all sessions, we
@@ -354,6 +349,11 @@ const Daemon = struct {
     task_command: ?[]const []const u8 = null,
     pty_write_buf: std.ArrayList(u8) = .empty,
 
+    const EnsureSessionResult = struct {
+        created: bool,
+        is_daemon: bool,
+    };
+
     pub fn deinit(self: *Daemon) void {
         self.clients.deinit(self.alloc);
         self.pty_write_buf.deinit(self.alloc);
@@ -382,6 +382,15 @@ const Daemon = struct {
             return true;
         }
         return false;
+    }
+
+    fn setLeader(self: *Daemon, client: *Client) !void {
+        std.log.info("setting new leader client_fd={d}", .{client.socket_fd});
+        self.leader_client_fd = client.socket_fd;
+        // Send a resize message to the client so it can send us back their window size
+        // so we can resize the pty and ghostty state.
+        try ipc.appendMessage(self.alloc, &client.write_buf, .Resize, "");
+        client.has_pending_output = true;
     }
 
     /// Runs in the forked child. Either execs or returns an error (caller
@@ -598,11 +607,7 @@ const Daemon = struct {
         const isNewline = std.mem.indexOfScalar(u8, payload, '\r') != null;
         const isUpArrow = std.mem.eql(u8, payload, "\x1b[A") or util.isUpArrow(payload);
         if (isNewline or isUpArrow) {
-            std.log.info(
-                "setting new leader session={s} client_fd={d}",
-                .{ self.session_name, client.socket_fd },
-            );
-            self.leader_client_fd = client.socket_fd;
+            try self.setLeader(client);
             self.queuePtyInput(payload);
             return;
         }
@@ -623,11 +628,7 @@ const Daemon = struct {
             defer client.alloc.free(output);
             // if there's no text output then this client is effectively read-only until they type
             if (output.len > 0) {
-                std.log.info(
-                    "setting new leader session={s} client_fd={d}",
-                    .{ self.session_name, client.socket_fd },
-                );
-                self.leader_client_fd = client.socket_fd;
+                try self.setLeader(client);
                 // new leader is set to this client so send *entire* payload
                 self.queuePtyInput(payload);
             }
@@ -669,11 +670,7 @@ const Daemon = struct {
 
         // no leader is set so set one
         if (self.leader_client_fd == null) {
-            std.log.info(
-                "setting new leader session={s} client_fd={d}",
-                .{ self.session_name, client.socket_fd },
-            );
-            self.leader_client_fd = client.socket_fd;
+            try self.setLeader(client);
         }
 
         // only resize if leader
@@ -704,11 +701,7 @@ const Daemon = struct {
     ) !void {
         if (payload.len != @sizeOf(ipc.Resize)) return;
         if (self.leader_client_fd == null) {
-            std.log.info(
-                "setting new leader session={s} client_fd={d}",
-                .{ self.session_name, client.socket_fd },
-            );
-            self.leader_client_fd = client.socket_fd;
+            try self.setLeader(client);
         }
         // only leader can resize
         if (self.leader_client_fd != client.socket_fd) return;
@@ -1020,7 +1013,7 @@ fn wait(cfg: *Cfg, session_names: std.ArrayList([]const u8)) !void {
             }
         }
 
-        std.Thread.sleep(3000 * std.time.ns_per_ms);
+        std.Thread.sleep(1000 * std.time.ns_per_ms);
     }
 }
 
@@ -1528,6 +1521,17 @@ fn clientLoop(client_sock_fd: i32) !void {
                         if (msg.payload.len > 0) {
                             try stdout_buf.appendSlice(alloc, msg.payload);
                         }
+                    },
+                    .Resize => {
+                        // daemon is asking for the client's window size usually in response
+                        // to this client being set as leader.
+                        const next_size = ipc.getTerminalSize(posix.STDOUT_FILENO);
+                        try ipc.appendMessage(
+                            alloc,
+                            &sock_write_buf,
+                            .Resize,
+                            std.mem.asBytes(&next_size),
+                        );
                     },
                     else => {},
                 }
