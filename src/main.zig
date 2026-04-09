@@ -290,8 +290,7 @@ fn flushBufferedWithWriter(
     if (written == 0) return .pending;
 
     try buf.replaceRange(alloc, 0, written, &[_]u8{});
-    if (buf.items.len == 0) return .drained;
-    return .pending;
+    return if (buf.items.len == 0) .drained else .pending;
 }
 
 fn flushBufferedFd(
@@ -1677,9 +1676,9 @@ fn clientLoop(client_sock_fd: i32) !ClientResult {
         // new bytes earlier in the same iteration, try a non-blocking flush now
         // so single-key inputs like Ctrl-L do not wait for the next poll cycle.
         if (sock_write_buf.items.len > 0) {
-            switch (try flushBufferedFd(alloc, client_sock_fd, &sock_write_buf)) {
-                .drained, .pending => {},
-                .closed => return ClientResult{ .kind = .detach, .session_name = null },
+            const flush_result = try flushBufferedFd(alloc, client_sock_fd, &sock_write_buf);
+            if (flush_result == .closed) {
+                return ClientResult{ .kind = .detach, .session_name = null };
             }
         }
 
@@ -1921,15 +1920,13 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
             }
 
             if (client.write_buf.items.len > 0) {
-                switch (try flushBufferedFd(daemon.alloc, client.socket_fd, &client.write_buf)) {
-                    .drained => client.has_pending_output = false,
-                    .pending => client.has_pending_output = true,
-                    .closed => {
-                        const last = daemon.closeClient(client, i, false);
-                        if (last) break :daemon_loop;
-                        continue;
-                    },
+                const flush_result = try flushBufferedFd(daemon.alloc, client.socket_fd, &client.write_buf);
+                if (flush_result == .closed) {
+                    const last = daemon.closeClient(client, i, false);
+                    if (last) break :daemon_loop;
+                    continue;
                 }
+                client.has_pending_output = flush_result == .pending;
             }
 
             if (revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
@@ -1967,7 +1964,7 @@ test "flushBufferedFd leaves bytes queued when writer would block" {
     defer posix.close(pipe_fds[0]);
     defer posix.close(pipe_fds[1]);
 
-    var fill_buf = [_]u8{0} ** 4096;
+    const fill_buf = [_]u8{0} ** 4096;
     while (true) {
         _ = posix.write(pipe_fds[1], &fill_buf) catch |err| switch (err) {
             error.WouldBlock => break,
