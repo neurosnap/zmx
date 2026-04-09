@@ -265,6 +265,7 @@ const Client = struct {
 
 const FlushBufferedResult = enum {
     drained,
+    advanced,
     pending,
     closed,
 };
@@ -286,7 +287,7 @@ fn flushBufferedWithWriter(
     if (written == 0) return .pending;
 
     try buf.replaceRange(alloc, 0, written, &[_]u8{});
-    return if (buf.items.len == 0) .drained else .pending;
+    return if (buf.items.len == 0) .drained else .advanced;
 }
 
 fn flushBufferedFd(
@@ -297,14 +298,26 @@ fn flushBufferedFd(
     return flushBufferedWithWriter(alloc, buf, fd, posix.write);
 }
 
-fn flushBufferedPty(
+fn drainBufferedWithWriter(
+    alloc: std.mem.Allocator,
+    buf: *std.ArrayList(u8),
+    writer_ctx: anytype,
+    comptime writeFn: fn (@TypeOf(writer_ctx), []const u8) anyerror!usize,
+) !FlushBufferedResult {
+    while (true) {
+        const flush_result = try flushBufferedWithWriter(alloc, buf, writer_ctx, writeFn);
+        if (flush_result != .advanced) return flush_result;
+    }
+}
+
+fn drainBufferedPty(
     alloc: std.mem.Allocator,
     fd: i32,
     buf: *std.ArrayList(u8),
 ) void {
     if (buf.items.len == 0) return;
 
-    const flush_result = flushBufferedFd(alloc, fd, buf) catch |err| {
+    const flush_result = drainBufferedWithWriter(alloc, buf, fd, posix.write) catch |err| {
         std.log.warn("pty write failed: {s}", .{@errorName(err)});
         buf.clearRetainingCapacity();
         return;
@@ -1856,10 +1869,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
         }
 
         if (poll_fds.items[1].revents & posix.POLL.OUT != 0) {
-            while (daemon.pty_write_buf.items.len > 0) {
-                flushBufferedPty(daemon.alloc, pty_fd, &daemon.pty_write_buf);
-                if (daemon.pty_write_buf.items.len > 0) break;
-            }
+            drainBufferedPty(daemon.alloc, pty_fd, &daemon.pty_write_buf);
         }
         // Newly accepted clients are not in poll_fds yet, so only iterate over
         // the clients that were present when this poll cycle started.
@@ -1938,7 +1948,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
         // If client input or terminal-query handling queued PTY bytes during this
         // poll cycle, try a non-blocking flush now instead of waiting for the
         // next POLLOUT wakeup.
-        flushBufferedPty(daemon.alloc, pty_fd, &daemon.pty_write_buf);
+        drainBufferedPty(daemon.alloc, pty_fd, &daemon.pty_write_buf);
     }
 }
 
@@ -2005,13 +2015,40 @@ test "flushBufferedWithWriter keeps unwritten tail after partial write" {
     try buf.appendSlice(alloc, "clear-screen");
 
     try std.testing.expectEqual(
-        FlushBufferedResult.pending,
+        FlushBufferedResult.advanced,
         try flushBufferedWithWriter(alloc, &buf, &writer, PartialWriter.write),
     );
     try std.testing.expectEqualStrings("ar-screen", buf.items);
 }
 
-test "flushBufferedPty drains writable file descriptor immediately" {
+test "drainBufferedWithWriter continues after partial writes" {
+    const alloc = std.testing.allocator;
+
+    const MultiWriter = struct {
+        steps: []const usize,
+        calls: usize = 0,
+
+        fn write(self: *@This(), data: []const u8) !usize {
+            const step = if (self.calls < self.steps.len) self.steps[self.calls] else data.len;
+            self.calls += 1;
+            return @min(step, data.len);
+        }
+    };
+
+    var writer = MultiWriter{ .steps = &.{ 3, 4 } };
+    var buf = try std.ArrayList(u8).initCapacity(alloc, 16);
+    defer buf.deinit(alloc);
+    try buf.appendSlice(alloc, "clear-screen");
+
+    try std.testing.expectEqual(
+        FlushBufferedResult.drained,
+        try drainBufferedWithWriter(alloc, &buf, &writer, MultiWriter.write),
+    );
+    try std.testing.expectEqual(@as(usize, 0), buf.items.len);
+    try std.testing.expectEqual(@as(usize, 3), writer.calls);
+}
+
+test "drainBufferedPty drains writable file descriptor immediately" {
     const alloc = std.testing.allocator;
     const pipe_fds = try posix.pipe();
     defer posix.close(pipe_fds[0]);
@@ -2021,7 +2058,7 @@ test "flushBufferedPty drains writable file descriptor immediately" {
     defer buf.deinit(alloc);
     try buf.appendSlice(alloc, "ctrl-l");
 
-    flushBufferedPty(alloc, pipe_fds[1], &buf);
+    drainBufferedPty(alloc, pipe_fds[1], &buf);
     try std.testing.expectEqual(@as(usize, 0), buf.items.len);
 
     var read_buf: [16]u8 = undefined;
@@ -2029,14 +2066,14 @@ test "flushBufferedPty drains writable file descriptor immediately" {
     try std.testing.expectEqualStrings("ctrl-l", read_buf[0..n]);
 }
 
-test "flushBufferedPty clears buffered bytes on write error" {
+test "drainBufferedPty clears buffered bytes on write error" {
     const alloc = std.testing.allocator;
 
     var buf = try std.ArrayList(u8).initCapacity(alloc, 16);
     defer buf.deinit(alloc);
     try buf.appendSlice(alloc, "clear");
 
-    flushBufferedPty(alloc, -1, &buf);
+    drainBufferedPty(alloc, -1, &buf);
     try std.testing.expectEqual(@as(usize, 0), buf.items.len);
 }
 
