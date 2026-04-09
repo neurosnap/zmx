@@ -3,6 +3,7 @@ const posix = std.posix;
 const ghostty_vt = @import("ghostty-vt");
 const ipc = @import("ipc.zig");
 const socket = @import("socket.zig");
+const testing = std.testing;
 
 pub const SessionEntry = struct {
     name: []const u8,
@@ -301,6 +302,41 @@ fn parseDecimal(buf: []const u8, pos: *usize) ?u32 {
     return value;
 }
 
+/// Detect if the payload contains user input that should be printed to the screen or
+/// is a key combination like up-arrow, backspace, enter, ctrl+f, etc.
+pub fn isUserInput(payload: []const u8) bool {
+    var parser = ghostty_vt.Parser.init();
+    for (payload) |c| {
+        const actions = parser.next(c);
+        for (actions) |action_opt| {
+            const action = action_opt orelse continue;
+            switch (action) {
+                .print => return true, // printable characters
+                .csi_dispatch => |csi| {
+                    // kitty keyboard: CSI ... u or CSI ... ~
+                    // legacy modified keys: CSI 27 ; ... ~
+                    // arrow/function keys with modifiers: CSI 1 ; <mod> A-D
+                    if (csi.final == 'u' or csi.final == '~') return true;
+                    // modified arrow keys (e.g., Ctrl+F sends CSI 1;5C in legacy mode)
+                    if (csi.final >= 'A' and csi.final <= 'D' and csi.params.len > 1) return true;
+                    // mouse events: CSI M (basic) or CSI < (SGR extended) - EXCLUDE these
+                    // only intentional keyboard input should trigger leader switch
+                    if (csi.final == 'M' or csi.final == '<') return false;
+                    // focus events: CSI I (focus in) or CSI O (focus out) - EXCLUDE these
+                    // these are automatic terminal events, not user typing
+                    if (csi.final == 'I' or csi.final == 'O') return false;
+                },
+                .execute => |code| {
+                    // looking for CR, LF, tab, and backspace
+                    if (code == 0x0D or code == 0x0A or code == 0x09 or code == 0x08) return true;
+                },
+                else => {},
+            }
+        }
+    }
+    return false;
+}
+
 pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Terminal) ?[]const u8 {
     var builder: std.Io.Writer.Allocating = .init(alloc);
     defer builder.deinit();
@@ -586,124 +622,124 @@ test "writeSessionLine formats output for current session and short output" {
     };
 
     for (cases) |case| {
-        var builder: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        var builder: std.Io.Writer.Allocating = .init(testing.allocator);
         defer builder.deinit();
 
         try writeSessionLine(&builder.writer, case.session, case.short, case.current_session);
-        try std.testing.expectEqualStrings(case.expected, builder.writer.buffered());
+        try testing.expectEqualStrings(case.expected, builder.writer.buffered());
     }
 }
 
 test "shellNeedsQuoting" {
-    try std.testing.expect(shellNeedsQuoting(""));
-    try std.testing.expect(shellNeedsQuoting("hello world"));
-    try std.testing.expect(shellNeedsQuoting("hello!"));
-    try std.testing.expect(shellNeedsQuoting("$PATH"));
-    try std.testing.expect(shellNeedsQuoting("it's"));
-    try std.testing.expect(shellNeedsQuoting("a|b"));
-    try std.testing.expect(shellNeedsQuoting("a;b"));
-    try std.testing.expect(!shellNeedsQuoting("hello"));
-    try std.testing.expect(!shellNeedsQuoting("bash"));
-    try std.testing.expect(!shellNeedsQuoting("-c"));
-    try std.testing.expect(!shellNeedsQuoting("/usr/bin/env"));
+    try testing.expect(shellNeedsQuoting(""));
+    try testing.expect(shellNeedsQuoting("hello world"));
+    try testing.expect(shellNeedsQuoting("hello!"));
+    try testing.expect(shellNeedsQuoting("$PATH"));
+    try testing.expect(shellNeedsQuoting("it's"));
+    try testing.expect(shellNeedsQuoting("a|b"));
+    try testing.expect(shellNeedsQuoting("a;b"));
+    try testing.expect(!shellNeedsQuoting("hello"));
+    try testing.expect(!shellNeedsQuoting("bash"));
+    try testing.expect(!shellNeedsQuoting("-c"));
+    try testing.expect(!shellNeedsQuoting("/usr/bin/env"));
 }
 
 test "shellQuote" {
-    const alloc = std.testing.allocator;
+    const alloc = testing.allocator;
 
     const empty = try shellQuote(alloc, "");
     defer alloc.free(empty);
-    try std.testing.expectEqualStrings("''", empty);
+    try testing.expectEqualStrings("''", empty);
 
     const space = try shellQuote(alloc, "hello world");
     defer alloc.free(space);
-    try std.testing.expectEqualStrings("'hello world'", space);
+    try testing.expectEqualStrings("'hello world'", space);
 
     const bang = try shellQuote(alloc, "hello!");
     defer alloc.free(bang);
-    try std.testing.expectEqualStrings("'hello!'", bang);
+    try testing.expectEqualStrings("'hello!'", bang);
 
     const dollar = try shellQuote(alloc, "$PATH");
     defer alloc.free(dollar);
-    try std.testing.expectEqualStrings("'$PATH'", dollar);
+    try testing.expectEqualStrings("'$PATH'", dollar);
 
     const sq = try shellQuote(alloc, "it's");
     defer alloc.free(sq);
-    try std.testing.expectEqualStrings("'it'\\''s'", sq);
+    try testing.expectEqualStrings("'it'\\''s'", sq);
 
     const dq = try shellQuote(alloc, "say \"hi\"");
     defer alloc.free(dq);
-    try std.testing.expectEqualStrings("'say \"hi\"'", dq);
+    try testing.expectEqualStrings("'say \"hi\"'", dq);
 
     const both = try shellQuote(alloc, "it's \"cool\"");
     defer alloc.free(both);
-    try std.testing.expectEqualStrings("'it'\\''s \"cool\"'", both);
+    try testing.expectEqualStrings("'it'\\''s \"cool\"'", both);
 
     // just a single quote
     const lone_sq = try shellQuote(alloc, "'");
     defer alloc.free(lone_sq);
-    try std.testing.expectEqualStrings("''\\'''", lone_sq);
+    try testing.expectEqualStrings("''\\'''", lone_sq);
 
     // multiple consecutive single quotes
     const triple_sq = try shellQuote(alloc, "'''");
     defer alloc.free(triple_sq);
-    try std.testing.expectEqualStrings("''\\'''\\'''\\'''", triple_sq);
+    try testing.expectEqualStrings("''\\'''\\'''\\'''", triple_sq);
 
     // backtick command substitution
     const backtick = try shellQuote(alloc, "`whoami`");
     defer alloc.free(backtick);
-    try std.testing.expectEqualStrings("'`whoami`'", backtick);
+    try testing.expectEqualStrings("'`whoami`'", backtick);
 
     // dollar command substitution
     const dollar_cmd = try shellQuote(alloc, "$(whoami)");
     defer alloc.free(dollar_cmd);
-    try std.testing.expectEqualStrings("'$(whoami)'", dollar_cmd);
+    try testing.expectEqualStrings("'$(whoami)'", dollar_cmd);
 
     // glob
     const glob = try shellQuote(alloc, "*.txt");
     defer alloc.free(glob);
-    try std.testing.expectEqualStrings("'*.txt'", glob);
+    try testing.expectEqualStrings("'*.txt'", glob);
 
     // tilde
     const tilde = try shellQuote(alloc, "~/file");
     defer alloc.free(tilde);
-    try std.testing.expectEqualStrings("'~/file'", tilde);
+    try testing.expectEqualStrings("'~/file'", tilde);
 
     // trailing backslash
     const trailing_bs = try shellQuote(alloc, "path\\");
     defer alloc.free(trailing_bs);
-    try std.testing.expectEqualStrings("'path\\'", trailing_bs);
+    try testing.expectEqualStrings("'path\\'", trailing_bs);
 
     // semicolon (command injection)
     const semi = try shellQuote(alloc, "; rm -rf /");
     defer alloc.free(semi);
-    try std.testing.expectEqualStrings("'; rm -rf /'", semi);
+    try testing.expectEqualStrings("'; rm -rf /'", semi);
 
     // embedded newline
     const newline = try shellQuote(alloc, "line1\nline2");
     defer alloc.free(newline);
-    try std.testing.expectEqualStrings("'line1\nline2'", newline);
+    try testing.expectEqualStrings("'line1\nline2'", newline);
 
     // parentheses (subshell)
     const parens = try shellQuote(alloc, "(echo hi)");
     defer alloc.free(parens);
-    try std.testing.expectEqualStrings("'(echo hi)'", parens);
+    try testing.expectEqualStrings("'(echo hi)'", parens);
 
     // heredoc marker
     const heredoc = try shellQuote(alloc, "<<EOF");
     defer alloc.free(heredoc);
-    try std.testing.expectEqualStrings("'<<EOF'", heredoc);
+    try testing.expectEqualStrings("'<<EOF'", heredoc);
 
     // no quoting needed -- plain word should still be quoted
     // (shellQuote is only called when shellNeedsQuoting returns true,
     // but verify it produces valid output anyway)
     const plain = try shellQuote(alloc, "hello");
     defer alloc.free(plain);
-    try std.testing.expectEqualStrings("'hello'", plain);
+    try testing.expectEqualStrings("'hello'", plain);
 }
 
 test "isCtrlBackslash" {
-    const expect = std.testing.expect;
+    const expect = testing.expect;
 
     // Basic: ctrl only (modifier 5 = 1 + 4)
     try expect(isCtrlBackslash("\x1b[92;5u"));
@@ -794,7 +830,7 @@ test "isCtrlBackslash" {
 }
 
 test "serializeTerminalState excludes synchronized output replay" {
-    const alloc = std.testing.allocator;
+    const alloc = testing.allocator;
 
     var term = try ghostty_vt.Terminal.init(alloc, .{
         .cols = 80,
@@ -809,16 +845,16 @@ test "serializeTerminalState excludes synchronized output replay" {
     try stream.nextSlice("\x1b[?2026h"); // Synchronized output
     try stream.nextSlice("hello");
 
-    try std.testing.expect(term.modes.get(.bracketed_paste));
-    try std.testing.expect(term.modes.get(.synchronized_output));
+    try testing.expect(term.modes.get(.bracketed_paste));
+    try testing.expect(term.modes.get(.synchronized_output));
 
     const output = serializeTerminalState(alloc, &term) orelse return error.TestUnexpectedNull;
     defer alloc.free(output);
 
     // The serialized output should contain bracketed paste (DECSET 2004)
     // but NOT synchronized output (DECSET 2026)
-    try std.testing.expect(std.mem.indexOf(u8, output, "\x1b[?2004h") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "\x1b[?2026h") == null);
+    try testing.expect(std.mem.indexOf(u8, output, "\x1b[?2004h") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "\x1b[?2026h") == null);
 }
 
 fn testCreateTerminal(alloc: std.mem.Allocator, cols: u16, rows: u16, vt_data: []const u8) !ghostty_vt.Terminal {
@@ -840,13 +876,13 @@ fn expectScreensMatch(alloc: std.mem.Allocator, expected: *ghostty_vt.Terminal, 
     defer alloc.free(exp_str);
     const act_str = try actual.plainString(alloc);
     defer alloc.free(act_str);
-    try std.testing.expectEqualStrings(exp_str, act_str);
+    try testing.expectEqualStrings(exp_str, act_str);
 }
 
 fn expectCursorAt(term: *ghostty_vt.Terminal, row: usize, col: usize) !void {
     const cursor = &term.screens.active.cursor;
-    try std.testing.expectEqual(col, cursor.x);
-    try std.testing.expectEqual(row, cursor.y);
+    try testing.expectEqual(col, cursor.x);
+    try testing.expectEqual(row, cursor.y);
 }
 
 fn serializeRoundtrip(alloc: std.mem.Allocator, source: *ghostty_vt.Terminal) !ghostty_vt.Terminal {
@@ -872,7 +908,7 @@ fn expectMarkerAtRow(alloc: std.mem.Allocator, term: *ghostty_vt.Terminal, marke
     var iter = std.mem.splitScalar(u8, plain, '\n');
     while (iter.next()) |line| {
         if (std.mem.indexOf(u8, line, marker) != null) {
-            try std.testing.expectEqual(expected_row, row);
+            try testing.expectEqual(expected_row, row);
             return;
         }
         row += 1;
@@ -882,7 +918,7 @@ fn expectMarkerAtRow(alloc: std.mem.Allocator, term: *ghostty_vt.Terminal, marke
 }
 
 test "serializeTerminalState roundtrip preserves cursor position" {
-    const alloc = std.testing.allocator;
+    const alloc = testing.allocator;
 
     var term = try testCreateTerminal(alloc, 80, 24, "\x1b[2J" ++ // clear
         "\x1b[10;20H" // cursor at row 10, col 20 (1-indexed)
@@ -898,7 +934,7 @@ test "serializeTerminalState roundtrip preserves cursor position" {
 }
 
 test "serializeTerminalState roundtrip preserves CUP-positioned markers" {
-    const alloc = std.testing.allocator;
+    const alloc = testing.allocator;
 
     var term = try testCreateTerminal(alloc, 80, 24, "\x1b[2J" ++
         "\x1b[2;5HMARK_A" ++
@@ -920,7 +956,7 @@ test "serializeTerminalState roundtrip preserves CUP-positioned markers" {
 }
 
 test "serializeTerminalState with scrollback preserves visible content" {
-    const alloc = std.testing.allocator;
+    const alloc = testing.allocator;
 
     var term = try testCreateTerminal(alloc, 80, 24, "");
     defer term.deinit(alloc);
@@ -945,7 +981,7 @@ test "serializeTerminalState with scrollback preserves visible content" {
     // Verify source terminal has scrollback
     const pages = &term.screens.active.pages;
     const has_scrollback = !pages.getTopLeft(.screen).eql(pages.getTopLeft(.active));
-    try std.testing.expect(has_scrollback);
+    try testing.expect(has_scrollback);
 
     // Roundtrip: serialize → feed into fresh terminal
     var client = try serializeRoundtrip(alloc, &term);
@@ -962,7 +998,7 @@ test "serializeTerminalState with scrollback preserves visible content" {
 test "serializeTerminalState nested roundtrip preserves content" {
     // Simulates: inner zmx → serialized state → outer ghostty-vt → serialized again → client
     // This is the exact nested session scenario (zmx → SSH → zmx).
-    const alloc = std.testing.allocator;
+    const alloc = testing.allocator;
 
     // "Inner" terminal with scrollback + markers
     var inner = try testCreateTerminal(alloc, 80, 24, "");
@@ -1013,7 +1049,7 @@ test "serializeTerminalState nested roundtrip preserves content" {
 }
 
 test "serializeTerminalState alternate screen not leaked" {
-    const alloc = std.testing.allocator;
+    const alloc = testing.allocator;
 
     var term = try testCreateTerminal(alloc, 80, 24, "\x1b[?1049h" ++ // enter alt screen
         "\x1b[2J\x1b[3;10HALT_MARK" ++ // write on alt screen
@@ -1029,12 +1065,12 @@ test "serializeTerminalState alternate screen not leaked" {
 
     const plain = try client.plainString(alloc);
     defer alloc.free(plain);
-    try std.testing.expect(std.mem.indexOf(u8, plain, "ALT_MARK") == null);
-    try std.testing.expect(std.mem.indexOf(u8, plain, "MAIN_MARK") != null);
+    try testing.expect(std.mem.indexOf(u8, plain, "ALT_MARK") == null);
+    try testing.expect(std.mem.indexOf(u8, plain, "MAIN_MARK") != null);
 }
 
 test "serializeTerminalState size mismatch roundtrip" {
-    const alloc = std.testing.allocator;
+    const alloc = testing.allocator;
 
     var term = try testCreateTerminal(alloc, 80, 30, "\x1b[2J" ++
         "\x1b[3;10HSIZE_A" ++
@@ -1054,7 +1090,7 @@ test "serializeTerminalState size mismatch roundtrip" {
 }
 
 test "serializeTerminalState scrollback + size mismatch nested roundtrip" {
-    const alloc = std.testing.allocator;
+    const alloc = testing.allocator;
 
     var inner = try testCreateTerminal(alloc, 80, 30, "");
     defer inner.deinit(alloc);
@@ -1097,4 +1133,148 @@ test "serializeTerminalState scrollback + size mismatch nested roundtrip" {
 
     try expectScreensMatch(alloc, &inner, &client);
     try expectCursorAt(&client, inner_cursor_y, inner_cursor_x);
+}
+
+test "isUserInput: printable characters" {
+    // Regular text should be detected as user input
+    try testing.expect(isUserInput("hello"));
+    try testing.expect(isUserInput("Hello World!"));
+    try testing.expect(isUserInput("12345"));
+    try testing.expect(isUserInput("!@#$%^&*()"));
+}
+
+test "isUserInput: whitespace characters" {
+    // Space character is printable
+    try testing.expect(isUserInput(" "));
+    try testing.expect(isUserInput("   "));
+}
+
+test "isUserInput: line feed (LF)" {
+    // LF triggers .execute action
+    try testing.expect(isUserInput("\n"));
+    try testing.expect(isUserInput("test\n"));
+}
+
+test "isUserInput: carriage return (CR)" {
+    // CR triggers .execute action
+    try testing.expect(isUserInput("\r"));
+    try testing.expect(isUserInput("test\r"));
+}
+
+test "isUserInput: tab" {
+    // Tab triggers .execute action
+    try testing.expect(isUserInput("\t"));
+    try testing.expect(isUserInput("col1\tcol2"));
+}
+
+test "isUserInput: backspace" {
+    // Backspace triggers .execute action
+    try testing.expect(isUserInput("\x08"));
+    try testing.expect(isUserInput("test\x08"));
+}
+
+test "isUserInput: arrow keys (CSI ~)" {
+    // Arrow keys use CSI with ~ - these have params
+    try testing.expect(isUserInput("\x1b[3~")); // delete
+    try testing.expect(isUserInput("\x1b[5~")); // page up
+    try testing.expect(isUserInput("\x1b[6~")); // page down
+}
+
+test "isUserInput: modified arrow keys with CSI u" {
+    // Modified arrow keys with CSI ... u
+    try testing.expect(isUserInput("\x1bOA")); // up with modifier
+    try testing.expect(isUserInput("\x1bOB")); // down with modifier
+    try testing.expect(isUserInput("\x1bOC")); // right with modifier
+    try testing.expect(isUserInput("\x1bOD")); // left with modifier
+}
+
+test "isUserInput: up arrow legacy" {
+    // Legacy up arrow: CSI A (with params for kitty-style)
+    try testing.expect(isUserInput("\x1b[1;1A")); // kitty-style legacy
+}
+
+test "isUserInput: up arrow kitty" {
+    // Kitty keyboard up arrow: CSI 1;1;1A (no colon format supported by parser)
+    try testing.expect(isUserInput("\x1b[1;1;1A")); // kitty up arrow
+}
+
+test "isUserInput: arrow keys with modifier params CSI A-D" {
+    // Modified arrow keys like Ctrl+Up: CSI 1;5A
+    try testing.expect(isUserInput("\x1b[1;5A")); // Ctrl+Up
+    try testing.expect(isUserInput("\x1b[1;5B")); // Ctrl+Down
+    try testing.expect(isUserInput("\x1b[1;5C")); // Ctrl+Right
+    try testing.expect(isUserInput("\x1b[1;5D")); // Ctrl+Left
+    try testing.expect(isUserInput("\x1b[1;3A")); // Alt+Up
+    try testing.expect(isUserInput("\x1b[1;3B")); // Alt+Down
+}
+
+test "isUserInput: function keys with modifiers CSI 27 ; ~" {
+    // Legacy modified keys: CSI 27 ; ... ~
+    try testing.expect(isUserInput("\x1b[15;2~")); // F4 with modifier
+    try testing.expect(isUserInput("\x1b[17;2~")); // F5 with modifier
+    try testing.expect(isUserInput("\x1b[18;2~")); // F6 with modifier
+}
+
+test "isUserInput: enter key" {
+    // Enter is LF (0x0A)
+    try testing.expect(isUserInput("\x0A"));
+}
+
+test "isUserInput: mixed content" {
+    // Mix of printable and control sequences
+    try testing.expect(isUserInput("hello\nworld"));
+    try testing.expect(isUserInput("\x1b[3~\x1b[6~")); // multiple CSI ~ sequences
+    try testing.expect(isUserInput("abc\x1b[3~def")); // text with CSI ~
+}
+
+test "isUserInput: non-user input (escape sequences only)" {
+    // Cursor movement without user input
+    try testing.expect(!isUserInput("\x1b[2;1H")); // CSI H cursor home
+    // SGR color set (no printing)
+    try testing.expect(!isUserInput("\x1b[0m"));
+    // Cursor position report query
+    try testing.expect(!isUserInput("\x1b[6n"));
+}
+
+test "isUserInput: empty string" {
+    try testing.expect(!isUserInput(""));
+}
+
+test "isUserInput: only whitespace controls" {
+    // Multiple control chars should return true
+    try testing.expect(isUserInput("\n\r\t"));
+}
+
+test "isUserInput: kitty keyboard sequences" {
+    // Kitty keyboard protocol uses CSI u
+    try testing.expect(isUserInput("\x1b[11;2u")); // F1 with modifier
+    try testing.expect(isUserInput("\x1b[12;2u")); // F2 with modifier
+}
+
+test "isUserInput: mouse events (CSI M) excluded" {
+    // Basic mouse tracking (SGR disabled): CSI M Cb Cx Cy
+    // Mouse events should NOT trigger leader switch
+    try testing.expect(!isUserInput("\x1b[M@ 0 0")); // button 0, pos 0,0
+    try testing.expect(!isUserInput("\x1b[M@ 1 1")); // button 1, pos 1,1
+}
+
+test "isUserInput: mouse events SGR mode CSI < excluded" {
+    // SGR extended mouse tracking: CSI < Cb;Cx;Y M
+    // Mouse events should NOT trigger leader switch
+    try testing.expect(!isUserInput("\x1b[<0;1;1M")); // button release
+    try testing.expect(!isUserInput("\x1b[<64;1;1M")); // button press
+}
+
+test "isUserInput: focus events excluded" {
+    // Focus in/out are automatic terminal events, not user typing
+    try testing.expect(!isUserInput("\x1b[I")); // focus in
+    try testing.expect(!isUserInput("\x1b[O")); // focus out
+}
+
+test "isUserInput: bracketed paste included" {
+    // Bracketed paste start/end are user-initiated paste operations
+    try testing.expect(isUserInput("\x1b[200~")); // paste start
+    try testing.expect(isUserInput("\x1b[201~")); // paste end
+    // Content between start/end is also user input
+    try testing.expect(isUserInput("\x1b[200~hello\x1b[201~"));
 }

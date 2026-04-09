@@ -602,36 +602,10 @@ const Daemon = struct {
             return;
         }
 
-        // quick check to see if a newline happened so we can set that client to leader
-        // without creating a ghostty vt
-        const isNewline = std.mem.indexOfScalar(u8, payload, '\r') != null;
-        const isUpArrow = std.mem.eql(u8, payload, "\x1b[A") or util.isUpArrow(payload);
-        if (isNewline or isUpArrow) {
+        // check if leader needs to be updated by detecting any user input
+        if (util.isUserInput(payload)) {
             try self.setLeader(client);
             self.queuePtyInput(payload);
-            return;
-        }
-
-        // check if leader needs to be updated
-        // this is probably really ineffecient but it was the easiest and most robust way
-        // to strip ansi escape codes and only detect plain text to determine if we need
-        // to set a new leader
-        var termx = try ghostty_vt.Terminal.init(client.alloc, .{
-            .cols = 80,
-            .rows = 24,
-        });
-        defer termx.deinit(client.alloc);
-        var vt_stream = termx.vtStream();
-        defer vt_stream.deinit();
-        try vt_stream.nextSlice(payload);
-        if (util.serializeTerminal(client.alloc, &termx, .plain)) |output| {
-            defer client.alloc.free(output);
-            // if there's no text output then this client is effectively read-only until they type
-            if (output.len > 0) {
-                try self.setLeader(client);
-                // new leader is set to this client so send *entire* payload
-                self.queuePtyInput(payload);
-            }
         }
     }
 
