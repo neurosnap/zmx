@@ -298,6 +298,10 @@ fn flushBufferedFd(
     return flushBufferedWithWriter(alloc, buf, fd, posix.write);
 }
 
+fn hasBufferedWritePending(result: FlushBufferedResult) bool {
+    return result == .advanced or result == .pending;
+}
+
 fn drainBufferedWithWriter(
     alloc: std.mem.Allocator,
     buf: *std.ArrayList(u8),
@@ -1936,7 +1940,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                     if (last) break :daemon_loop;
                     continue;
                 }
-                client.has_pending_output = flush_result == .pending;
+                client.has_pending_output = hasBufferedWritePending(flush_result);
             }
 
             if (revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
@@ -1996,6 +2000,13 @@ test "flushBufferedFd leaves bytes queued when writer would block" {
         try flushBufferedFd(alloc, pipe_fds[1], &buf),
     );
     try std.testing.expectEqualStrings("clear", buf.items);
+}
+
+test "hasBufferedWritePending keeps partial and blocked writes armed" {
+    try std.testing.expect(hasBufferedWritePending(.advanced));
+    try std.testing.expect(hasBufferedWritePending(.pending));
+    try std.testing.expect(!hasBufferedWritePending(.drained));
+    try std.testing.expect(!hasBufferedWritePending(.closed));
 }
 
 test "flushBufferedWithWriter keeps unwritten tail after partial write" {
