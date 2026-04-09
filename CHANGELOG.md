@@ -9,6 +9,8 @@ Use spec: https://common-changelog.org/
 - New client leader policy: last client to send user input bytes (non-ansi escape codes) becomes the leader
   - The client leader controls resizing and any other terminal state changes
   - Non-leader clients are read-only until they send user input bytes and takeover leadership
+  - When a leader is promoted we immediately resize to their window size
+- `zmx attach` now lets users switch to another session from within a session
 
 ### Changed
 
