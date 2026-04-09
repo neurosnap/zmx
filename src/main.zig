@@ -1043,11 +1043,7 @@ fn list(cfg: *Cfg, short: bool) !void {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    const current_session = std.process.getEnvVarOwned(alloc, "ZMX_SESSION") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => null,
-        else => return err,
-    };
-    defer if (current_session) |name| alloc.free(name);
+    const current_session = socket.getSeshNameFromEnv();
     var buf: [4096]u8 = undefined;
     var stdout = std.fs.File.stdout().writer(&buf);
 
@@ -1080,14 +1076,11 @@ fn detachAll(cfg: *Cfg) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
-    const session_name = std.process.getEnvVarOwned(alloc, "ZMX_SESSION") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => {
-            std.log.err("ZMX_SESSION env var not found: are you inside a zmx session?", .{});
-            return;
-        },
-        else => return err,
-    };
-    defer alloc.free(session_name);
+    const session_name = socket.getSeshNameFromEnv();
+    if (session_name.len == 0) {
+        std.log.err("ZMX_SESSION env var not found: are you inside a zmx session?", .{});
+        return;
+    }
 
     var dir = try std.fs.openDirAbsolute(cfg.socket_dir, .{});
     defer dir.close();
@@ -1257,7 +1250,6 @@ fn attach(daemon: *Daemon) !void {
     const sesh = socket.getSeshNameFromEnv();
     if (sesh.len > 0) {
         return switchSesh(daemon, sesh);
-        // return error.CannotAttachToSessionInSession;
     }
 
     const result = try daemon.ensureSession();
