@@ -297,6 +297,24 @@ fn flushBufferedFd(
     return flushBufferedWithWriter(alloc, buf, fd, posix.write);
 }
 
+fn flushBufferedPty(
+    alloc: std.mem.Allocator,
+    fd: i32,
+    buf: *std.ArrayList(u8),
+) void {
+    if (buf.items.len == 0) return;
+
+    const flush_result = flushBufferedFd(alloc, fd, buf) catch |err| {
+        std.log.warn("pty write failed: {s}", .{@errorName(err)});
+        buf.clearRetainingCapacity();
+        return;
+    };
+
+    if (flush_result == .closed) {
+        buf.clearRetainingCapacity();
+    }
+}
+
 /// Cfg is zmx's configuration container.
 ///
 /// The purpose of this container is to hold anything that can be modified by the user.
@@ -1839,15 +1857,8 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
 
         if (poll_fds.items[1].revents & posix.POLL.OUT != 0) {
             while (daemon.pty_write_buf.items.len > 0) {
-                const n = posix.write(pty_fd, daemon.pty_write_buf.items) catch |err| {
-                    if (err != error.WouldBlock) {
-                        std.log.warn("pty write failed: {s}", .{@errorName(err)});
-                        daemon.pty_write_buf.clearRetainingCapacity();
-                    }
-                    break;
-                };
-                if (n == 0) break;
-                daemon.pty_write_buf.replaceRange(daemon.alloc, 0, n, &[_]u8{}) catch unreachable;
+                flushBufferedPty(daemon.alloc, pty_fd, &daemon.pty_write_buf);
+                if (daemon.pty_write_buf.items.len > 0) break;
             }
         }
         // Newly accepted clients are not in poll_fds yet, so only iterate over
@@ -1923,6 +1934,11 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                 if (last) break :daemon_loop;
             }
         }
+
+        // If client input or terminal-query handling queued PTY bytes during this
+        // poll cycle, try a non-blocking flush now instead of waiting for the
+        // next POLLOUT wakeup.
+        flushBufferedPty(daemon.alloc, pty_fd, &daemon.pty_write_buf);
     }
 }
 
@@ -1993,6 +2009,35 @@ test "flushBufferedWithWriter keeps unwritten tail after partial write" {
         try flushBufferedWithWriter(alloc, &buf, &writer, PartialWriter.write),
     );
     try std.testing.expectEqualStrings("ar-screen", buf.items);
+}
+
+test "flushBufferedPty drains writable file descriptor immediately" {
+    const alloc = std.testing.allocator;
+    const pipe_fds = try posix.pipe();
+    defer posix.close(pipe_fds[0]);
+    defer posix.close(pipe_fds[1]);
+
+    var buf = try std.ArrayList(u8).initCapacity(alloc, 16);
+    defer buf.deinit(alloc);
+    try buf.appendSlice(alloc, "ctrl-l");
+
+    flushBufferedPty(alloc, pipe_fds[1], &buf);
+    try std.testing.expectEqual(@as(usize, 0), buf.items.len);
+
+    var read_buf: [16]u8 = undefined;
+    const n = try posix.read(pipe_fds[0], &read_buf);
+    try std.testing.expectEqualStrings("ctrl-l", read_buf[0..n]);
+}
+
+test "flushBufferedPty clears buffered bytes on write error" {
+    const alloc = std.testing.allocator;
+
+    var buf = try std.ArrayList(u8).initCapacity(alloc, 16);
+    defer buf.deinit(alloc);
+    try buf.appendSlice(alloc, "clear");
+
+    flushBufferedPty(alloc, -1, &buf);
+    try std.testing.expectEqual(@as(usize, 0), buf.items.len);
 }
 
 fn handleSigwinch(_: i32, _: *const posix.siginfo_t, _: ?*anyopaque) callconv(.c) void {
