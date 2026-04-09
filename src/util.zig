@@ -339,11 +339,13 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
             sb_bottom.x = @intCast(pages.cols - 1);
 
             var scroll_fmt = ghostty_vt.formatter.TerminalFormatter.init(term, .vt);
-            scroll_fmt.content = .{ .selection = ghostty_vt.Selection.init(
-                screen_top,
-                sb_bottom,
-                false,
-            ) };
+            scroll_fmt.content = .{
+                .selection = ghostty_vt.Selection.init(
+                    screen_top,
+                    sb_bottom,
+                    false,
+                ),
+            };
             scroll_fmt.extra = .none; // no modes, cursor, keyboard — just content
             scroll_fmt.format(&builder.writer) catch |err| {
                 std.log.warn("failed to format scrollback err={s}", .{@errorName(err)});
@@ -361,17 +363,21 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
 
     // Restrict content to the active viewport only
     const active_tl = pages.pin(.{ .active = .{ .x = 0, .y = 0 } });
-    const active_br = pages.pin(.{ .active = .{
-        .x = @intCast(pages.cols - 1),
-        .y = @intCast(pages.rows - 1),
-    } });
+    const active_br = pages.pin(.{
+        .active = .{
+            .x = @intCast(pages.cols - 1),
+            .y = @intCast(pages.rows - 1),
+        },
+    });
 
     if (active_tl != null and active_br != null) {
-        vis_fmt.content = .{ .selection = ghostty_vt.Selection.init(
-            active_tl.?,
-            active_br.?,
-            false,
-        ) };
+        vis_fmt.content = .{
+            .selection = ghostty_vt.Selection.init(
+                active_tl.?,
+                active_br.?,
+                false,
+            ),
+        };
     }
     // Fallback: if pins are somehow invalid, use null selection (all content)
 
@@ -815,20 +821,6 @@ test "serializeTerminalState excludes synchronized output replay" {
     try std.testing.expect(std.mem.indexOf(u8, output, "\x1b[?2026h") == null);
 }
 
-// ---------------------------------------------------------------------------
-// Integration tests: serializeTerminalState roundtrip verification
-//
-// These tests exercise the ghostty-vt roundtrip pattern:
-//   1. Create Terminal A, feed VT sequences (scrollback, markers, cursor)
-//   2. Serialize A via serializeTerminalState()
-//   3. Create Terminal B (same dimensions), feed serialized bytes
-//   4. Compare B's screen content and cursor with A's
-//
-// This verifies that what the user sees after re-attach matches what the
-// daemon's terminal state actually contains — including in nested sessions
-// (zmx→SSH→zmx) where serialized state flows through multiple layers.
-// ---------------------------------------------------------------------------
-
 fn testCreateTerminal(alloc: std.mem.Allocator, cols: u16, rows: u16, vt_data: []const u8) !ghostty_vt.Terminal {
     var term = try ghostty_vt.Terminal.init(alloc, .{
         .cols = cols,
@@ -892,8 +884,7 @@ fn expectMarkerAtRow(alloc: std.mem.Allocator, term: *ghostty_vt.Terminal, marke
 test "serializeTerminalState roundtrip preserves cursor position" {
     const alloc = std.testing.allocator;
 
-    var term = try testCreateTerminal(alloc, 80, 24,
-        "\x1b[2J" ++ // clear
+    var term = try testCreateTerminal(alloc, 80, 24, "\x1b[2J" ++ // clear
         "\x1b[10;20H" // cursor at row 10, col 20 (1-indexed)
     );
     defer term.deinit(alloc);
@@ -909,14 +900,12 @@ test "serializeTerminalState roundtrip preserves cursor position" {
 test "serializeTerminalState roundtrip preserves CUP-positioned markers" {
     const alloc = std.testing.allocator;
 
-    var term = try testCreateTerminal(alloc, 80, 24,
-        "\x1b[2J" ++
+    var term = try testCreateTerminal(alloc, 80, 24, "\x1b[2J" ++
         "\x1b[2;5HMARK_A" ++
         "\x1b[6;15HMARK_B" ++
         "\x1b[10;30HMARK_C" ++
         "\x1b[14;50HMARK_D" ++
-        "\x1b[16;20H"
-    );
+        "\x1b[16;20H");
     defer term.deinit(alloc);
 
     var client = try serializeRoundtrip(alloc, &term);
@@ -947,13 +936,11 @@ test "serializeTerminalState with scrollback preserves visible content" {
     }
 
     // Clear screen and place markers at specific positions
-    try stream.nextSlice(
-        "\x1b[2J" ++
+    try stream.nextSlice("\x1b[2J" ++
         "\x1b[2;5HMARK_A" ++
         "\x1b[6;15HMARK_B" ++
         "\x1b[10;30HMARK_C" ++
-        "\x1b[16;20H"
-    );
+        "\x1b[16;20H");
 
     // Verify source terminal has scrollback
     const pages = &term.screens.active.pages;
@@ -989,12 +976,10 @@ test "serializeTerminalState nested roundtrip preserves content" {
             const line = std.fmt.bufPrint(&buf, "SCROLL_{d}\r\n", .{i}) catch unreachable;
             try inner_stream.nextSlice(line);
         }
-        try inner_stream.nextSlice(
-            "\x1b[2J" ++
+        try inner_stream.nextSlice("\x1b[2J" ++
             "\x1b[3;10HINNER_A" ++
             "\x1b[12;25HINNER_B" ++
-            "\x1b[20;5H"
-        );
+            "\x1b[20;5H");
     }
 
     // Record inner's ground truth
@@ -1030,8 +1015,7 @@ test "serializeTerminalState nested roundtrip preserves content" {
 test "serializeTerminalState alternate screen not leaked" {
     const alloc = std.testing.allocator;
 
-    var term = try testCreateTerminal(alloc, 80, 24,
-        "\x1b[?1049h" ++ // enter alt screen
+    var term = try testCreateTerminal(alloc, 80, 24, "\x1b[?1049h" ++ // enter alt screen
         "\x1b[2J\x1b[3;10HALT_MARK" ++ // write on alt screen
         "\x1b[?1049l" ++ // exit alt screen
         "\x1b[2J\x1b[2;5HMAIN_MARK\x1b[8;20H" // write on main screen
@@ -1052,13 +1036,11 @@ test "serializeTerminalState alternate screen not leaked" {
 test "serializeTerminalState size mismatch roundtrip" {
     const alloc = std.testing.allocator;
 
-    var term = try testCreateTerminal(alloc, 80, 30,
-        "\x1b[2J" ++
+    var term = try testCreateTerminal(alloc, 80, 30, "\x1b[2J" ++
         "\x1b[3;10HSIZE_A" ++
         "\x1b[12;20HSIZE_B" ++
         "\x1b[20;40HSIZE_C" ++
-        "\x1b[15;15H"
-    );
+        "\x1b[15;15H");
     defer term.deinit(alloc);
 
     // Resize to 24 rows (simulates outer terminal being smaller)
@@ -1085,12 +1067,10 @@ test "serializeTerminalState scrollback + size mismatch nested roundtrip" {
             const line = std.fmt.bufPrint(&buf, "LINE_{d}\r\n", .{i}) catch unreachable;
             try inner_stream.nextSlice(line);
         }
-        try inner_stream.nextSlice(
-            "\x1b[2J" ++
+        try inner_stream.nextSlice("\x1b[2J" ++
             "\x1b[3;10HSTRESS_A" ++
             "\x1b[12;25HSTRESS_B" ++
-            "\x1b[16;20H"
-        );
+            "\x1b[16;20H");
     }
 
     // Resize inner to 24 rows (outer terminal is smaller)
