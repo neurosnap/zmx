@@ -269,10 +269,6 @@ const FlushBufferedResult = enum {
     closed,
 };
 
-fn writeToFd(fd: i32, data: []const u8) !usize {
-    return posix.write(fd, data);
-}
-
 fn flushBufferedWithWriter(
     alloc: std.mem.Allocator,
     buf: *std.ArrayList(u8),
@@ -298,7 +294,7 @@ fn flushBufferedFd(
     fd: i32,
     buf: *std.ArrayList(u8),
 ) !FlushBufferedResult {
-    return flushBufferedWithWriter(alloc, buf, fd, writeToFd);
+    return flushBufferedWithWriter(alloc, buf, fd, posix.write);
 }
 
 /// Cfg is zmx's configuration container.
