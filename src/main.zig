@@ -1850,17 +1850,10 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                 daemon.pty_write_buf.replaceRange(daemon.alloc, 0, n, &[_]u8{}) catch unreachable;
             }
         }
-
-        var i: usize = daemon.clients.items.len;
-        // Only iterate over clients that were present when poll_fds was constructed
-        // poll_fds contains [server, pty, client0, client1, ...]
-        // So number of clients in poll_fds is poll_fds.items.len - 2
+        // Newly accepted clients are not in poll_fds yet, so only iterate over
+        // the clients that were present when this poll cycle started.
         const num_polled_clients = poll_fds.items.len - 2;
-        if (i > num_polled_clients) {
-            // If we have more clients than polled (i.e. we just accepted one), start from the
-            // polled ones
-            i = num_polled_clients;
-        }
+        var i: usize = @min(daemon.clients.items.len, num_polled_clients);
 
         clients_loop: while (i > 0) {
             i -= 1;
