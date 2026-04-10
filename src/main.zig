@@ -135,7 +135,22 @@ pub fn main() !void {
 
         var cmd_args_raw: std.ArrayList([]const u8) = .empty;
         defer cmd_args_raw.deinit(alloc);
+        const shell = util.detectShell();
+        var shell_basename = std.fs.path.basename(shell);
+        var detached = false;
         while (args.next()) |arg| {
+            // TODO: detect shell within the session instead of asking the user to tell us
+            // if the shell is fish.
+            // Because fish tracks exit code status via $status instead of $? we need some
+            // way to figure out what shell is being used inside the session.
+            if (std.mem.startsWith(u8, arg, "--fish")) {
+                shell_basename = "fish";
+                continue;
+            }
+            if (std.mem.startsWith(u8, arg, "-d")) {
+                detached = true;
+                continue;
+            }
             try cmd_args_raw.append(alloc, arg);
         }
         const clients = try std.ArrayList(*Client).initCapacity(alloc, 10);
@@ -157,14 +172,14 @@ pub fn main() !void {
             .cwd = cwd,
             .created_at = @intCast(std.time.timestamp()),
             .is_task_mode = true,
-            .leader_client_fd = undefined,
+            .leader_client_fd = null,
         };
         daemon.socket_path = socket.getSocketPath(alloc, cfg.socket_dir, sesh) catch |err| switch (err) {
             error.NameTooLong => return socket.printSessionNameTooLong(sesh, cfg.socket_dir),
             error.OutOfMemory => return err,
         };
         std.log.info("socket path={s}", .{daemon.socket_path});
-        return run(&daemon, cmd_args_raw.items);
+        return run(&daemon, detached, shell_basename, cmd_args_raw.items);
     } else if (std.mem.eql(u8, cmd, "kill") or std.mem.eql(u8, cmd, "k")) {
         var stderr_buffer: [1024]u8 = undefined;
         var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
@@ -240,6 +255,76 @@ pub fn main() !void {
             try args_raw.append(alloc, prefix);
         }
         return wait(&cfg, args_raw);
+    } else if (std.mem.eql(u8, cmd, "tail") or std.mem.eql(u8, cmd, "t")) {
+        var session_names: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (session_names.items) |sesh| {
+                alloc.free(sesh);
+            }
+            session_names.deinit(alloc);
+        }
+        while (args.next()) |session_name| {
+            const sesh = try socket.getSeshName(alloc, session_name);
+            try session_names.append(alloc, sesh);
+        }
+        // if no args are provided we assume they want to wait for all sessions matching the
+        // prefix.
+        if (session_names.items.len == 0) {
+            const prefix = socket.getSeshPrefix();
+            if (prefix.len == 0) {
+                return error.SessionNameRequired;
+            }
+            try session_names.append(alloc, prefix);
+        }
+
+        var client_socket_fds = try std.ArrayList(i32).initCapacity(alloc, session_names.items.len);
+        defer {
+            for (client_socket_fds.items) |client_fd| {
+                posix.close(client_fd);
+            }
+            client_socket_fds.deinit(alloc);
+        }
+
+        for (session_names.items) |session_name| {
+            const socket_path = socket.getSocketPath(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
+                error.NameTooLong => return socket.printSessionNameTooLong(session_name, cfg.socket_dir),
+                error.OutOfMemory => return err,
+            };
+            const client_sock = try socket.sessionConnect(socket_path);
+            try client_socket_fds.append(alloc, client_sock);
+        }
+        _ = try tail(client_socket_fds, false, false);
+    } else if (std.mem.eql(u8, cmd, "write") or std.mem.eql(u8, cmd, "wr")) {
+        const session_name = args.next() orelse "";
+        if (session_name.len == 0) return error.SessionNameRequired;
+        const file_path = args.next() orelse "";
+        if (file_path.len == 0) return error.FilePathRequired;
+
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd = std.posix.getcwd(&cwd_buf) catch "";
+        const clients = try std.ArrayList(*Client).initCapacity(alloc, 10);
+        const sesh = try socket.getSeshName(alloc, session_name);
+        defer alloc.free(sesh);
+        var daemon = Daemon{
+            .running = true,
+            .cfg = &cfg,
+            .alloc = alloc,
+            .clients = clients,
+            .session_name = sesh,
+            .socket_path = undefined,
+            .pid = undefined,
+            .command = null,
+            .cwd = cwd,
+            .created_at = @intCast(std.time.timestamp()),
+            .is_task_mode = true,
+            .leader_client_fd = null,
+        };
+        daemon.socket_path = socket.getSocketPath(alloc, cfg.socket_dir, sesh) catch |err| switch (err) {
+            error.NameTooLong => return socket.printSessionNameTooLong(sesh, cfg.socket_dir),
+            error.OutOfMemory => return err,
+        };
+        std.log.info("socket path={s}", .{daemon.socket_path});
+        try writeFile(&daemon, file_path);
     } else {
         return help();
     }
@@ -392,6 +477,7 @@ const Daemon = struct {
     is_task_mode: bool = false, // flag for when session is run as a task
     task_exit_code: ?u8 = null, // null = running or n/a, set when task completes
     task_ended_at: ?u64 = null, // timestamp when task exited
+    is_fish: bool = false, // true if session shell is fish (affects exit code variable)
     pty_write_buf: std.ArrayList(u8) = .empty,
 
     const EnsureSessionResult = struct {
@@ -896,11 +982,85 @@ const Daemon = struct {
         self.task_ended_at = null;
         self.is_task_mode = true;
 
-        self.queuePtyInput(payload);
+        if (payload.len == 0) return;
+
+        // First byte indicates shell type (0=bash/zsh, 1=fish)
+        self.is_fish = payload[0] == 1;
+        const cmd = payload[1..];
+
+        // Daemon appends the task marker so the client never injects
+        // shell-specific syntax, keeping Ctrl-C recovery clean.
+        const marker = if (self.is_fish)
+            "; echo ZMX_TASK_COMPLETED:$status"
+        else
+            "; echo ZMX_TASK_COMPLETED:$?";
+
+        if (cmd.len > 0 and cmd[cmd.len - 1] == '\r') {
+            self.queuePtyInput(cmd[0 .. cmd.len - 1]);
+        } else {
+            self.queuePtyInput(cmd);
+        }
+        self.queuePtyInput(marker);
+        self.queuePtyInput("\r");
+
         try ipc.appendMessage(self.alloc, &client.write_buf, .Ack, "");
         client.has_pending_output = true;
         self.has_had_client = true;
         std.log.debug("run command len={d}", .{payload.len});
+    }
+
+    pub fn handleWrite(self: *Daemon, client: *Client, payload: []const u8) !void {
+        // Wire format: [u32 path len][path bytes][file content]
+        if (payload.len < @sizeOf(u32)) return error.InvalidPayload;
+        const path_len = std.mem.bytesToValue(u32, payload[0..@sizeOf(u32)]);
+        if (payload.len < @sizeOf(u32) + path_len) return error.InvalidPayload;
+        const file_path = payload[@sizeOf(u32)..][0..path_len];
+        const file_content = payload[@sizeOf(u32) + path_len ..];
+
+        // Inject file creation through the PTY so it works over SSH.
+        // Base64-encode content and pipe through printf | base64 -d > file.
+        // Chunk large files to stay under command-line length limits.
+        // 48000 is divisible by 3 (clean base64 boundaries) and encodes
+        // to ~64KB, well under typical ARG_MAX.
+        const chunk_size = 48000;
+        var offset: usize = 0;
+        var is_first = true;
+
+        while (offset < file_content.len or is_first) {
+            const end = @min(offset + chunk_size, file_content.len);
+            const chunk = file_content[offset..end];
+
+            const encoded_len = std.base64.standard.Encoder.calcSize(chunk.len);
+            const encoded = try self.alloc.alloc(u8, encoded_len);
+            defer self.alloc.free(encoded);
+            _ = std.base64.standard.Encoder.encode(encoded, chunk);
+
+            // Bracketed paste mode so the shell buffers input
+            // rather than processing each keystroke individually.
+            self.queuePtyInput("\x1b[200~");
+            self.queuePtyInput("printf '%s' '");
+            self.queuePtyInput(encoded);
+            if (is_first) {
+                self.queuePtyInput("' | base64 -d > '");
+            } else {
+                self.queuePtyInput("' | base64 -d >> '");
+            }
+            self.queuePtyInput(file_path);
+            self.queuePtyInput("'");
+            self.queuePtyInput("\x1b[201~");
+            self.queuePtyInput("\r");
+
+            offset = end;
+            is_first = false;
+        }
+
+        try ipc.appendMessage(self.alloc, &client.write_buf, .Ack, "");
+        client.has_pending_output = true;
+        self.has_had_client = true;
+        std.log.debug(
+            "write command len={d} file_path={s}",
+            .{ file_content.len, file_path },
+        );
     }
 };
 
@@ -930,35 +1090,209 @@ fn help() !void {
     const help_text =
         \\zmx - session persistence for terminal processes
         \\
-        \\Usage: zmx <command> [args]
+        \\Usage: zmx <command> [args...]
         \\
         \\Commands:
-        \\  [a]ttach <name> [command...]   Attach to session, creating session if needed
-        \\  [r]un <name> [command...]      Send command without attaching, creating session if needed
-        \\  [d]etach                       Detach all clients from current session (ctrl+\ for current client)
-        \\  [l]ist [--short]               List active sessions
-        \\  [k]ill <name>... [--force]     Kill a session and all attached clients
-        \\  [hi]story <name> [--vt|--html] Output session scrollback (--vt or --html for escape sequences)
-        \\  [w]ait <name>...               Wait for session tasks to complete
-        \\  [c]ompletions <shell>          Completion scripts for shell integration (bash, zsh, or fish)
-        \\  [v]ersion                      Show version information
-        \\  [h]elp                         Show this help message
+        \\  [a]ttach <name> [command...]             Attach to session, creating if needed
+        \\  [r]un <name> [-d] [--fish] [command...]  Send command without attaching
+        \\  [wr]ite <name> <file_path>               Write stdin to file_path through the session
+        \\  [d]etach                                 Detach all clients (ctrl+\\ for current client)
+        \\  [l]ist [--short]                         List active sessions
+        \\  [k]ill <name>... [--force]               Kill session and all attached clients
+        \\  [hi]story <name> [--vt|--html]           Output session scrollback
+        \\  [w]ait <name>...                         Wait for session tasks to complete
+        \\  [t]ail <name>...                         Follow session output
+        \\  [c]ompletions <shell>                    Shell completions (bash, zsh, fish)
+        \\  [v]ersion                                Show version
+        \\  [h]elp                                   Show this help
+        \\
+        \\Attach:
+        \\  This will spawn a login $SHELL with a PTY.  You can provide a
+        \\  command instead of creating a shell.
+        \\
+        \\  Examples:
+        \\    zmx attach dev
+        \\    zmx attach dev vim
+        \\
+        \\History:
+        \\  This should generally be used with `tail` to print the last lines
+        \\  of the session's scrollback history.
+        \\
+        \\  Examples:
+        \\    zmx history <session> | tail -100
+        \\
+        \\Run:
+        \\  Commands are passed as-is; do not wrap in quotes.
+        \\  Commands run sequentially; do not send multiple in parallel.
+        \\  Avoid interactive programs (pagers, editors, prompts) -- they hang.
+        \\
+        \\  `-d` will detach from the calling terminal. Use `wait` to track
+        \\  its status.
+        \\
+        \\  `--fish` is required when the session runs fish shell.
+        \\
+        \\  If the command hangs, send Ctrl+C to recover:
+        \\    zmx run <session> $'\\x03'
+        \\
+        \\  Examples:
+        \\    zmx run dev ls
+        \\    zmx run dev --fish ls src
+        \\    zmx run dev zig build
+        \\    zmx run dev grep -r TODO src
+        \\    zmx run dev git -c core.pager=cat diff
+        \\
+        \\Write:
+        \\  Writes stdin to file_path inside the session. Works over SSH.
+        \\  file_path can be absolute or relative to the session shell's cwd.
+        \\  Requires base64 and printf in the remote environment.
+        \\  Large files are chunked automatically (~48KB per chunk).
+        \\  File path must not contain single quotes.
+        \\
+        \\  Examples:
+        \\    echo "hello" | zmx write dev /tmp/hello.txt
+        \\    cat main.zig | zmx write dev src/main.zig
+        \\
+        \\Wait:
+        \\  Used with a detached run task to track its status.  Multiple
+        \\  sessions can be provided.
+        \\
+        \\  Examples:
+        \\    zmx run -d dev sleep 10
+        \\    zmx wait dev
+        \\    zmx wait dev other
         \\
         \\Environment variables:
-        \\  - SHELL                Determines which shell is used when creating a session
-        \\  - ZMX_DIR              Controls which folder is used to store unix socket files (prio: 1)
-        \\  - XDG_RUNTIME_DIR      Controls which folder is used to store unix socket files (prio: 2)
-        \\  - TMPDIR               Controls which folder is used to store unix socket files (prio: 3)
-        \\  - ZMX_SESSION          The session name we inject into every zmx session automatically
-        \\  - ZMX_SESSION_PREFIX   Adds this value to the start of every session name for all commands
-        \\  - ZMX_DIR_MODE         Sets the mode for the socket and log directories (octal, defaults to 0750)
-        \\  - ZMX_LOG_MODE         Sets the mode for the log files (octal, defaults to 0640)
+        \\  SHELL                Default shell for new sessions
+        \\  ZMX_DIR              Socket directory (priority 1)
+        \\  XDG_RUNTIME_DIR      Socket directory (priority 2)
+        \\  TMPDIR               Socket directory (priority 3)
+        \\  ZMX_SESSION          Session name (injected automatically)
+        \\  ZMX_SESSION_PREFIX   Prefix added to all session names
+        \\  ZMX_DIR_MODE         Sets mode for socket and log directories (octal, defaults to 0750)
+        \\  ZMX_LOG_MODE         Sets mode for log files (octal, defaults to 0640)
         \\
     ;
-    var buf: [4096]u8 = undefined;
+    var buf: [8192]u8 = undefined;
     var w = std.fs.File.stdout().writer(&buf);
     try w.interface.print(help_text, .{});
     try w.interface.flush();
+}
+
+fn tail(client_socket_fds: std.ArrayList(i32), detached: bool, is_run_cmd: bool) !u8 {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    var poll_fds = try std.ArrayList(posix.pollfd).initCapacity(alloc, 4);
+    defer poll_fds.deinit(alloc);
+
+    var read_buf = try ipc.SocketBuffer.init(alloc);
+    defer read_buf.deinit();
+
+    var stdout_buf = try std.ArrayList(u8).initCapacity(alloc, 4096);
+    defer stdout_buf.deinit(alloc);
+
+    var is_first_line = true;
+    var task_complete_code: ?u8 = null;
+
+    while (true) {
+        poll_fds.clearRetainingCapacity();
+
+        // Poll socket for read
+        for (client_socket_fds.items) |client_sock_fd| {
+            try poll_fds.append(alloc, .{
+                .fd = client_sock_fd,
+                .events = posix.POLL.IN,
+                .revents = 0,
+            });
+        }
+
+        // Poll for write if we have pending data
+        if (stdout_buf.items.len > 0) {
+            try poll_fds.append(alloc, .{
+                .fd = posix.STDOUT_FILENO,
+                .events = posix.POLL.OUT,
+                .revents = 0,
+            });
+        }
+
+        _ = posix.poll(poll_fds.items, -1) catch |err| {
+            if (err == error.Interrupted) continue; // EINTR from signal, loop again
+            return err;
+        };
+
+        // Handle socket read (incoming Output messages from daemon)
+        for (poll_fds.items) |*poll_fd| {
+            if (poll_fd.revents & posix.POLL.IN != 0) {
+                const n = read_buf.read(poll_fd.fd) catch |err| {
+                    if (err == error.WouldBlock) continue;
+                    if (err == error.ConnectionResetByPeer or err == error.BrokenPipe) {
+                        return 1;
+                    }
+                    std.log.err("daemon read err={s}", .{@errorName(err)});
+                    return err;
+                };
+                if (n == 0) {
+                    // Server closed connection
+                    return 0;
+                }
+
+                while (read_buf.next()) |msg| {
+                    switch (msg.header.tag) {
+                        .Ack => {
+                            if (detached) {
+                                _ = posix.write(posix.STDOUT_FILENO, "command sent!\n") catch |err| blk: {
+                                    if (err == error.WouldBlock) break :blk 0;
+                                    return err;
+                                };
+                                return 0;
+                            }
+                        },
+                        .Output => {
+                            if (msg.payload.len > 0) {
+                                // strip the first line since it is an echo of
+                                // the command.
+                                if (!detached and is_run_cmd and is_first_line) {
+                                    if (std.mem.indexOfScalar(u8, msg.payload, '\n')) |nl| {
+                                        is_first_line = false;
+                                        if (nl + 1 < msg.payload.len) {
+                                            try stdout_buf.appendSlice(alloc, msg.payload[nl + 1 ..]);
+                                        }
+                                    }
+                                } else {
+                                    try stdout_buf.appendSlice(alloc, msg.payload);
+                                }
+                            }
+                        },
+                        .TaskComplete => {
+                            task_complete_code = if (msg.payload.len > 0) msg.payload[0] else 0;
+                        },
+                        else => {},
+                    }
+                }
+            }
+        }
+
+        if (stdout_buf.items.len > 0) {
+            const n = posix.write(posix.STDOUT_FILENO, stdout_buf.items) catch |err| blk: {
+                if (err == error.WouldBlock) break :blk 0;
+                return err;
+            };
+            if (task_complete_code) |exit_code| {
+                return exit_code;
+            }
+            if (n > 0) {
+                try stdout_buf.replaceRange(alloc, 0, n, &[_]u8{});
+            }
+        }
+
+        // Check for HUP/ERR on any socket
+        for (poll_fds.items) |poll_fd| {
+            if (poll_fd.revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
+                return 0;
+            }
+        }
+    }
 }
 
 fn wait(cfg: *Cfg, session_names: std.ArrayList([]const u8)) !void {
@@ -1387,7 +1721,95 @@ fn attach(daemon: *Daemon) !void {
     }
 }
 
-fn run(daemon: *Daemon, command_args: [][]const u8) !void {
+fn writeFile(daemon: *Daemon, file_path: []const u8) !void {
+    var buf: [4096]u8 = undefined;
+    var w = std.fs.File.stdout().writer(&buf);
+    const sesh_result = try daemon.ensureSession();
+    if (sesh_result.is_daemon) return;
+
+    if (sesh_result.created) {
+        try w.interface.print("session \"{s}\" created\n", .{daemon.session_name});
+        try w.interface.flush();
+    }
+    const stdin_fd = posix.STDIN_FILENO;
+    var stdin_buf = try std.ArrayList(u8).initCapacity(daemon.alloc, 4096);
+    defer stdin_buf.deinit(daemon.alloc);
+
+    while (true) {
+        var tmp: [4096]u8 = undefined;
+        const n = posix.read(stdin_fd, &tmp) catch |err| {
+            if (err == error.WouldBlock) break;
+            return err;
+        };
+        if (n == 0) break;
+        try stdin_buf.appendSlice(daemon.alloc, tmp[0..n]);
+    }
+
+    const socket_path = socket.getSocketPath(
+        daemon.alloc,
+        daemon.cfg.socket_dir,
+        daemon.session_name,
+    ) catch |err| switch (err) {
+        error.NameTooLong => return socket.printSessionNameTooLong(
+            daemon.session_name,
+            daemon.cfg.socket_dir,
+        ),
+        error.OutOfMemory => return err,
+    };
+    var dir = try std.fs.openDirAbsolute(daemon.cfg.socket_dir, .{});
+    defer dir.close();
+
+    const result = ipc.probeSession(daemon.alloc, socket_path) catch |err| {
+        std.log.err("session unresponsive: {s}", .{@errorName(err)});
+        if (err == error.ConnectionRefused) {
+            socket.cleanupStaleSocket(dir, daemon.session_name);
+            w.interface.print("cleaned up stale session {s}\n", .{daemon.session_name}) catch {};
+        } else {
+            w.interface.print(
+                "session {s} is unresponsive ({s})\ndaemon may be busy: try again\n",
+                .{ daemon.session_name, @errorName(err) },
+            ) catch {};
+        }
+        w.interface.flush() catch {};
+        return;
+    };
+
+    defer posix.close(result.fd);
+
+    // Build wire payload: [u32 path len][path bytes][file content]
+    var wire_buf = try std.ArrayList(u8).initCapacity(
+        daemon.alloc,
+        @sizeOf(u32) + file_path.len + stdin_buf.items.len,
+    );
+    defer wire_buf.deinit(daemon.alloc);
+    const path_len: u32 = @intCast(file_path.len);
+    try wire_buf.appendSlice(daemon.alloc, std.mem.asBytes(&path_len));
+    try wire_buf.appendSlice(daemon.alloc, file_path);
+    try wire_buf.appendSlice(daemon.alloc, stdin_buf.items);
+
+    ipc.send(result.fd, .Write, wire_buf.items) catch |err| switch (err) {
+        error.BrokenPipe, error.ConnectionResetByPeer => return,
+        else => return err,
+    };
+
+    var sb = try ipc.SocketBuffer.init(daemon.alloc);
+    defer sb.deinit();
+
+    const n = sb.read(result.fd) catch return error.ReadFailed;
+    if (n == 0) return error.ConnectionClosed;
+
+    while (sb.next()) |msg| {
+        if (msg.header.tag == .Ack) {
+            try w.interface.print("file created {s}\n", .{file_path});
+            try w.interface.flush();
+            return;
+        }
+    }
+
+    return error.NoAckReceived;
+}
+
+fn run(daemon: *Daemon, detached: bool, shell_basename: []const u8, command_args: [][]const u8) !void {
     const alloc = daemon.alloc;
     var buf: [4096]u8 = undefined;
     var w = std.fs.File.stdout().writer(&buf);
@@ -1404,25 +1826,17 @@ fn run(daemon: *Daemon, command_args: [][]const u8) !void {
         try w.interface.flush();
     }
 
-    const shell = util.detectShell();
-    const shell_basename = std.fs.path.basename(shell);
-    // We append a task marker so we can:
-    //   - know when the command finishes
-    //   - capture its exit status
-    // This information is retrived when running `zmx list`
-    const inline_task_marker = if (std.mem.eql(u8, shell_basename, "fish"))
-        "; echo ZMX_TASK_COMPLETED:$status"
-    else
-        "; echo ZMX_TASK_COMPLETED:$?";
-    const stdin_task_marker = if (std.mem.eql(u8, shell_basename, "fish"))
-        "echo ZMX_TASK_COMPLETED:$status"
-    else
-        "echo ZMX_TASK_COMPLETED:$?";
+    // Prefix byte tells the daemon which shell syntax to use for the
+    // task-completion marker (0 = bash/zsh  $?, 1 = fish  $status).
+    // The daemon appends the marker itself so the client never injects
+    // shell-specific text -- keeping recovery (Ctrl-C) clean.
+    const is_fish: u8 = if (std.mem.eql(u8, shell_basename, "fish")) 1 else 0;
 
     if (command_args.len > 0) {
         var cmd_list = std.ArrayList(u8).empty;
         defer cmd_list.deinit(alloc);
 
+        try cmd_list.append(alloc, is_fish);
         for (command_args, 0..) |arg, i| {
             if (i > 0) try cmd_list.append(alloc, ' ');
             if (util.shellNeedsQuoting(arg)) {
@@ -1434,7 +1848,6 @@ fn run(daemon: *Daemon, command_args: [][]const u8) !void {
             }
         }
 
-        try cmd_list.appendSlice(alloc, inline_task_marker);
         // \r, not \n: once the shell is at the readline prompt the PTY is in
         // raw mode; readline's accept-line binds to CR. The first-ever run
         // works with \n only because it arrives during shell startup while
@@ -1449,6 +1862,7 @@ fn run(daemon: *Daemon, command_args: [][]const u8) !void {
             var stdin_buf = try std.ArrayList(u8).initCapacity(alloc, 4096);
             defer stdin_buf.deinit(alloc);
 
+            try stdin_buf.append(alloc, is_fish);
             while (true) {
                 var tmp: [4096]u8 = undefined;
                 const n = posix.read(stdin_fd, &tmp) catch |err| {
@@ -1459,7 +1873,7 @@ fn run(daemon: *Daemon, command_args: [][]const u8) !void {
                 try stdin_buf.appendSlice(alloc, tmp[0..n]);
             }
 
-            if (stdin_buf.items.len > 0) {
+            if (stdin_buf.items.len > 1) {
                 // Normalize any trailing newline to CR so readline (raw mode)
                 // accepts each line.
                 if (stdin_buf.items[stdin_buf.items.len - 1] == '\n') {
@@ -1467,9 +1881,6 @@ fn run(daemon: *Daemon, command_args: [][]const u8) !void {
                 } else {
                     try stdin_buf.append(alloc, '\r');
                 }
-
-                try stdin_buf.appendSlice(alloc, stdin_task_marker);
-                try stdin_buf.append(alloc, '\r');
 
                 cmd_to_send = try alloc.dupe(u8, stdin_buf.items);
                 allocated_cmd = @constCast(cmd_to_send.?);
@@ -1481,41 +1892,20 @@ fn run(daemon: *Daemon, command_args: [][]const u8) !void {
         return error.CommandRequired;
     }
 
-    const probe_result = ipc.probeSession(alloc, daemon.socket_path) catch |err| {
-        std.log.err("session not ready: {s}", .{@errorName(err)});
-        return error.SessionNotReady;
-    };
-    defer posix.close(probe_result.fd);
+    const client_sock = try socket.sessionConnect(daemon.socket_path);
+    defer posix.close(client_sock);
 
-    ipc.send(probe_result.fd, .Run, cmd_to_send.?) catch |err| switch (err) {
+    var fds = try std.ArrayList(i32).initCapacity(alloc, 1);
+    defer fds.deinit(alloc);
+    try fds.append(alloc, client_sock);
+
+    ipc.send(client_sock, .Run, cmd_to_send.?) catch |err| switch (err) {
         error.ConnectionResetByPeer, error.BrokenPipe => return,
         else => return err,
     };
 
-    var poll_fds = [_]posix.pollfd{
-        .{ .fd = probe_result.fd, .events = posix.POLL.IN, .revents = 0 },
-    };
-    const poll_result = posix.poll(&poll_fds, 5000) catch return error.PollFailed;
-    if (poll_result == 0) {
-        std.log.err("timeout waiting for ack", .{});
-        return error.Timeout;
-    }
-
-    var sb = try ipc.SocketBuffer.init(alloc);
-    defer sb.deinit();
-
-    const n = sb.read(probe_result.fd) catch return error.ReadFailed;
-    if (n == 0) return error.ConnectionClosed;
-
-    while (sb.next()) |msg| {
-        if (msg.header.tag == .Ack) {
-            try w.interface.print("command sent\n", .{});
-            try w.interface.flush();
-            return;
-        }
-    }
-
-    return error.NoAckReceived;
+    const exit_code = try tail(fds, detached, true);
+    posix.exit(exit_code);
 }
 
 const ClientResult = struct {
@@ -1826,7 +2216,12 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                             daemon.task_ended_at = @intCast(std.time.timestamp());
 
                             std.log.info("task completed exit_code={d}", .{exit_code});
-                            // Shell continues running - no break here
+
+                            // Notify connected clients
+                            for (daemon.clients.items) |c| {
+                                ipc.appendMessage(daemon.alloc, &c.write_buf, .TaskComplete, &[_]u8{exit_code}) catch {};
+                                c.has_pending_output = true;
+                            }
                         }
                     }
 
@@ -1918,7 +2313,8 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                         .Info => try daemon.handleInfo(client),
                         .History => try daemon.handleHistory(client, &term, msg.payload),
                         .Run => try daemon.handleRun(client, msg.payload),
-                        .Output, .Ack => {},
+                        .Output, .Ack, .TaskComplete => {},
+                        .Write => try daemon.handleWrite(client, msg.payload),
                         _ => std.log.warn(
                             "ignoring unknown IPC tag={d}",
                             .{@intFromEnum(msg.header.tag)},

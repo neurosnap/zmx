@@ -11,9 +11,14 @@ Use spec: https://common-changelog.org/
   - Non-leader clients are read-only until they send user input bytes and takeover leadership
   - When a leader is promoted we immediately resize to their window size
 - `zmx attach` now lets users switch to another session from within a session
+- `zmx tail` will receive all outout from sessions in read-only mode
+- `zmx write` will pipe data from stdin, convert to base64, chunk, and send data through pty to write to a file
 
 ### Changed
 
+- *BREAKING* `zmx run` is now synchonous by default and tails the session
+  - Use detached mode (`-d`) for previous behavior
+- `zmx run` accepts `--fish` flag to indicate the session's shell is fish
 - `zmx kill` now supports multiple args and it will kill sessions that match a prefix
   - e.g. `zmx kill d.` will kill all sessions that match that prefix
 

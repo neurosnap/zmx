@@ -71,16 +71,18 @@ zig build -Doptimize=ReleaseSafe --prefix ~/.local
 Usage: zmx <command> [args]
 
 Commands:
-  [a]ttach <name> [command...]   Attach to session, creating session if needed
-  [r]un <name> [command...]      Send command without attaching, creating session if needed
-  [d]etach                       Detach all clients from current session  (ctrl+\ for current client)
-  [l]ist [--short]               List active sessions
-  [k]ill <name>... [--force]     Kill a session and all attached clients
-  [hi]story <name> [--vt|--html] Output session scrollback (--vt or --html for escape sequences)
-  [w]ait <name>...               Wait for session tasks to complete
-  [c]ompletions <shell>          Completion scripts for shell integration (bash, zsh, or fish)
-  [v]ersion                      Show version information
-  [h]elp                         Show this help message
+  [a]ttach <name> [command...]             Attach to session, creating if needed
+  [r]un <name> [-d] [--fish] [command...]  Send command without attaching
+  [wr]ite <name> <file_path>               Write stdin to file_path through the session
+  [d]etach                                 Detach all clients (ctrl+\ for current client)
+  [l]ist [--short]                         List active sessions
+  [k]ill <name>... [--force]               Kill session and all attached clients
+  [hi]story <name> [--vt|--html]           Output session scrollback
+  [w]ait <name>...                         Wait for session tasks to complete
+  [t]ail <name>...                         Follow session output
+  [c]ompletions <shell>                    Shell completions (bash, zsh, fish)
+  [v]ersion                                Show version
+  [h]elp                                   Show this help
 ```
 
 ### examples
