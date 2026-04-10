@@ -1766,14 +1766,14 @@ fn switchSesh(daemon: *Daemon, current_sesh: []const u8) !void {
         w.interface.flush() catch {};
         return error.SessionNotFound;
     }
-    const result = ipc.probeSession(daemon.alloc, socket_path) catch |err| {
+    const fd = ipc.connectSession(socket_path) catch |err| {
         std.log.err("session unresponsive: {s}", .{@errorName(err)});
         if (err == error.ConnectionRefused) socket.cleanupStaleSocket(dir, current_sesh);
         return;
     };
-    defer posix.close(result.fd);
+    defer posix.close(fd);
 
-    ipc.send(result.fd, .Switch, next_session) catch |err| switch (err) {
+    ipc.send(fd, .Switch, next_session) catch |err| switch (err) {
         error.BrokenPipe, error.ConnectionResetByPeer => return,
         else => return err,
     };
