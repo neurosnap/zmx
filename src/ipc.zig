@@ -43,8 +43,11 @@ pub fn getTerminalSize(fd: i32) Resize {
 pub const MAX_CMD_LEN = 256;
 pub const MAX_CWD_LEN = 256;
 
+/// Frozen wire shape. Do NOT add fields — new stats go in new `Tag` values
+/// so old daemons (whose `_` arm ignores unknown tags) stay reachable.
+/// Changing `@sizeOf(Info)` breaks `zmx list` against running daemons.
 pub const Info = extern struct {
-    clients_len: usize,
+    clients_len: u64,
     pid: i32,
     cmd_len: u16,
     cwd_len: u16,
@@ -174,10 +177,25 @@ pub const SocketBuffer = struct {
     }
 };
 
+const ConnectError = error{
+    ConnectionRefused,
+    Unexpected,
+};
+
+/// Unlike `probeSession`, does not round-trip `Info` — kill/detach/history/run
+/// stay usable against version-skewed daemons.
+pub fn connectSession(socket_path: []const u8) ConnectError!i32 {
+    return socket.sessionConnect(socket_path) catch |err| switch (err) {
+        error.ConnectionRefused => return error.ConnectionRefused,
+        else => return error.Unexpected,
+    };
+}
+
 const SessionProbeError = error{
     Timeout,
     ConnectionRefused,
     Unexpected,
+    InfoSizeMismatch,
 };
 
 const SessionProbeResult = struct {
@@ -190,10 +208,7 @@ pub fn probeSession(
     socket_path: []const u8,
 ) SessionProbeError!SessionProbeResult {
     const timeout_ms = 1000;
-    const fd = socket.sessionConnect(socket_path) catch |err| switch (err) {
-        error.ConnectionRefused => return error.ConnectionRefused,
-        else => return error.Unexpected,
-    };
+    const fd = try connectSession(socket_path);
     errdefer posix.close(fd);
 
     send(fd, .Info, "") catch return error.Unexpected;
@@ -212,13 +227,31 @@ pub fn probeSession(
 
     while (sb.next()) |msg| {
         if (msg.header.tag == .Info) {
-            if (msg.payload.len == @sizeOf(Info)) {
-                return .{
-                    .fd = fd,
-                    .info = std.mem.bytesToValue(Info, msg.payload[0..@sizeOf(Info)]),
-                };
-            }
+            if (msg.payload.len != @sizeOf(Info)) return error.InfoSizeMismatch;
+            return .{
+                .fd = fd,
+                .info = std.mem.bytesToValue(Info, msg.payload[0..@sizeOf(Info)]),
+            };
         }
     }
     return error.Unexpected;
+}
+
+test "Info wire size is frozen" {
+    // Bumping this means version-skewed `zmx list` breaks. See doc comment
+    // on `Info` — add a new `Tag` instead of growing this struct.
+    try std.testing.expectEqual(@as(usize, 552), @sizeOf(Info));
+    // packed struct{u8,u32} backs to u40 → @sizeOf rounds to 8, not 5.
+    try std.testing.expectEqual(@as(usize, 8), @sizeOf(Header));
+}
+
+test "zeroed Info has no stack garbage in wire bytes" {
+    var info = std.mem.zeroes(Info);
+    info.clients_len = 3;
+    info.pid = 999;
+    info.task_exit_code = 7;
+    const bytes = std.mem.asBytes(&info);
+    // Tail padding after task_exit_code must be zero (asBytes ships it).
+    const last_field_end = @offsetOf(Info, "task_exit_code") + @sizeOf(u8);
+    for (bytes[last_field_end..]) |b| try std.testing.expectEqual(@as(u8, 0), b);
 }
