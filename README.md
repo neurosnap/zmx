@@ -25,6 +25,8 @@
 - Works on mac and linux
 - This project does **NOT** provide windows, tabs, or splits
 
+[demo video](https://youtu.be/UIXj0_rhPgI?si=NolwGR4GTCQOESy6)
+
 ## install
 
 ### binaries
