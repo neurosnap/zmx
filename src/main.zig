@@ -157,7 +157,6 @@ pub fn main() !void {
             .cwd = cwd,
             .created_at = @intCast(std.time.timestamp()),
             .is_task_mode = true,
-            .task_command = cmd_args_raw.items,
             .leader_client_fd = undefined,
         };
         daemon.socket_path = socket.getSocketPath(alloc, cfg.socket_dir, sesh) catch |err| switch (err) {
@@ -393,7 +392,6 @@ const Daemon = struct {
     is_task_mode: bool = false, // flag for when session is run as a task
     task_exit_code: ?u8 = null, // null = running or n/a, set when task completes
     task_ended_at: ?u64 = null, // timestamp when task exited
-    task_command: ?[]const []const u8 = null,
     pty_write_buf: std.ArrayList(u8) = .empty,
 
     const EnsureSessionResult = struct {
@@ -806,7 +804,7 @@ const Daemon = struct {
         // shell-special characters so the displayed command is copy-pasteable.
         var cmd_buf: [ipc.MAX_CMD_LEN]u8 = undefined;
         var cmd_len: u16 = 0;
-        const cur_cmd = self.command orelse self.task_command;
+        const cur_cmd = self.command;
         if (cur_cmd) |args| {
             for (args, 0..) |arg, i| {
                 const quoted = if (util.shellNeedsQuoting(arg))
