@@ -938,6 +938,8 @@ fn help() !void {
         \\  - TMPDIR               Controls which folder is used to store unix socket files (prio: 3)
         \\  - ZMX_SESSION          The session name we inject into every zmx session automatically
         \\  - ZMX_SESSION_PREFIX   Adds this value to the start of every session name for all commands
+        \\  - ZMX_DIR_MODE         Sets the mode for the socket and log directories (octal, defaults to 0750)
+        \\  - ZMX_LOG_MODE         Sets the mode for the log files (octal, defaults to 0640)
         \\
     ;
     var buf: [4096]u8 = undefined;
