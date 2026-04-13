@@ -7,15 +7,17 @@ pub const LogSystem = struct {
     max_size: u64 = 5 * 1024 * 1024, // 5MB
     path: []const u8 = "",
     alloc: std.mem.Allocator = undefined,
+    mode: u32 = 0o640,
 
-    pub fn init(self: *LogSystem, alloc: std.mem.Allocator, path: []const u8) !void {
+    pub fn init(self: *LogSystem, alloc: std.mem.Allocator, path: []const u8, mode: u32) !void {
         self.alloc = alloc;
         self.path = try alloc.dupe(u8, path);
+        self.mode = mode;
 
         const file = std.fs.openFileAbsolute(path, .{ .mode = .read_write }) catch |err| switch (err) {
             error.FileNotFound => try std.fs.createFileAbsolute(
                 path,
-                .{ .read = true, .mode = 0o640 },
+                .{ .read = true, .mode = @intCast(self.mode) },
             ),
             else => return err,
         };
@@ -93,7 +95,7 @@ pub const LogSystem = struct {
 
         self.file = try std.fs.createFileAbsolute(
             self.path,
-            .{ .truncate = true, .read = true, .mode = 0o640 },
+            .{ .truncate = true, .read = true, .mode = @intCast(self.mode) },
         );
         self.current_size = 0;
     }
