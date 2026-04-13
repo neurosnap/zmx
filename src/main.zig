@@ -333,6 +333,39 @@ const Cfg = struct {
     }
 };
 
+test "Cfg.init uses default modes when env vars are not set" {
+    const alloc = std.testing.allocator;
+
+    // Ensure they are not set
+    _ = cross.c.unsetenv("ZMX_DIR_MODE");
+    _ = cross.c.unsetenv("ZMX_LOG_MODE");
+
+    var cfg = try Cfg.init(alloc);
+    defer cfg.deinit(alloc);
+
+    try std.testing.expectEqual(@as(u32, 0o750), cfg.dir_mode);
+    try std.testing.expectEqual(@as(u32, 0o640), cfg.log_mode);
+}
+
+test "Cfg.init uses custom modes from env vars" {
+    const alloc = std.testing.allocator;
+
+    // Set custom octal values
+    _ = cross.c.setenv("ZMX_DIR_MODE", "770", 1);
+    _ = cross.c.setenv("ZMX_LOG_MODE", "660", 1);
+    defer {
+        _ = cross.c.unsetenv("ZMX_DIR_MODE");
+        _ = cross.c.unsetenv("ZMX_LOG_MODE");
+    }
+
+    var cfg = try Cfg.init(alloc);
+    defer cfg.deinit(alloc);
+
+    try std.testing.expectEqual(@as(u32, 0o770), cfg.dir_mode);
+    try std.testing.expectEqual(@as(u32, 0o660), cfg.log_mode);
+}
+
+
 /// Daemon is responsible for managing a zmx session.
 ///
 /// It holds all the state for a running session.  Instead of a single daemon for all sessions, we
