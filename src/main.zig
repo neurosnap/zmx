@@ -55,7 +55,7 @@ pub fn main() !void {
 
     const log_path = try std.fs.path.join(alloc, &.{ cfg.log_dir, "zmx.log" });
     defer alloc.free(log_path);
-    try log_system.init(alloc, log_path);
+    try log_system.init(alloc, log_path, cfg.log_mode);
     defer log_system.deinit();
 
     const cmd = args.next() orelse {
@@ -270,15 +270,29 @@ const Cfg = struct {
     socket_dir: []const u8,
     log_dir: []const u8,
     max_scrollback: usize = 10_000_000,
+    dir_mode: u32 = 0o750,
+    log_mode: u32 = 0o640,
 
     pub fn init(alloc: std.mem.Allocator) !Cfg {
         const socket_dir = try socketDir(alloc);
         const log_dir = try std.fmt.allocPrint(alloc, "{s}/logs", .{socket_dir});
         errdefer alloc.free(log_dir);
 
+        const dir_mode = if (std.posix.getenv("ZMX_DIR_MODE")) |m|
+            std.fmt.parseInt(u32, m, 8) catch 0o750
+        else
+            0o750;
+
+        const log_mode = if (std.posix.getenv("ZMX_LOG_MODE")) |m|
+            std.fmt.parseInt(u32, m, 8) catch 0o640
+        else
+            0o640;
+
         var cfg = Cfg{
             .socket_dir = socket_dir,
             .log_dir = log_dir,
+            .dir_mode = dir_mode,
+            .log_mode = log_mode,
         };
 
         try cfg.mkdir();
@@ -307,12 +321,12 @@ const Cfg = struct {
     }
 
     pub fn mkdir(self: *Cfg) !void {
-        posix.mkdirat(posix.AT.FDCWD, self.socket_dir, 0o750) catch |err| switch (err) {
+        posix.mkdirat(posix.AT.FDCWD, self.socket_dir, @intCast(self.dir_mode)) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
 
-        posix.mkdirat(posix.AT.FDCWD, self.log_dir, 0o750) catch |err| switch (err) {
+        posix.mkdirat(posix.AT.FDCWD, self.log_dir, @intCast(self.dir_mode)) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
@@ -535,7 +549,7 @@ const Daemon = struct {
                     &.{ self.cfg.log_dir, session_log_name },
                 );
                 defer self.alloc.free(session_log_path);
-                try log_system.init(self.alloc, session_log_path);
+                try log_system.init(self.alloc, session_log_path, self.cfg.log_mode);
 
                 // If spawnPty fails, clean up here. Once it succeeds,
                 // the inner block's defer takes ownership of cleanup to

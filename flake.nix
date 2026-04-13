@@ -6,7 +6,7 @@
   };
 
   outputs =
-    { zig2nix, ... }:
+    { self, zig2nix, ... }:
     let
       flake-utils = zig2nix.inputs.flake-utils;
     in
@@ -50,5 +50,9 @@
         devShells.default = env.mkShell {
         };
       }
-    ));
+    )) // {
+      overlays.default = final: prev: {
+        zmx-main = self.packages.${final.system}.zmx;
+      };
+    };
 }
