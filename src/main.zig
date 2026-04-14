@@ -36,6 +36,25 @@ var sigterm_received: std.atomic.Value(bool) = std.atomic.Value(bool).init(false
 // https://github.com/ziglang/zig/blob/738d2be9d6b6ef3ff3559130c05159ef53336224/lib/std/posix.zig#L3505
 const O_NONBLOCK: usize = 1 << @bitOffsetOf(posix.O, "NONBLOCK");
 
+const SessionMatch = struct {
+    name: []const u8,
+    is_prefix: bool,
+
+    fn matches(self: SessionMatch, session_name: []const u8) bool {
+        if (self.is_prefix) return std.mem.startsWith(u8, session_name, self.name);
+        return std.mem.eql(u8, session_name, self.name);
+    }
+};
+
+fn parseSessionArg(alloc: std.mem.Allocator, raw: []const u8) !SessionMatch {
+    if (raw.len > 0 and raw[raw.len - 1] == '*') {
+        const name = try socket.getSeshName(alloc, raw[0 .. raw.len - 1]);
+        return .{ .name = name, .is_prefix = true };
+    }
+    const name = try socket.getSeshName(alloc, raw);
+    return .{ .name = name, .is_prefix = false };
+}
+
 pub fn main() !void {
     // use c_allocator to avoid "reached unreachable code" panic in DebugAllocator when forking
     const alloc = std.heap.c_allocator;
@@ -185,12 +204,12 @@ pub fn main() !void {
         var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
         const stderr = &stderr_writer.interface;
 
-        var args_raw: std.ArrayList([]const u8) = .empty;
+        var matchers: std.ArrayList(SessionMatch) = .empty;
         defer {
-            for (args_raw.items) |sesh| {
-                alloc.free(sesh);
+            for (matchers.items) |m| {
+                alloc.free(m.name);
             }
-            args_raw.deinit(alloc);
+            matchers.deinit(alloc);
         }
         var force = false;
         while (args.next()) |session_name| {
@@ -198,16 +217,11 @@ pub fn main() !void {
                 force = true;
                 continue;
             }
-            const sesh = try socket.getSeshName(alloc, session_name);
-            try args_raw.append(alloc, sesh);
+            const m = try parseSessionArg(alloc, session_name);
+            try matchers.append(alloc, m);
         }
-        // if no args are provided we assume they want to kill all sessions matching the prefix.
-        if (args_raw.items.len == 0) {
-            const prefix = socket.getSeshPrefix();
-            if (prefix.len == 0) {
-                return error.SessionNameRequired;
-            }
-            try args_raw.append(alloc, try alloc.dupe(u8, prefix));
+        if (matchers.items.len == 0) {
+            return error.SessionNameRequired;
         }
         var sessions = try util.get_session_entries(alloc, cfg.socket_dir);
         defer {
@@ -218,8 +232,8 @@ pub fn main() !void {
         }
 
         for (sessions.items) |session| {
-            for (args_raw.items) |prefix| {
-                if (!std.mem.startsWith(u8, session.name, prefix)) {
+            for (matchers.items) |m| {
+                if (!m.matches(session.name)) {
                     continue;
                 }
 
@@ -234,50 +248,79 @@ pub fn main() !void {
             }
         }
     } else if (std.mem.eql(u8, cmd, "wait") or std.mem.eql(u8, cmd, "w")) {
-        var args_raw: std.ArrayList([]const u8) = .empty;
+        var matchers: std.ArrayList(SessionMatch) = .empty;
         defer {
-            for (args_raw.items) |sesh| {
-                alloc.free(sesh);
+            for (matchers.items) |m| {
+                alloc.free(m.name);
             }
-            args_raw.deinit(alloc);
+            matchers.deinit(alloc);
         }
         while (args.next()) |session_name| {
-            const sesh = try socket.getSeshName(alloc, session_name);
-            try args_raw.append(alloc, sesh);
+            const m = try parseSessionArg(alloc, session_name);
+            try matchers.append(alloc, m);
         }
-        // if no args are provided we assume they want to wait for all sessions matching the
-        // prefix.
-        if (args_raw.items.len == 0) {
-            const prefix = socket.getSeshPrefix();
-            if (prefix.len == 0) {
-                return error.SessionNameRequired;
-            }
-            try args_raw.append(alloc, prefix);
+        if (matchers.items.len == 0) {
+            return error.SessionNameRequired;
         }
-        return wait(&cfg, args_raw);
+        return wait(&cfg, matchers);
     } else if (std.mem.eql(u8, cmd, "tail") or std.mem.eql(u8, cmd, "t")) {
-        var session_names: std.ArrayList([]const u8) = .empty;
+        var matchers: std.ArrayList(SessionMatch) = .empty;
         defer {
-            for (session_names.items) |sesh| {
-                alloc.free(sesh);
+            for (matchers.items) |m| {
+                alloc.free(m.name);
             }
-            session_names.deinit(alloc);
+            matchers.deinit(alloc);
         }
         while (args.next()) |session_name| {
-            const sesh = try socket.getSeshName(alloc, session_name);
-            try session_names.append(alloc, sesh);
+            const m = try parseSessionArg(alloc, session_name);
+            try matchers.append(alloc, m);
         }
-        // if no args are provided we assume they want to wait for all sessions matching the
-        // prefix.
-        if (session_names.items.len == 0) {
-            const prefix = socket.getSeshPrefix();
-            if (prefix.len == 0) {
-                return error.SessionNameRequired;
-            }
-            try session_names.append(alloc, prefix);
+        if (matchers.items.len == 0) {
+            return error.SessionNameRequired;
         }
 
-        var client_socket_fds = try std.ArrayList(i32).initCapacity(alloc, session_names.items.len);
+        // Resolve matchers against session list to get actual session names.
+        var resolved_names: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (resolved_names.items) |name| {
+                alloc.free(name);
+            }
+            resolved_names.deinit(alloc);
+        }
+
+        var any_prefix = false;
+        for (matchers.items) |m| {
+            if (m.is_prefix) {
+                any_prefix = true;
+                break;
+            }
+        }
+
+        if (any_prefix) {
+            var sessions = try util.get_session_entries(alloc, cfg.socket_dir);
+            defer {
+                for (sessions.items) |session| {
+                    session.deinit(alloc);
+                }
+                sessions.deinit(alloc);
+            }
+            for (sessions.items) |session| {
+                for (matchers.items) |m| {
+                    if (m.matches(session.name)) {
+                        try resolved_names.append(alloc, try alloc.dupe(u8, session.name));
+                        break;
+                    }
+                }
+            }
+        }
+        // Add exact-match names directly.
+        for (matchers.items) |m| {
+            if (!m.is_prefix) {
+                try resolved_names.append(alloc, try alloc.dupe(u8, m.name));
+            }
+        }
+
+        var client_socket_fds = try std.ArrayList(i32).initCapacity(alloc, resolved_names.items.len);
         defer {
             for (client_socket_fds.items) |client_fd| {
                 posix.close(client_fd);
@@ -285,7 +328,7 @@ pub fn main() !void {
             client_socket_fds.deinit(alloc);
         }
 
-        for (session_names.items) |session_name| {
+        for (resolved_names.items) |session_name| {
             const socket_path = socket.getSocketPath(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
                 error.NameTooLong => return socket.printSessionNameTooLong(session_name, cfg.socket_dir),
                 error.OutOfMemory => return err,
@@ -448,7 +491,6 @@ test "Cfg.init uses custom modes from env vars" {
     try std.testing.expectEqual(@as(u32, 0o770), cfg.dir_mode);
     try std.testing.expectEqual(@as(u32, 0o660), cfg.log_mode);
 }
-
 
 /// Daemon is responsible for managing a zmx session.
 ///
@@ -1295,7 +1337,7 @@ fn tail(client_socket_fds: std.ArrayList(i32), detached: bool, is_run_cmd: bool)
     }
 }
 
-fn wait(cfg: *Cfg, session_names: std.ArrayList([]const u8)) !void {
+fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
@@ -1322,8 +1364,8 @@ fn wait(cfg: *Cfg, session_names: std.ArrayList([]const u8)) !void {
 
         for (sessions.items) |session| {
             var found = false;
-            for (session_names.items) |prefix| {
-                if (std.mem.startsWith(u8, session.name, prefix)) {
+            for (matchers.items) |m| {
+                if (m.matches(session.name)) {
                     found = true;
                     break;
                 }
