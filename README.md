@@ -1,6 +1,6 @@
 <h1>
 <p align="center">
-  <img src="./docs/logo.png" alt="Logo" width="128">
+  <img src="./logo.png" alt="Logo" width="128">
   <br>zmx
 </h1>
 <p align="center">

@@ -159,9 +159,14 @@ pub fn build(b: *std.Build) void {
     // Upload artifacts to pgs
     {
         const upload_step = b.step("upload", "Upload docs and dist to pgs.sh:/zmx");
-        const rsync_docs = b.addSystemCommand(&.{ "rsync", "-rv", "docs/", "pgs.sh:/zmx" });
+        const gen_doc = b.addSystemCommand(&.{
+            "sh", "-c",
+            "cat README.md | pdocs -tmpl index.tmpl -toc | ssh pgs.sh /zmx/index.html"
+        });
+        const rsync_docs = b.addSystemCommand(&.{ "rsync", "-v", "logo.png", "pgs.sh:/zmx/logo.png" });
         const rsync_dist = b.addSystemCommand(&.{ "rsync", "-rv", "zig-out/dist/", "pgs.sh:/zmx/a" });
 
+        upload_step.dependOn(&gen_doc.step);
         upload_step.dependOn(&rsync_docs.step);
         upload_step.dependOn(&rsync_dist.step);
     }

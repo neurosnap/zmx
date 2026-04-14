@@ -1,0 +1,30 @@
+{{define "base"}}
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>zmx - session persistence for terminal sessions</title>
+    <meta charset='utf-8'>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="keywords" content="zmx, session persistence, terminal, tool, linux">
+
+    <link rel="stylesheet" href="https://pico.sh/syntax.css">
+    <link rel="stylesheet" href="https://pico.sh/smol.css">
+    <link rel="stylesheet" href="https://pico.sh/main.css">
+  </head>
+
+  <body>
+    <div class="debug-grid"></div>
+    <div class="post-group" style="flex-direction: row;">
+      <article class="md toc" style="height: 98vh; padding-top: 40px;">
+        {{.Data.TocHtml}}
+      </article>
+
+      <main class="post" style="height: 98vh;">
+        <article class="md">
+          {{.Data.Html}}
+        </article>
+      </main>
+    </div>
+  </body>
+</html>
+{{end}}
