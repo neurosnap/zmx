@@ -20,12 +20,15 @@ Use spec: https://common-changelog.org/
   - Use detached mode (`-d`) for previous behavior
 - `zmx run` accepts `--fish` flag to indicate the session's shell is fish
 - `zmx kill` now supports multiple args and it will kill sessions that match a prefix
-  - e.g. `zmx kill d.` will kill all sessions that match that prefix
+  - e.g. `zmx kill "d.*"` will kill all sessions that match that prefix
+- *BREAKING* `kill` and `wait` now require "*" suffix for wildcard match sessions
+  - e.g. `zmx kill "d.*"`, `zmx kill "*"`, `zmx wait "test*"`
 
 ### Fixed
 
 - `zmx list` will send "no sessions found" to stderr instead of stdout
 - `zmx wait` will send errors to stderr instead of stdout
+- Rewrite OSC `133;A` with `redraw=0` to prevent prompt loss on resize
 
 ## v0.4.2 - 2026-03-18
 
