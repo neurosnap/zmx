@@ -68,13 +68,15 @@ zig build -Doptimize=ReleaseSafe --prefix ~/.local
 > We recommend closing the terminal window to detach from the session but you can also press `ctrl+\` or run `zmx detach`.
 
 ```
-Usage: zmx <command> [args]
+zmx - session persistence for terminal processes
+
+Usage: zmx <command> [args...]
 
 Commands:
   [a]ttach <name> [command...]             Attach to session, creating if needed
   [r]un <name> [-d] [--fish] [command...]  Send command without attaching
   [wr]ite <name> <file_path>               Write stdin to file_path through the session
-  [d]etach                                 Detach all clients (ctrl+\ for current client)
+  [d]etach                                 Detach all clients (ctrl+\\ for current client)
   [l]ist [--short]                         List active sessions
   [k]ill <name>... [--force]               Kill session and all attached clients
   [hi]story <name> [--vt|--html]           Output session scrollback
@@ -83,22 +85,71 @@ Commands:
   [c]ompletions <shell>                    Shell completions (bash, zsh, fish)
   [v]ersion                                Show version
   [h]elp                                   Show this help
-```
 
-### examples
+Attach:
+  This will spawn a login $SHELL with a PTY.  You can provide a
+  command instead of creating a shell.
 
-```bash
-zmx attach dev              # start a shell session
-zmx a dev nvim .            # start nvim in a persistent session
-zmx attach build make -j8   # run a build, reattach to check progress
-zmx attach mux dvtm         # run a multiplexer inside zmx
+  Examples:
+    zmx attach dev
+    zmx attach dev vim
 
-zmx run dev cat README.md   # run the command without attaching to the session
-zmx r dev cat CHANGELOG.md  # alias
-echo "ls -lah" | zmx r dev  # use stdin to run the command
+History:
+  This should generally be used with `tail` to print the last lines
+  of the session's scrollback history.
 
-zmx r tests go test ./...   # run your tests in the background
-zmx wait tests              # waits for tests to complete
+  Examples:
+    zmx history <session> | tail -100
+
+Run:
+  Commands are passed as-is; do not wrap in quotes.
+  Commands run sequentially; do not send multiple in parallel.
+  Avoid interactive programs (pagers, editors, prompts) -- they hang.
+
+  `-d` will detach from the calling terminal. Use `wait` to track
+  its status.
+
+  `--fish` is required when the session runs fish shell.
+
+  If the command hangs, send Ctrl+C to recover:
+    zmx run <session> $'\\x03'
+
+  Examples:
+    zmx run dev ls
+    zmx run dev --fish ls src
+    zmx run dev zig build
+    zmx run dev grep -r TODO src
+    zmx run dev git -c core.pager=cat diff
+
+Write:
+  Writes stdin to file_path inside the session. Works over SSH.
+  file_path can be absolute or relative to the session shell's cwd.
+  Requires base64 and printf in the remote environment.
+  Large files are chunked automatically (~48KB per chunk).
+  File path must not contain single quotes.
+
+  Examples:
+    echo "hello" | zmx write dev /tmp/hello.txt
+    cat main.zig | zmx write dev src/main.zig
+
+Wait:
+  Used with a detached run task to track its status.  Multiple
+  sessions can be provided.
+
+  Examples:
+    zmx run -d dev sleep 10
+    zmx wait dev
+    zmx wait dev other
+
+Environment variables:
+  SHELL                Default shell for new sessions
+  ZMX_DIR              Socket directory (priority 1)
+  XDG_RUNTIME_DIR      Socket directory (priority 2)
+  TMPDIR               Socket directory (priority 3)
+  ZMX_SESSION          Session name (injected automatically)
+  ZMX_SESSION_PREFIX   Prefix added to all session names
+  ZMX_DIR_MODE         Sets mode for socket and log directories (octal, defaults to 0750)
+  ZMX_LOG_MODE         Sets mode for log files (octal, defaults to 0640)
 ```
 
 ## shell prompt

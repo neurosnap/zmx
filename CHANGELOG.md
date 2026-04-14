@@ -21,7 +21,7 @@ Use spec: https://common-changelog.org/
 - `zmx run` accepts `--fish` flag to indicate the session's shell is fish
 - `zmx kill` now supports multiple args and it will kill sessions that match a prefix
   - e.g. `zmx kill "d.*"` will kill all sessions that match that prefix
-- *BREAKING* `kill` and `wait` now require "*" suffix for wildcard match sessions
+- *BREAKING* `kill` and `wait` now require "\*" suffix for wildcard match sessions
   - e.g. `zmx kill "d.*"`, `zmx kill "*"`, `zmx wait "test*"`
 
 ### Fixed
