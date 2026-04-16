@@ -1077,9 +1077,6 @@ const Daemon = struct {
             defer self.alloc.free(encoded);
             _ = std.base64.standard.Encoder.encode(encoded, chunk);
 
-            // Bracketed paste mode so the shell buffers input
-            // rather than processing each keystroke individually.
-            self.queuePtyInput("\x1b[200~");
             self.queuePtyInput("printf '%s' '");
             self.queuePtyInput(encoded);
             if (is_first) {
@@ -1089,7 +1086,6 @@ const Daemon = struct {
             }
             self.queuePtyInput(file_path);
             self.queuePtyInput("'");
-            self.queuePtyInput("\x1b[201~");
             self.queuePtyInput("\r");
 
             offset = end;
