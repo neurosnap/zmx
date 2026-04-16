@@ -1174,7 +1174,7 @@ fn help() !void {
         \\  `--fish` is required when the session runs fish shell.
         \\
         \\  If the command hangs, send Ctrl+C to recover:
-        \\    zmx run <session> $'\\x03'
+        \\    zmx run <session> printf '\x03'
         \\
         \\  Examples:
         \\    zmx run dev ls
