@@ -4,6 +4,8 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
+## v0.5.0 - 2026-04-16
+
 ### Added
 
 - New client leader policy: last client to send user input bytes (non-ansi escape codes) becomes the leader
@@ -18,11 +20,11 @@ Use spec: https://common-changelog.org/
 
 - *BREAKING* `zmx run` is now synchonous by default and tails the session
   - Use detached mode (`-d`) for previous behavior
+- *BREAKING* `kill` and `wait` now require "\*" suffix for wildcard match sessions
+  - e.g. `zmx kill "d.*"`, `zmx kill "*"`, `zmx wait "test*"`
 - `zmx run` accepts `--fish` flag to indicate the session's shell is fish
 - `zmx kill` now supports multiple args and it will kill sessions that match a prefix
   - e.g. `zmx kill "d.*"` will kill all sessions that match that prefix
-- *BREAKING* `kill` and `wait` now require "\*" suffix for wildcard match sessions
-  - e.g. `zmx kill "d.*"`, `zmx kill "*"`, `zmx wait "test*"`
 
 ### Fixed
 
