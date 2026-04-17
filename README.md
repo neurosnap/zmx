@@ -25,7 +25,10 @@
 - Works on mac and linux
 - This project does **NOT** provide windows, tabs, or splits
 
-[demo video](https://youtu.be/UIXj0_rhPgI?si=NolwGR4GTCQOESy6)
+## demos
+
+- [zmx - intro](https://youtu.be/UIXj0_rhPgI)
+- [zmx - ai portal](https://youtu.be/CV3skPYHP4Q)
 
 ## install
 
@@ -57,9 +60,10 @@ brew install neurosnap/tap/zmx
 - Clone the repo
 - Run build cmd
 
+Be sure to add `~/.local/bin` to your `PATH`:
+
 ```bash
 zig build -Doptimize=ReleaseSafe --prefix ~/.local
-# be sure to add ~/.local/bin to your PATH
 ```
 
 ## usage
