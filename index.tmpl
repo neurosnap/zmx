@@ -28,15 +28,17 @@
       </div>
     </nav>
     <div class="post-group" style="flex-direction: row;">
-      <article class="md toc" style="height: 98vh; padding-top: 40px;">
+      <article class="md toc" style="padding-top: 40px;">
         {{.Data.TocHtml}}
       </article>
 
-      <main class="post" style="height: 98vh;">
+      <main class="post">
         <article class="md">
           {{.Data.Html}}
         </article>
       </main>
+
+      <div class="toc"></div>
     </div>
   </body>
 </html>
