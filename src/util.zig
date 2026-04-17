@@ -350,10 +350,58 @@ pub fn findTaskExitMarker(output: []const u8) ?u8 {
     return null;
 }
 
-/// Detects Kitty keyboard protocol escape sequence for Ctrl+\.
+/// Detects Ctrl+\ across raw, Kitty CSI u, and xterm modifyOtherKeys encodings.
 pub fn isCtrlBackslash(buf: []const u8) bool {
     if (buf.len == 0) return false;
-    return buf[0] == 0x1C or isKeyPressed(buf, 0x5c, 0b100);
+    return buf[0] == 0x1C
+        or isKeyPressed(buf, 0x5c, 0b100)
+        or isModifyOtherKey(buf, 0x5c, 0b100);
+}
+
+/// Scans the buffer for an xterm modifyOtherKeys-encoded keypress.
+/// Format: CSI 27 ; <modifier> ; <keycode> ~
+/// Reference: invisible-island.net/xterm/ctlseqs/ctlseqs.html (modifyOtherKeys).
+fn isModifyOtherKey(buf: []const u8, expected_key: u32, expected_mods: u32) bool {
+    var i: usize = 0;
+    while (i + 1 < buf.len) : (i += 1) {
+        if (buf[i] == 0x1b and buf[i + 1] == '[') {
+            if (modifyOtherMatches(buf[i + 2 ..], expected_key, expected_mods)) return true;
+        }
+    }
+    return false;
+}
+
+/// Parses the body of an xterm modifyOtherKeys CSI sequence (after the leading
+/// `\x1b[`). Mirrors keypressWithMod's tolerance for lock modifiers.
+fn modifyOtherMatches(buf: []const u8, expected_key: u32, expected_mods: u32) bool {
+    var pos: usize = 0;
+
+    // 1. Sentinel: literal "27" identifies xterm modifyOtherKeys.
+    const sentinel = parseDecimal(buf, &pos) orelse return false;
+    if (sentinel != 27) return false;
+
+    // 2. Expect ';' before modifier.
+    if (pos >= buf.len or buf[pos] != ';') return false;
+    pos += 1;
+
+    // 3. Parse modifier (xterm encodes as 1 + bitfield, same as kitty).
+    const mod_encoded = parseDecimal(buf, &pos) orelse return false;
+    if (mod_encoded < 1) return false;
+    const mod_raw = mod_encoded - 1;
+    // Tolerate ambient lock modifiers (caps_lock=64, num_lock=128).
+    const intentional_mods = mod_raw & 0b00111111;
+    if (expected_mods > 0 and expected_mods != intentional_mods) return false;
+
+    // 4. Expect ';' before keycode.
+    if (pos >= buf.len or buf[pos] != ';') return false;
+    pos += 1;
+
+    // 5. Parse keycode.
+    const key_code = parseDecimal(buf, &pos) orelse return false;
+    if (key_code != expected_key) return false;
+
+    // 6. Expect '~' terminator.
+    return pos < buf.len and buf[pos] == '~';
 }
 
 /// Detects vt100 or kitty keyboard protocol escape sequence for up arrow.
@@ -966,6 +1014,67 @@ test "isCtrlBackslash" {
 
     // Other CSI u sequences that happen to contain '92' elsewhere
     try expect(!isCtrlBackslash("\x1b[65;92u"));
+}
+
+test "isCtrlBackslash xterm modifyOtherKeys" {
+    const expect = std.testing.expect;
+
+    // Basic: ctrl only (modifier 5 = 1 + 4), key 92 = '\'
+    // Format: CSI 27 ; <mod> ; <key> ~
+    try expect(isCtrlBackslash("\x1b[27;5;92~"));
+
+    // Lock modifiers tolerated
+    // ctrl + caps_lock = 1 + (4 + 64) = 69
+    try expect(isCtrlBackslash("\x1b[27;69;92~"));
+    // ctrl + num_lock = 1 + (4 + 128) = 133
+    try expect(isCtrlBackslash("\x1b[27;133;92~"));
+    // ctrl + caps_lock + num_lock = 1 + (4 + 64 + 128) = 197
+    try expect(isCtrlBackslash("\x1b[27;197;92~"));
+
+    // Combined intentional modifiers must NOT match
+    // ctrl + shift = 1 + (4 + 1) = 6
+    try expect(!isCtrlBackslash("\x1b[27;6;92~"));
+    // ctrl + alt = 1 + (4 + 2) = 7
+    try expect(!isCtrlBackslash("\x1b[27;7;92~"));
+    // ctrl + super = 1 + (4 + 8) = 13
+    try expect(!isCtrlBackslash("\x1b[27;13;92~"));
+    // ctrl + shift + caps_lock = 1 + (1 + 4 + 64) = 70 -- shift is intentional
+    try expect(!isCtrlBackslash("\x1b[27;70;92~"));
+    // ctrl + shift + num_lock = 1 + (1 + 4 + 128) = 134 -- shift is intentional
+    try expect(!isCtrlBackslash("\x1b[27;134;92~"));
+
+    // Modifier without ctrl bit -- must NOT match
+    try expect(!isCtrlBackslash("\x1b[27;1;92~"));
+    try expect(!isCtrlBackslash("\x1b[27;2;92~"));
+
+    // Wrong key code -- must NOT match
+    try expect(!isCtrlBackslash("\x1b[27;5;91~"));
+    try expect(!isCtrlBackslash("\x1b[27;5;93~"));
+    try expect(!isCtrlBackslash("\x1b[27;5;65~"));
+
+    // Wrong sentinel -- must NOT match
+    try expect(!isCtrlBackslash("\x1b[28;5;92~"));
+    try expect(!isCtrlBackslash("\x1b[26;5;92~"));
+
+    // Wrong terminator -- must NOT match
+    try expect(!isCtrlBackslash("\x1b[27;5;92u"));
+    try expect(!isCtrlBackslash("\x1b[27;5;92m"));
+
+    // CSI sequences that look similar but are not modifyOtherKeys
+    try expect(!isCtrlBackslash("\x1b[27m")); // SGR reset reverse
+    try expect(!isCtrlBackslash("\x1b[27~")); // xterm F4
+    try expect(!isCtrlBackslash("\x1b[27;5R")); // truncated cursor report
+
+    // Sequence embedded in larger buffer
+    try expect(isCtrlBackslash("abc\x1b[27;5;92~"));
+    try expect(isCtrlBackslash("\x1b[A\x1b[27;5;92~"));
+
+    // Garbage / malformed
+    try expect(!isCtrlBackslash("\x1b[27"));
+    try expect(!isCtrlBackslash("\x1b[27;"));
+    try expect(!isCtrlBackslash("\x1b[27;5"));
+    try expect(!isCtrlBackslash("\x1b[27;5;"));
+    try expect(!isCtrlBackslash("\x1b[27;5;92"));
 }
 
 test "serializeTerminalState excludes synchronized output replay" {
