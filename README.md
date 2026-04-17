@@ -102,17 +102,20 @@ History:
     zmx history <session> | tail -100
 
 Run:
-  Commands are passed as-is; do not wrap in quotes.
-  Commands run sequentially; do not send multiple in parallel.
-  Avoid interactive programs (pagers, editors, prompts) -- they hang.
-
-  `-d` will detach from the calling terminal. Use `wait` to track
-  its status.
+  Commands are passed as-is: do not wrap in quotes.
+  Commands run sequentially: do not send multiple in parallel.
+  Avoid interactive programs (pagers, editors, prompts): they hang.
 
   `--fish` is required when the session runs fish shell.
 
   If the command hangs, send Ctrl+C to recover:
-    zmx run <session> $'\\x03'
+    zmx run <session> $(printf '\x03')
+
+  If the command hangs, print the history to see the error:
+    zmx history <session> | tail -100
+
+  `-d` will detach from the calling terminal. Use `wait` to track
+  its status.
 
   Examples:
     zmx run dev ls
