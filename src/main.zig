@@ -32,6 +32,17 @@ fn zmxLogFn(
 
 var sigwinch_received: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 var sigterm_received: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+var client_exit_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+var client_exit_signum: std.atomic.Value(i32) = std.atomic.Value(i32).init(0);
+// Nesting counter for attach(). The session-switch path recurses into
+// attach(target), and each stack frame captures its own `orig_termios`
+// via tcgetattr -- on a nested attach that captures the RAW termios
+// set by the outer. If we re-raised the delivering signal at the inner
+// frame's LIFO-last defer we would kill the process before the outer
+// could restore the real original termios, leaving the user's terminal
+// stuck in raw mode. Tracking depth lets only the outermost attach do
+// the re-raise.
+var attach_depth: u8 = 0;
 
 // https://github.com/ziglang/zig/blob/738d2be9d6b6ef3ff3559130c05159ef53336224/lib/std/posix.zig#L3505
 const O_NONBLOCK: usize = 1 << @bitOffsetOf(posix.O, "NONBLOCK");
@@ -1663,6 +1674,28 @@ fn attach(daemon: *Daemon) !void {
     const result = try daemon.ensureSession();
     if (result.is_daemon) return;
 
+    // Install exit-signal handlers before touching any terminal state so
+    // that a signal-delivered termination still runs the cleanup defers
+    // below. Without this, default SIGHUP / SIGTERM / SIGINT (e.g. pane
+    // close, parent shell exit, sshd-sent HUP on network disconnect)
+    // terminates zmx without restoring termios, stdin F_SETFL, or the
+    // outer terminal modes — leaving the pane stuck in whatever state
+    // the inner shell/program enabled (most visibly, Kitty keyboard
+    // protocol turning letter keys into escape sequences).
+    setupClientExitHandlers();
+
+    // LIFO-last defer of this attach frame. Decrement the nesting
+    // counter and, if this is the outermost attach, re-raise any
+    // latched exit signal so the process exits with the conventional
+    // 128+signum status. On nested (session-switch) frames the outer
+    // frame's cleanup must still run before we can raise, so we skip
+    // the reraise here.
+    attach_depth += 1;
+    defer {
+        attach_depth -= 1;
+        if (attach_depth == 0) maybeReraiseExitSignal();
+    }
+
     const client_sock = try socket.sessionConnect(daemon.socket_path);
     std.log.info("attached session={s}", .{daemon.session_name});
     //  This is typically used with tcsetattr() to modify terminal settings.
@@ -1683,17 +1716,43 @@ fn attach(daemon: *Daemon) !void {
         if (stdin_is_tty) {
             _ = cross.c.tcsetattr(posix.STDIN_FILENO, cross.c.TCSAFLUSH, &orig_termios);
         }
-        // Reset terminal modes on detach:
-        // - Mouse: 1000=basic, 1002=button-event, 1003=any-event, 1006=SGR extended
-        // - 2004=bracketed paste, 1004=focus events, 1049=alt screen
-        // - 25h=show cursor
-        // NOTE: We intentionally do NOT clear screen or home cursor here because we dont
-        // want to corrupt any programs that rely on it including ghostty's session restore.
-        const restore_seq = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l" ++
+        // Reset terminal modes on detach. Covers state the inner shell or
+        // an inner program may have enabled on the outer terminal during
+        // the session. Must run on every exit path (including signal-based
+        // termination via setupClientExitHandlers) so the outer pane is
+        // not left in a corrupted mode.
+        //
+        // NOTE: We intentionally do NOT clear screen or home cursor here
+        // because we don't want to corrupt any programs that rely on that,
+        // including ghostty's session restore.
+        const restore_seq =
+            // Mouse tracking: 1000=basic, 1002=button-event,
+            // 1003=any-event, 1006=SGR extended.
+            "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l" ++
+            // 2004=bracketed paste, 1004=focus events, 1049=alt screen.
             "\x1b[?2004l\x1b[?1004l\x1b[?1049l" ++
-            // Restore pre-attach Kitty keyboard protocol mode so Ctrl combos
-            // return to legacy encoding in the user's outer shell.
-            "\x1b[<u" ++
+            // xterm modifyOtherKeys protocol off. Enabled by many TUIs;
+            // leaves Ctrl+letter producing CSI 27;mod;key~ in the outer
+            // shell if not reset. See #124.
+            "\x1b[>4;0m" ++
+            // Kitty keyboard protocol restore. First clear the current
+            // stack entry's flags (CSI = 0 ; 1 u), then pop it (CSI < u).
+            // The defensive clear protects against terminals that don't
+            // zero on pop, and against the set/pop asymmetry when the
+            // session's serialized state was replayed on re-attach.
+            "\x1b[=0;1u\x1b[<u" ++
+            // Cursor shape (DECSCUSR) back to default. Inner programs
+            // like nvim often set a bar/underline cursor. See #86.
+            "\x1b[0 q" ++
+            // Scrolling region (DECSTBM) back to full screen. Alt-screen
+            // programs (less, vim) set margins that otherwise persist.
+            "\x1b[r" ++
+            // Close any open hyperlink (OSC 8 with empty params).
+            "\x1b]8;;\x07" ++
+            // Reset all SGR attributes so colors / bold / italic don't
+            // leak into the outer shell.
+            "\x1b[0m" ++
+            // Cursor visible.
             "\x1b[?25h";
         _ = posix.write(posix.STDOUT_FILENO, restore_seq) catch {};
     }
@@ -1995,6 +2054,13 @@ fn clientLoop(client_sock_fd: i32) !ClientResult {
     defer _ = posix.fcntl(stdin_fd, posix.F.SETFL, stdin_orig_flags) catch {};
 
     while (true) {
+        // Check for a pending HUP / TERM / INT. Returning here unwinds
+        // through the defers so the outer terminal is restored on
+        // signal-delivered termination.
+        if (client_exit_requested.load(.acquire)) {
+            return ClientResult{ .kind = .detach, .session_name = null };
+        }
+
         // Check for pending SIGWINCH
         if (sigwinch_received.swap(false, .acq_rel)) {
             const next_size = ipc.getTerminalSize(posix.STDOUT_FILENO);
@@ -2028,10 +2094,20 @@ fn clientLoop(client_sock_fd: i32) !ClientResult {
             });
         }
 
-        _ = posix.poll(poll_fds.items, -1) catch |err| {
-            if (err == error.Interrupted) continue; // EINTR from signal, loop again
-            return err;
-        };
+        // Call poll directly instead of std.posix.poll so that EINTR is
+        // visible here. The std.posix.poll wrapper transparently retries
+        // on EINTR which swallows signal-based wakeups — leaving this
+        // loop deaf to HUP/TERM/INT when no other I/O is pending.
+        const poll_rc = posix.system.poll(
+            poll_fds.items.ptr,
+            @intCast(poll_fds.items.len),
+            -1,
+        );
+        switch (posix.errno(poll_rc)) {
+            .SUCCESS => {},
+            .INTR => continue,
+            else => |err| return posix.unexpectedErrno(err),
+        }
 
         // Handle stdin -> socket (Input)
         const inp_flags = (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL);
@@ -2396,6 +2472,37 @@ fn handleSigterm(_: i32, _: *const posix.siginfo_t, _: ?*anyopaque) callconv(.c)
     sigterm_received.store(true, .release);
 }
 
+fn handleClientExit(signum: i32, _: *const posix.siginfo_t, _: ?*anyopaque) callconv(.c) void {
+    // Store signum before the flag so any reader that sees the flag
+    // also observes a populated signum via the release/acquire pairing.
+    client_exit_signum.store(signum, .release);
+    client_exit_requested.store(true, .release);
+}
+
+// Called from attach() as the LIFO-last defer of the outermost attach
+// frame. If the client loop exited because a HUP/TERM/INT/QUIT was
+// delivered, reset that signal's handler to its default and re-raise
+// so the process exits with the conventional 128 + signum status.
+// Orderly detach paths leave the signum at 0 and this is a no-op.
+fn maybeReraiseExitSignal() void {
+    const signum = client_exit_signum.load(.acquire);
+    if (signum == 0) return;
+
+    const dfl: posix.Sigaction = .{
+        .handler = .{ .handler = posix.SIG.DFL },
+        .mask = posix.sigemptyset(),
+        .flags = 0,
+    };
+    posix.sigaction(@intCast(signum), &dfl, null);
+
+    // raise() delivers the signal to this thread; with SIG_DFL for a
+    // Term-class signal the kernel terminates the process here.
+    std.posix.raise(@intCast(signum)) catch {};
+
+    // Backstop if raise somehow returns (e.g. signal became blocked).
+    std.process.exit(@intCast(128 + signum));
+}
+
 // No SA_RESTART: we want the signal to interrupt poll() so the
 // loop can check the flag. On BSD/macOS, SA_RESTART makes poll restartable,
 // which would leave an idle daemon deaf to SIGTERM until other I/O wakes it.
@@ -2409,12 +2516,46 @@ fn setupSigwinchHandler() void {
 }
 
 fn setupSigtermHandler() void {
+    // The daemon forked from a client that has already installed its
+    // exit handlers (session switch path: attach -> switchSesh ->
+    // recursive attach -> ensureSession fork). Reset HUP/INT/QUIT to
+    // defaults so the daemon doesn't inherit a handler that just sets a
+    // flag the daemon never reads. TERM we handle explicitly below.
+    const dfl: posix.Sigaction = .{
+        .handler = .{ .handler = posix.SIG.DFL },
+        .mask = posix.sigemptyset(),
+        .flags = 0,
+    };
+    posix.sigaction(posix.SIG.HUP, &dfl, null);
+    posix.sigaction(posix.SIG.INT, &dfl, null);
+    posix.sigaction(posix.SIG.QUIT, &dfl, null);
+
     const act: posix.Sigaction = .{
         .handler = .{ .sigaction = handleSigterm },
         .mask = posix.sigemptyset(),
         .flags = posix.SA.SIGINFO,
     };
     posix.sigaction(posix.SIG.TERM, &act, null);
+}
+
+// Client-side handler for SIGHUP / SIGTERM / SIGINT / SIGQUIT. On
+// a flag and let clientLoop exit normally so the cleanup defers in
+// attach() (termios restore, stdin F_SETFL restore, outer terminal
+// restore_seq) run before the process dies. Zig's `defer` does not run
+// on default signal termination, so without this the outer terminal is
+// left in whatever mode the inner session enabled — most visibly, Kitty
+// keyboard protocol making letter keys produce escape sequences.
+// Same no-SA_RESTART rationale as setupSigtermHandler.
+fn setupClientExitHandlers() void {
+    const act: posix.Sigaction = .{
+        .handler = .{ .sigaction = handleClientExit },
+        .mask = posix.sigemptyset(),
+        .flags = posix.SA.SIGINFO,
+    };
+    posix.sigaction(posix.SIG.HUP, &act, null);
+    posix.sigaction(posix.SIG.TERM, &act, null);
+    posix.sigaction(posix.SIG.INT, &act, null);
+    posix.sigaction(posix.SIG.QUIT, &act, null);
 }
 
 fn ignoreSigpipe() void {
