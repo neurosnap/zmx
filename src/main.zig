@@ -47,6 +47,46 @@ var attach_depth: u8 = 0;
 // https://github.com/ziglang/zig/blob/738d2be9d6b6ef3ff3559130c05159ef53336224/lib/std/posix.zig#L3505
 const O_NONBLOCK: usize = 1 << @bitOffsetOf(posix.O, "NONBLOCK");
 
+// Bytes written to the outer terminal to unwind modes the inner session
+// may have enabled during `zmx attach`. Shared between the client's
+// detach/cleanup defer and the standalone `zmx reset` subcommand for
+// recovering a pane whose client died before its defer ran — most
+// visibly, Kitty keyboard protocol turning letter keys into escape
+// sequences.
+//
+// NOTE: We intentionally do NOT clear screen or home cursor here because
+// we don't want to corrupt any programs that rely on that, including
+// ghostty's session restore.
+const outer_terminal_restore_seq =
+    // Mouse tracking: 1000=basic, 1002=button-event, 1003=any-event,
+    // 1006=SGR extended.
+    "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l" ++
+    // 2004=bracketed paste, 1004=focus events, 1049=alt screen.
+    "\x1b[?2004l\x1b[?1004l\x1b[?1049l" ++
+    // xterm modifyOtherKeys protocol off. Enabled by many TUIs;
+    // leaves Ctrl+letter producing CSI 27;mod;key~ in the outer shell
+    // if not reset. See #124.
+    "\x1b[>4;0m" ++
+    // Kitty keyboard protocol restore. First clear the current stack
+    // entry's flags (CSI = 0 ; 1 u), then pop it (CSI < u). The
+    // defensive clear protects against terminals that don't zero on
+    // pop, and against the set/pop asymmetry when the session's
+    // serialized state was replayed on re-attach.
+    "\x1b[=0;1u\x1b[<u" ++
+    // Cursor shape (DECSCUSR) back to default. Inner programs like
+    // nvim often set a bar/underline cursor. See #86.
+    "\x1b[0 q" ++
+    // Scrolling region (DECSTBM) back to full screen. Alt-screen
+    // programs (less, vim) set margins that otherwise persist.
+    "\x1b[r" ++
+    // Close any open hyperlink (OSC 8 with empty params).
+    "\x1b]8;;\x07" ++
+    // Reset all SGR attributes so colors / bold / italic don't leak
+    // into the outer shell.
+    "\x1b[0m" ++
+    // Cursor visible.
+    "\x1b[?25h";
+
 const SessionMatch = struct {
     name: []const u8,
     is_prefix: bool,
@@ -105,6 +145,8 @@ pub fn main() !void {
         return printCompletions(shell);
     } else if (std.mem.eql(u8, cmd, "detach") or std.mem.eql(u8, cmd, "d")) {
         return detachAll(&cfg);
+    } else if (std.mem.eql(u8, cmd, "reset")) {
+        return reset();
     } else if (std.mem.eql(u8, cmd, "history") or std.mem.eql(u8, cmd, "hi")) {
         var session_name: ?[]const u8 = null;
         var format: util.HistoryFormat = .plain;
@@ -1148,6 +1190,7 @@ fn help() !void {
         \\  [hi]story <name> [--vt|--html]           Output session scrollback
         \\  [w]ait <name>...                         Wait for session tasks to complete
         \\  [t]ail <name>...                         Follow session output
+        \\  reset                                    Reset outer terminal after an abnormal zmx exit
         \\  [c]ompletions <shell>                    Shell completions (bash, zsh, fish)
         \\  [v]ersion                                Show version
         \\  [h]elp                                   Show this help
@@ -1209,6 +1252,19 @@ fn help() !void {
         \\    zmx run -d dev sleep 10
         \\    zmx wait dev
         \\    zmx wait dev other
+        \\
+        \\Reset:
+        \\  Emit the same outer-terminal-mode cleanup bytes that `attach`
+        \\  writes on detach. Useful for recovering a pane whose zmx client
+        \\  died without running its cleanup (e.g. SSH disconnect mid-session,
+        \\  OOM, a wrapper process closing) and was left with Kitty keyboard
+        \\  protocol enabled, the alt screen still active, etc.
+        \\
+        \\  Safe to run on a healthy pane: the bytes re-assert defaults.
+        \\  Does not clear the screen or scrollback.
+        \\
+        \\  Examples:
+        \\    zmx reset
         \\
         \\Environment variables:
         \\  SHELL                Default shell for new sessions
@@ -1521,6 +1577,14 @@ fn detachAll(cfg: *Cfg) !void {
     };
 }
 
+fn reset() !void {
+    // Emit the same mode-cleanup bytes that the client's detach path
+    // writes, so a user whose `zmx attach` died without running its
+    // cleanup (e.g. SSH disconnect mid-session, OOM, pane close on a
+    // wrapper process) can recover the pane without closing it.
+    _ = try posix.write(posix.STDOUT_FILENO, outer_terminal_restore_seq);
+}
+
 fn kill(cfg: *Cfg, session_name: []const u8, force: bool) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -1716,45 +1780,9 @@ fn attach(daemon: *Daemon) !void {
         if (stdin_is_tty) {
             _ = cross.c.tcsetattr(posix.STDIN_FILENO, cross.c.TCSAFLUSH, &orig_termios);
         }
-        // Reset terminal modes on detach. Covers state the inner shell or
-        // an inner program may have enabled on the outer terminal during
-        // the session. Must run on every exit path (including signal-based
-        // termination via setupClientExitHandlers) so the outer pane is
-        // not left in a corrupted mode.
-        //
-        // NOTE: We intentionally do NOT clear screen or home cursor here
-        // because we don't want to corrupt any programs that rely on that,
-        // including ghostty's session restore.
-        const restore_seq =
-            // Mouse tracking: 1000=basic, 1002=button-event,
-            // 1003=any-event, 1006=SGR extended.
-            "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l" ++
-            // 2004=bracketed paste, 1004=focus events, 1049=alt screen.
-            "\x1b[?2004l\x1b[?1004l\x1b[?1049l" ++
-            // xterm modifyOtherKeys protocol off. Enabled by many TUIs;
-            // leaves Ctrl+letter producing CSI 27;mod;key~ in the outer
-            // shell if not reset. See #124.
-            "\x1b[>4;0m" ++
-            // Kitty keyboard protocol restore. First clear the current
-            // stack entry's flags (CSI = 0 ; 1 u), then pop it (CSI < u).
-            // The defensive clear protects against terminals that don't
-            // zero on pop, and against the set/pop asymmetry when the
-            // session's serialized state was replayed on re-attach.
-            "\x1b[=0;1u\x1b[<u" ++
-            // Cursor shape (DECSCUSR) back to default. Inner programs
-            // like nvim often set a bar/underline cursor. See #86.
-            "\x1b[0 q" ++
-            // Scrolling region (DECSTBM) back to full screen. Alt-screen
-            // programs (less, vim) set margins that otherwise persist.
-            "\x1b[r" ++
-            // Close any open hyperlink (OSC 8 with empty params).
-            "\x1b]8;;\x07" ++
-            // Reset all SGR attributes so colors / bold / italic don't
-            // leak into the outer shell.
-            "\x1b[0m" ++
-            // Cursor visible.
-            "\x1b[?25h";
-        _ = posix.write(posix.STDOUT_FILENO, restore_seq) catch {};
+        // See `outer_terminal_restore_seq` for the bytes written and the
+        // rationale for not clearing screen / homing cursor here.
+        _ = posix.write(posix.STDOUT_FILENO, outer_terminal_restore_seq) catch {};
     }
 
     if (stdin_is_tty) {

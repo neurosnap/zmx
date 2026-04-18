@@ -29,7 +29,7 @@ const bash_completions =
     \\  cur="${COMP_WORDS[COMP_CWORD]}"
     \\  prev="${COMP_WORDS[COMP_CWORD-1]}"
     \\
-    \\  local commands="attach run detach list completions kill history version help"
+    \\  local commands="attach run detach reset list completions kill history version help"
     \\
     \\  if [[ $COMP_CWORD -eq 1 ]]; then
     \\    COMPREPLY=($(compgen -W "$commands" -- "$cur"))
@@ -73,6 +73,7 @@ const zsh_completions =
     \\        'attach:Attach to session, creating if needed'
     \\        'run:Send command without attaching'
     \\        'detach:Detach all clients from current session'
+    \\        'reset:Reset outer terminal after an abnormal zmx exit'
     \\        'list:List active sessions'
     \\        'completions:Shell completion scripts'
     \\        'kill:Kill a session'
@@ -127,6 +128,7 @@ const fish_completions =
     \\complete -c zmx -n "__fish_is_nth_token 1" -a 'r run' -d 'Send command without attaching'
     \\complete -c zmx -n "__fish_is_nth_token 1" -a 'wr write' -d 'Write stdin to file_path through the session'
     \\complete -c zmx -n "__fish_is_nth_token 1" -a 'd detach' -d 'Detach all clients (ctrl+\ for current client)'
+    \\complete -c zmx -n "__fish_is_nth_token 1" -a 'reset' -d 'Reset outer terminal after an abnormal zmx exit'
     \\complete -c zmx -n "__fish_is_nth_token 1" -a 'l list' -d 'List active sessions'
     \\complete -c zmx -n "__fish_is_nth_token 1" -a 'k kill' -d 'Kill session and all attached clients'
     \\complete -c zmx -n "__fish_is_nth_token 1" -a 'hi history' -d 'Output session scrollback'
