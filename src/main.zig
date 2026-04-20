@@ -58,9 +58,16 @@ const O_NONBLOCK: usize = 1 << @bitOffsetOf(posix.O, "NONBLOCK");
 // we don't want to corrupt any programs that rely on that, including
 // ghostty's session restore.
 const outer_terminal_restore_seq =
-    // Mouse tracking: 1000=basic, 1002=button-event, 1003=any-event,
-    // 1006=SGR extended.
-    "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l" ++
+    // Mouse tracking off. 9=X10, 1000=basic, 1001=hilite, 1002=button-
+    // event, 1003=any-event, 1005=UTF-8 coords, 1006=SGR coords,
+    // 1015=urxvt coords, 1016=SGR-Pixels coords. All are idempotent
+    // resets (harmless on terminals that never had them enabled).
+    //
+    // Deliberately omits 1007 (mouse_alternate_scroll): Ghostty enables
+    // it by default, so a blanket `?1007l` would disable scroll-wheel-
+    // to-arrow-keys in alt-screen programs for the outer pane.
+    "\x1b[?9l\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l" ++
+    "\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l" ++
     // 2004=bracketed paste, 1004=focus events, 1049=alt screen.
     "\x1b[?2004l\x1b[?1004l\x1b[?1049l" ++
     // xterm modifyOtherKeys protocol off. Enabled by many TUIs;
@@ -540,6 +547,49 @@ test "Cfg.init uses custom modes from env vars" {
 
     try std.testing.expectEqual(@as(u32, 0o770), cfg.dir_mode);
     try std.testing.expectEqual(@as(u32, 0o660), cfg.log_mode);
+}
+
+test "outer_terminal_restore_seq covers expected modes" {
+    const must_contain = [_][]const u8{
+        // Mouse tracking family.
+        "\x1b[?9l",
+        "\x1b[?1000l",
+        "\x1b[?1001l",
+        "\x1b[?1002l",
+        "\x1b[?1003l",
+        "\x1b[?1005l",
+        "\x1b[?1006l",
+        "\x1b[?1015l",
+        "\x1b[?1016l",
+        // Other modes.
+        "\x1b[?2004l", // bracketed paste
+        "\x1b[?1004l", // focus events
+        "\x1b[?1049l", // alt screen
+        "\x1b[>4;0m",  // xterm modifyOtherKeys off
+        "\x1b[=0;1u", // kitty keyboard clear current entry
+        "\x1b[<u",    // kitty keyboard pop
+        "\x1b[0 q",   // DECSCUSR cursor reset
+        "\x1b[r",     // DECSTBM reset
+        "\x1b]8;;\x07", // close OSC 8 hyperlink
+        "\x1b[0m",    // SGR reset
+        "\x1b[?25h",  // cursor show
+    };
+    for (must_contain) |frag| {
+        std.testing.expect(
+            std.mem.indexOf(u8, outer_terminal_restore_seq, frag) != null,
+        ) catch |err| {
+            std.debug.print("missing restore_seq fragment: {s}\n", .{frag});
+            return err;
+        };
+    }
+
+    // mouse_alternate_scroll (DECSET 1007) is enabled by default in
+    // Ghostty. If we ever emit `\x1b[?1007l` here we'd regress the
+    // outer pane by turning off scroll-wheel-to-arrow-keys in
+    // alt-screen programs.
+    try std.testing.expect(
+        std.mem.indexOf(u8, outer_terminal_restore_seq, "\x1b[?1007l") == null,
+    );
 }
 
 /// Daemon is responsible for managing a zmx session.
