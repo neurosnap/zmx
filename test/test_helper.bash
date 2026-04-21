@@ -9,6 +9,12 @@ setup() {
   fi
   ZMX="$REPO_DIR/zig-out/bin/zmx"
 
+  # Detect shell so task-completion markers use the right syntax
+  case "$(basename "$SHELL")" in
+    fish) SHELL_FLAG="--fish" ;;
+    *)    SHELL_FLAG="" ;;
+  esac
+
   # Isolate socket dir so tests don't interfere with real sessions or each other
   export ZMX_DIR="$BATS_TEST_TMPDIR/zmx-sockets"
   mkdir -p "$ZMX_DIR"

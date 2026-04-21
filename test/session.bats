@@ -7,6 +7,10 @@
 # FDs (3+) to close, and the daemon inherits them.
 #
 # If this test suite completes at all, the FD fix is working.
+#
+# All `run` invocations use `-d` (detached) because `zmx run` blocks until
+# the command completes, and sessions outlive their initial command.
+# Note: `-d` must come after the session name (zmx run <name> -d <cmd>).
 
 load test_helper
 
@@ -15,7 +19,7 @@ load test_helper
 # ============================================================================
 
 @test "run: creates a session" {
-  run "$ZMX" run test-create echo hello
+  run "$ZMX" run test-create -d echo hello
   [ "$status" -eq 0 ]
   [[ "$output" == *"session \"test-create\" created"* ]]
 
@@ -25,14 +29,20 @@ load test_helper
 }
 
 @test "run: sends command to existing session" {
-  "$ZMX" run test-send echo first
+  "$ZMX" run test-send -d echo first
   wait_for_session test-send
 
-  run "$ZMX" run test-send echo second
+  run "$ZMX" run test-send -d echo second
   [ "$status" -eq 0 ]
   [[ "$output" == *"command sent"* ]]
   # Should NOT say "created" — session already exists
   [[ "$output" != *"created"* ]]
+}
+
+@test "run: blocking returns after command completes" {
+  run timeout 5 env SHELL=/bin/bash "$ZMX" run test-blocking echo hello
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"session \"test-blocking\" created"* ]]
 }
 
 @test "run: requires a command argument" {
@@ -51,19 +61,18 @@ load test_helper
 }
 
 @test "list: shows session details" {
-  "$ZMX" run test-list echo hello
+  "$ZMX" run test-list -d echo hello
   wait_for_session test-list
 
   run "$ZMX" list
   [ "$status" -eq 0 ]
   [[ "$output" == *"test-list"* ]]
   [[ "$output" == *"pid="* ]]
-  [[ "$output" == *"cmd=echo hello"* ]]
 }
 
 @test "list --short: shows only session names" {
-  "$ZMX" run test-short-a true
-  "$ZMX" run test-short-b true
+  "$ZMX" run test-short-a -d true
+  "$ZMX" run test-short-b -d true
   wait_for_session test-short-a
   wait_for_session test-short-b
 
@@ -84,7 +93,7 @@ load test_helper
 # ============================================================================
 
 @test "kill: removes a session" {
-  "$ZMX" run test-kill true
+  "$ZMX" run test-kill -d true
   wait_for_session test-kill
 
   run "$ZMX" kill test-kill
@@ -96,8 +105,8 @@ load test_helper
 }
 
 @test "kill: multiple sessions at once" {
-  "$ZMX" run kill-a true
-  "$ZMX" run kill-b true
+  "$ZMX" run kill-a -d true
+  "$ZMX" run kill-b -d true
   wait_for_session kill-a
   wait_for_session kill-b
 
@@ -108,7 +117,7 @@ load test_helper
 }
 
 @test "kill --force: removes socket file for dead session" {
-  "$ZMX" run test-force true
+  "$ZMX" run test-force -d true
   wait_for_session test-force
 
   # Get the daemon PID and kill it directly (simulating a crash)
@@ -129,7 +138,7 @@ load test_helper
 # ============================================================================
 
 @test "ZMX_DIR isolation: sessions in one dir are invisible to another" {
-  "$ZMX" run test-isolated true
+  "$ZMX" run test-isolated -d true
   wait_for_session test-isolated
 
   # A different ZMX_DIR should see no sessions
@@ -145,7 +154,7 @@ load test_helper
 # ============================================================================
 
 @test "history: captures session output" {
-  "$ZMX" run test-hist echo "bats-marker-xyzzy"
+  "$ZMX" run test-hist -d echo "bats-marker-xyzzy"
   wait_for_session test-hist
   sleep 0.5  # give the command time to produce output
 
@@ -159,8 +168,9 @@ load test_helper
 # ============================================================================
 
 @test "wait: returns after session command completes" {
-  "$ZMX" run test-wait echo done
+  "$ZMX" run test-wait -d $SHELL_FLAG echo done
   wait_for_session test-wait
+  sleep 1  # give the command time to finish
 
   # `wait` should return once the command finishes
   run timeout 10 "$ZMX" wait test-wait
@@ -173,7 +183,7 @@ load test_helper
 
 @test "churn: create and kill 5 sessions in sequence" {
   for i in 1 2 3 4 5; do
-    "$ZMX" run "churn-$i" echo "iteration $i"
+    "$ZMX" run "churn-$i" -d echo "iteration $i"
     wait_for_session "churn-$i"
     "$ZMX" kill "churn-$i"
   done

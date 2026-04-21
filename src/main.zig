@@ -720,10 +720,10 @@ const Daemon = struct {
 
                 // Close file descriptors inherited from the parent that the
                 // daemon doesn't need. This prevents test harnesses (like
-                // bats) from hanging — they wait for their internal FDs (3+)
+                // bats) from hanging -- they wait for their internal FDs (3+)
                 // to close before exiting.
                 //
-                // Must run BEFORE log_system.init() — otherwise the new log
+                // Must run BEFORE log_system.init() otherwise the new log
                 // FD gets closed, and spawnPty() reuses that FD number for
                 // the PTY master, causing log writes to leak into the terminal.
                 //
