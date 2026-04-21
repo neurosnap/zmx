@@ -85,6 +85,14 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_exe_unit_tests.step);
     }
 
+    // Integration tests (bats)
+    {
+        const integration_step = b.step("test-integration", "Run bats integration tests");
+        const bats = b.addSystemCommand(&.{ "bats", "test/session.bats" });
+        bats.step.dependOn(b.getInstallStep());
+        integration_step.dependOn(&bats.step);
+    }
+
     // Check for LSP integration
     {
         const check = b.step("check", "Check if zmx compiles");
