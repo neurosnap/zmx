@@ -196,6 +196,23 @@ pub fn main() !void {
         };
         std.log.info("socket path={s}", .{daemon.socket_path});
         return run(&daemon, detached, shell_basename, cmd_args_raw.items);
+    } else if (std.mem.eql(u8, cmd, "send") or std.mem.eql(u8, cmd, "s")) {
+        const session_name = args.next() orelse "";
+        if (session_name.len == 0) return error.SessionNameRequired;
+
+        var text_parts: std.ArrayList([]const u8) = .empty;
+        defer text_parts.deinit(alloc);
+        while (args.next()) |arg| {
+            try text_parts.append(alloc, arg);
+        }
+
+        const sesh = try socket.getSeshName(alloc, session_name);
+        defer alloc.free(sesh);
+        const socket_path = socket.getSocketPath(alloc, cfg.socket_dir, sesh) catch |err| switch (err) {
+            error.NameTooLong => return socket.printSessionNameTooLong(sesh, cfg.socket_dir),
+            error.OutOfMemory => return err,
+        };
+        return send(&cfg, sesh, socket_path, text_parts.items);
     } else if (std.mem.eql(u8, cmd, "kill") or std.mem.eql(u8, cmd, "k")) {
         var stderr_buffer: [1024]u8 = undefined;
         var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
@@ -1174,6 +1191,7 @@ fn help() !void {
         \\Commands:
         \\  [a]ttach <name> [command...]             Attach to session, creating if needed
         \\  [r]un <name> [-d] [--fish] [command...]  Send command without attaching
+        \\  [s]end <name> <text...>                   Send raw input to session PTY
         \\  [wr]ite <name> <file_path>               Write stdin to file_path through the session
         \\  [d]etach                                 Detach all clients (ctrl+\\ for current client)
         \\  [l]ist [--short]                         List active sessions
@@ -1222,6 +1240,23 @@ fn help() !void {
         \\    zmx run dev zig build
         \\    zmx run dev grep -r TODO src
         \\    zmx run dev git -c core.pager=cat diff
+        \\
+        \\Send:
+        \\  Sends raw text to the session's PTY input (fire-and-forget).
+        \\  Unlike `run`, no completion marker is appended and no exit code
+        \\  is tracked.  Useful for TUI applications, interactive prompts,
+        \\  or any program that reads stdin directly.
+        \\
+        \\  Text is sent byte-for-byte with no automatic carriage return.
+        \\  Append \r yourself when you want the shell to execute a command.
+        \\
+        \\  Text can also be piped via stdin:
+        \\    printf 'ls -la\r' | zmx send dev
+        \\
+        \\  Examples:
+        \\    printf 'echo hello\r' | zmx send dev
+        \\    zmx send dev $(printf '\x03')
+        \\    zmx send dev /compact
         \\
         \\Write:
         \\  Writes stdin to file_path inside the session. Works over SSH.
@@ -1889,6 +1924,67 @@ fn writeFile(daemon: *Daemon, file_path: []const u8) !void {
     }
 
     return error.NoAckReceived;
+}
+
+fn send(cfg: *Cfg, session_name: []const u8, socket_path: []const u8, text_parts: [][]const u8) !void {
+    const alloc = std.heap.c_allocator;
+    var buf: [4096]u8 = undefined;
+    var w = std.fs.File.stdout().writer(&buf);
+
+    var payload = std.ArrayList(u8).empty;
+    defer payload.deinit(alloc);
+
+    if (text_parts.len > 0) {
+        for (text_parts, 0..) |part, i| {
+            if (i > 0) try payload.append(alloc, ' ');
+            try payload.appendSlice(alloc, part);
+        }
+    } else {
+        // Read from stdin when no text arguments provided.
+        const stdin_fd = posix.STDIN_FILENO;
+        if (!std.posix.isatty(stdin_fd)) {
+            while (true) {
+                var tmp: [4096]u8 = undefined;
+                const n = posix.read(stdin_fd, &tmp) catch |err| {
+                    if (err == error.WouldBlock) break;
+                    return err;
+                };
+                if (n == 0) break;
+                try payload.appendSlice(alloc, tmp[0..n]);
+            }
+            // Strip trailing newline from piped input; the caller is
+            // responsible for including \r when submission is desired.
+            if (payload.items.len > 0 and payload.items[payload.items.len - 1] == '\n') {
+                _ = payload.pop();
+            }
+        }
+    }
+
+    if (payload.items.len == 0) return error.TextRequired;
+
+    var dir = try std.fs.openDirAbsolute(cfg.socket_dir, .{});
+    defer dir.close();
+
+    const probe_result = ipc.probeSession(alloc, socket_path) catch |err| {
+        std.log.err("session unresponsive: {s}", .{@errorName(err)});
+        if (err == error.ConnectionRefused) {
+            socket.cleanupStaleSocket(dir, session_name);
+            try w.interface.print("cleaned up stale session {s}\n", .{session_name});
+        } else {
+            try w.interface.print(
+                "session {s} is unresponsive ({s})\ndaemon may be busy: try again\n",
+                .{ session_name, @errorName(err) },
+            );
+        }
+        try w.interface.flush();
+        return;
+    };
+    defer posix.close(probe_result.fd);
+
+    ipc.send(probe_result.fd, .Input, payload.items) catch |err| switch (err) {
+        error.ConnectionResetByPeer, error.BrokenPipe => return,
+        else => return err,
+    };
 }
 
 fn run(daemon: *Daemon, detached: bool, shell_basename: []const u8, command_args: [][]const u8) !void {
