@@ -563,13 +563,34 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
         .tabstops = false, // tabstop restoration moves cursor after CUP, corrupting position
         .pwd = true,
         .keyboard = true,
-        .screen = .all,
+        // Screen extras default to `.all`, but with kitty_keyboard disabled:
+        // the formatter would emit `CSI = <flags> ; 1 u` (SET, which modifies
+        // the top of the outer terminal's kitty-keyboard stack in place),
+        // while the client emits `CSI < u` (POP) on detach. That mismatch
+        // corrupts any kitty-keyboard state the outer shell had pushed
+        // before zmx attached. We emit a balanced PUSH (`CSI > <flags> u`)
+        // manually below so the detach POP unwinds our addition cleanly.
+        .screen = .{
+            .cursor = true,
+            .style = true,
+            .hyperlink = true,
+            .protection = true,
+            .kitty_keyboard = false,
+            .charsets = true,
+        },
     };
 
     vis_fmt.format(&builder.writer) catch |err| {
         std.log.warn("failed to format terminal state err={s}", .{@errorName(err)});
         return null;
     };
+
+    // Kitty keyboard protocol PUSH. Pairs with the client's `CSI < u` POP
+    // on detach. Skip when flags are disabled (nothing to restore).
+    const kb_flags = term.screens.active.kitty_keyboard.current().int();
+    if (kb_flags != 0) {
+        builder.writer.print("\x1b[>{d}u", .{kb_flags}) catch {};
+    }
 
     const output = builder.writer.buffered();
     if (output.len == 0) return null;
@@ -994,6 +1015,62 @@ test "serializeTerminalState excludes synchronized output replay" {
     // but NOT synchronized output (DECSET 2026)
     try testing.expect(std.mem.indexOf(u8, output, "\x1b[?2004h") != null);
     try testing.expect(std.mem.indexOf(u8, output, "\x1b[?2026h") == null);
+}
+
+test "serializeTerminalState emits kitty keyboard PUSH not SET" {
+    const alloc = testing.allocator;
+
+    var term = try ghostty_vt.Terminal.init(alloc, .{
+        .cols = 80,
+        .rows = 24,
+    });
+    defer term.deinit(alloc);
+
+    var stream = term.vtStream();
+    defer stream.deinit();
+
+    // Inner shell pushes kitty keyboard with disambiguate (flags=1).
+    try stream.nextSlice("\x1b[>1u");
+
+    // Sanity: ghostty-vt pushed onto its stack.
+    try testing.expectEqual(
+        @as(u5, 1),
+        term.screens.active.kitty_keyboard.current().int(),
+    );
+
+    const output = serializeTerminalState(alloc, &term) orelse
+        return error.TestUnexpectedNull;
+    defer alloc.free(output);
+
+    // Replay must use PUSH so the client's `CSI < u` POP on detach
+    // unwinds it cleanly without overwriting outer-shell state.
+    try testing.expect(std.mem.indexOf(u8, output, "\x1b[>1u") != null);
+    // Must NOT use the formatter's default SET form, which mutates the
+    // outer terminal's top-of-stack entry in place.
+    try testing.expect(std.mem.indexOf(u8, output, "\x1b[=1;1u") == null);
+}
+
+test "serializeTerminalState omits kitty keyboard PUSH when disabled" {
+    const alloc = testing.allocator;
+
+    var term = try ghostty_vt.Terminal.init(alloc, .{
+        .cols = 80,
+        .rows = 24,
+    });
+    defer term.deinit(alloc);
+
+    var stream = term.vtStream();
+    defer stream.deinit();
+
+    try stream.nextSlice("hello");
+
+    const output = serializeTerminalState(alloc, &term) orelse
+        return error.TestUnexpectedNull;
+    defer alloc.free(output);
+
+    // No kitty-keyboard state to restore -> no push emitted.
+    try testing.expect(std.mem.indexOf(u8, output, "\x1b[>") == null);
+    try testing.expect(std.mem.indexOf(u8, output, "\x1b[=") == null);
 }
 
 fn testCreateTerminal(alloc: std.mem.Allocator, cols: u16, rows: u16, vt_data: []const u8) !ghostty_vt.Terminal {
