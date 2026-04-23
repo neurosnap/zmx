@@ -202,12 +202,7 @@ pub fn main() !void {
 
         var text_parts: std.ArrayList([]const u8) = .empty;
         defer text_parts.deinit(alloc);
-        var newline = true;
         while (args.next()) |arg| {
-            if (std.mem.eql(u8, arg, "--raw")) {
-                newline = false;
-                continue;
-            }
             try text_parts.append(alloc, arg);
         }
 
@@ -217,7 +212,7 @@ pub fn main() !void {
             error.NameTooLong => return socket.printSessionNameTooLong(sesh, cfg.socket_dir),
             error.OutOfMemory => return err,
         };
-        return send(&cfg, sesh, socket_path, text_parts.items, newline);
+        return send(&cfg, sesh, socket_path, text_parts.items);
     } else if (std.mem.eql(u8, cmd, "kill") or std.mem.eql(u8, cmd, "k")) {
         var stderr_buffer: [1024]u8 = undefined;
         var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
@@ -1196,7 +1191,7 @@ fn help() !void {
         \\Commands:
         \\  [a]ttach <name> [command...]             Attach to session, creating if needed
         \\  [r]un <name> [-d] [--fish] [command...]  Send command without attaching
-        \\  [s]end <name> [--raw] <text...>          Send raw input to session PTY
+        \\  [s]end <name> <text...>                   Send raw input to session PTY
         \\  [wr]ite <name> <file_path>               Write stdin to file_path through the session
         \\  [d]etach                                 Detach all clients (ctrl+\\ for current client)
         \\  [l]ist [--short]                         List active sessions
@@ -1252,16 +1247,16 @@ fn help() !void {
         \\  is tracked.  Useful for TUI applications, interactive prompts,
         \\  or any program that reads stdin directly.
         \\
-        \\  A carriage return (\r) is appended by default. Use `--raw` to
-        \\  send the text exactly as-is (e.g. for control characters).
+        \\  Text is sent byte-for-byte with no automatic carriage return.
+        \\  Append \r yourself when you want the shell to execute a command.
         \\
         \\  Text can also be piped via stdin:
-        \\    echo "/compact" | zmx send dev
+        \\    printf 'ls -la\r' | zmx send dev
         \\
         \\  Examples:
-        \\    zmx send dev "fix the login bug"
+        \\    printf 'echo hello\r' | zmx send dev
+        \\    zmx send dev $(printf '\x03')
         \\    zmx send dev /compact
-        \\    zmx send dev --raw $(printf '\x03')
         \\
         \\Write:
         \\  Writes stdin to file_path inside the session. Works over SSH.
@@ -1931,7 +1926,7 @@ fn writeFile(daemon: *Daemon, file_path: []const u8) !void {
     return error.NoAckReceived;
 }
 
-fn send(cfg: *Cfg, session_name: []const u8, socket_path: []const u8, text_parts: [][]const u8, newline: bool) !void {
+fn send(cfg: *Cfg, session_name: []const u8, socket_path: []const u8, text_parts: [][]const u8) !void {
     const alloc = std.heap.c_allocator;
     var buf: [4096]u8 = undefined;
     var w = std.fs.File.stdout().writer(&buf);
@@ -1957,8 +1952,8 @@ fn send(cfg: *Cfg, session_name: []const u8, socket_path: []const u8, text_parts
                 if (n == 0) break;
                 try payload.appendSlice(alloc, tmp[0..n]);
             }
-            // Strip trailing newline from piped input (the caller controls
-            // whether CR is appended via --raw).
+            // Strip trailing newline from piped input; the caller is
+            // responsible for including \r when submission is desired.
             if (payload.items.len > 0 and payload.items[payload.items.len - 1] == '\n') {
                 _ = payload.pop();
             }
@@ -1966,8 +1961,6 @@ fn send(cfg: *Cfg, session_name: []const u8, socket_path: []const u8, text_parts
     }
 
     if (payload.items.len == 0) return error.TextRequired;
-
-    if (newline) try payload.append(alloc, '\r');
 
     var dir = try std.fs.openDirAbsolute(cfg.socket_dir, .{});
     defer dir.close();

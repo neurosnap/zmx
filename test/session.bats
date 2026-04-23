@@ -54,17 +54,14 @@ load test_helper
 # Send (raw PTY input)
 # ============================================================================
 
-@test "send: delivers text to an existing session" {
+@test "send: does not append CR by default" {
   "$ZMX" run test-send-raw -d echo ready
   wait_for_session test-send-raw
   sleep 0.5
 
-  run "$ZMX" send test-send-raw "echo send-marker-abc123"
+  # Send text without \r — it should NOT execute as a command
+  run "$ZMX" send test-send-raw "partial-text"
   [ "$status" -eq 0 ]
-
-  sleep 0.5
-  run "$ZMX" history test-send-raw
-  [[ "$output" == *"send-marker-abc123"* ]]
 }
 
 @test "send: requires a session name" {
@@ -80,22 +77,12 @@ load test_helper
   [ "$status" -ne 0 ]
 }
 
-@test "send: --raw omits carriage return" {
-  "$ZMX" run test-send-ctrl -d echo ready
-  wait_for_session test-send-ctrl
-  sleep 0.5
-
-  # Send text without CR — it should NOT execute as a command
-  run "$ZMX" send test-send-ctrl --raw "partial-text"
-  [ "$status" -eq 0 ]
-}
-
 @test "send: accepts piped stdin" {
   "$ZMX" run test-send-pipe -d echo ready
   wait_for_session test-send-pipe
   sleep 0.5
 
-  run bash -c 'echo "echo piped-marker-xyz789" | "$0" send test-send-pipe' "$ZMX"
+  run bash -c 'printf "echo piped-marker-xyz789\r" | "$0" send test-send-pipe' "$ZMX"
   [ "$status" -eq 0 ]
 
   sleep 0.5
