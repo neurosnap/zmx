@@ -560,6 +560,14 @@ const Daemon = struct {
 
     pub fn closeClient(self: *Daemon, client: *Client, i: usize, shutdown_on_last: bool) bool {
         const fd = client.socket_fd;
+        // leader is disconnected, remove ref and let another client claim leader on input
+        if (self.leader_client_fd == client.socket_fd) {
+            std.log.info(
+                "unsetting leader session={s} fd={d}",
+                .{ self.session_name, client.socket_fd },
+            );
+            self.leader_client_fd = null;
+        }
         client.deinit();
         self.alloc.destroy(client);
         _ = self.clients.orderedRemove(i);
@@ -961,14 +969,6 @@ const Daemon = struct {
 
     pub fn handleDetach(self: *Daemon, client: *Client, i: usize) void {
         std.log.info("client detach session={s} fd={d}", .{ self.session_name, client.socket_fd });
-        // leader is trying to disconnect, remove ref and let another client claim leader on input
-        if (self.leader_client_fd == client.socket_fd) {
-            std.log.info(
-                "unsetting leader session={s} fd={d}",
-                .{ self.session_name, client.socket_fd },
-            );
-            self.leader_client_fd = null;
-        }
         _ = self.closeClient(client, i, false);
     }
 
