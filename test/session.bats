@@ -208,7 +208,7 @@ load test_helper
 # ============================================================================
 
 @test "wait: returns after session command completes" {
-  "$ZMX" run test-wait -d $SHELL_FLAG echo done
+  "$ZMX" run test-wait -d echo done
   wait_for_session test-wait
   sleep 1  # give the command time to finish
 
@@ -239,7 +239,7 @@ load test_helper
 # ============================================================================
 
 @test "print: text appears in history" {
-  "$ZMX" run test-print-hist -d $SHELL_FLAG echo ready
+  "$ZMX" run test-print-hist -d echo ready
   wait_for_session test-print-hist
   sleep 0.3
 

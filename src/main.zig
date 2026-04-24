@@ -154,15 +154,8 @@ pub fn main() !void {
 
         var cmd_args_raw: std.ArrayList([]const u8) = .empty;
         defer cmd_args_raw.deinit(alloc);
-        var shell_basename: []const u8 = "bash";
         var detached = false;
         while (args.next()) |arg| {
-            // Because fish tracks exit code status via $status instead of $? we need some
-            // way to figure out what shell is being used inside the session.
-            if (std.mem.startsWith(u8, arg, "--fish")) {
-                shell_basename = "fish";
-                continue;
-            }
             if (std.mem.startsWith(u8, arg, "-d")) {
                 detached = true;
                 continue;
@@ -195,7 +188,7 @@ pub fn main() !void {
             error.OutOfMemory => return err,
         };
         std.log.info("socket path={s}", .{daemon.socket_path});
-        return run(&daemon, detached, shell_basename, cmd_args_raw.items);
+        return run(&daemon, detached, cmd_args_raw.items);
     } else if (std.mem.eql(u8, cmd, "send") or std.mem.eql(u8, cmd, "s")) {
         const session_name = args.next() orelse "";
         if (session_name.len == 0) return error.SessionNameRequired;
@@ -551,6 +544,7 @@ const Daemon = struct {
     task_exit_code: ?u8 = null, // null = running or n/a, set when task completes
     task_ended_at: ?u64 = null, // timestamp when task exited
     is_fish: bool = false, // true if session shell is fish (affects exit code variable)
+    pty_fd: i32 = -1, // set by daemonLoop so handleRun can probe the foreground process
     pty_write_buf: std.ArrayList(u8) = .empty,
 
     const EnsureSessionResult = struct {
@@ -1101,9 +1095,15 @@ const Daemon = struct {
 
         if (payload.len == 0) return;
 
-        // First byte indicates shell type (0=bash/zsh, 1=fish)
-        self.is_fish = payload[0] == 1;
-        const cmd = payload[1..];
+        // Auto-detect the foreground process on the PTY to determine shell type.
+        if (self.pty_fd >= 0) {
+            var name_buf: [64]u8 = undefined;
+            if (cross.getForegroundProcessName(self.pty_fd, &name_buf)) |name| {
+                self.is_fish = std.mem.eql(u8, name, "fish");
+                std.log.debug("foreground process={s} is_fish={}", .{ name, self.is_fish });
+            }
+        }
+        const cmd = payload;
 
         // Daemon appends the task marker so the client never injects
         // shell-specific syntax, keeping Ctrl-C recovery clean.
@@ -1221,7 +1221,7 @@ fn help() !void {
         \\
         \\Commands:
         \\  [a]ttach <name> [command...]             Attach to session, creating if needed
-        \\  [r]un <name> [-d] [--fish] [command...]  Send command without attaching
+        \\  [r]un <name> [-d] [command...]           Send command without attaching
         \\  [s]end <name> <text...>                  Send raw input to session PTY
         \\  [p]rint <name> <text...>                 Inject text into session display
         \\  [wr]ite <name> <file_path>               Write stdin to file_path through the session
@@ -1255,8 +1255,6 @@ fn help() !void {
         \\  Commands run sequentially: do not send multiple in parallel.
         \\  Avoid interactive programs (pagers, editors, prompts): they hang.
         \\
-        \\  `--fish` is required when the session runs fish shell.
-        \\
         \\  If the command hangs, send Ctrl+C to recover:
         \\    zmx run <session> $(printf '\x03')
         \\
@@ -1268,7 +1266,6 @@ fn help() !void {
         \\
         \\  Examples:
         \\    zmx run dev ls
-        \\    zmx run dev --fish ls src
         \\    zmx run dev zig build
         \\    zmx run dev grep -r TODO src
         \\    zmx run dev git -c core.pager=cat diff
@@ -2029,7 +2026,7 @@ fn send(cfg: *Cfg, session_name: []const u8, socket_path: []const u8, text_parts
     };
 }
 
-fn run(daemon: *Daemon, detached: bool, shell_basename: []const u8, command_args: [][]const u8) !void {
+fn run(daemon: *Daemon, detached: bool, command_args: [][]const u8) !void {
     const alloc = daemon.alloc;
     var buf: [4096]u8 = undefined;
     var w = std.fs.File.stdout().writer(&buf);
@@ -2046,17 +2043,10 @@ fn run(daemon: *Daemon, detached: bool, shell_basename: []const u8, command_args
         try w.interface.flush();
     }
 
-    // Prefix byte tells the daemon which shell syntax to use for the
-    // task-completion marker (0 = bash/zsh  $?, 1 = fish  $status).
-    // The daemon appends the marker itself so the client never injects
-    // shell-specific text -- keeping recovery (Ctrl-C) clean.
-    const is_fish: u8 = if (std.mem.eql(u8, shell_basename, "fish")) 1 else 0;
-
     if (command_args.len > 0) {
         var cmd_list = std.ArrayList(u8).empty;
         defer cmd_list.deinit(alloc);
 
-        try cmd_list.append(alloc, is_fish);
         for (command_args, 0..) |arg, i| {
             if (i > 0) try cmd_list.append(alloc, ' ');
             if (util.shellNeedsQuoting(arg)) {
@@ -2082,7 +2072,6 @@ fn run(daemon: *Daemon, detached: bool, shell_basename: []const u8, command_args
             var stdin_buf = try std.ArrayList(u8).initCapacity(alloc, 4096);
             defer stdin_buf.deinit(alloc);
 
-            try stdin_buf.append(alloc, is_fish);
             while (true) {
                 var tmp: [4096]u8 = undefined;
                 const n = posix.read(stdin_fd, &tmp) catch |err| {
@@ -2093,7 +2082,7 @@ fn run(daemon: *Daemon, detached: bool, shell_basename: []const u8, command_args
                 try stdin_buf.appendSlice(alloc, tmp[0..n]);
             }
 
-            if (stdin_buf.items.len > 1) {
+            if (stdin_buf.items.len > 0) {
                 // Normalize any trailing newline to CR so readline (raw mode)
                 // accepts each line.
                 if (stdin_buf.items[stdin_buf.items.len - 1] == '\n') {
@@ -2316,6 +2305,7 @@ fn clientLoop(client_sock_fd: i32) !ClientResult {
 /// clients.  It uses poll() as its non-blocking mechanism.
 fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
     std.log.info("daemon started session={s} pty_fd={d}", .{ daemon.session_name, pty_fd });
+    daemon.pty_fd = pty_fd;
     setupSigtermHandler();
     var poll_fds = try std.ArrayList(posix.pollfd).initCapacity(daemon.alloc, 8);
     defer poll_fds.deinit(daemon.alloc);
