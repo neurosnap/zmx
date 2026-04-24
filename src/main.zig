@@ -212,7 +212,24 @@ pub fn main() !void {
             error.NameTooLong => return socket.printSessionNameTooLong(sesh, cfg.socket_dir),
             error.OutOfMemory => return err,
         };
-        return send(&cfg, sesh, socket_path, text_parts.items);
+        return send(&cfg, sesh, socket_path, text_parts.items, .Input);
+    } else if (std.mem.eql(u8, cmd, "print") or std.mem.eql(u8, cmd, "p")) {
+        const session_name = args.next() orelse "";
+        if (session_name.len == 0) return error.SessionNameRequired;
+
+        var text_parts: std.ArrayList([]const u8) = .empty;
+        defer text_parts.deinit(alloc);
+        while (args.next()) |arg| {
+            try text_parts.append(alloc, arg);
+        }
+
+        const sesh = try socket.getSeshName(alloc, session_name);
+        defer alloc.free(sesh);
+        const socket_path = socket.getSocketPath(alloc, cfg.socket_dir, sesh) catch |err| switch (err) {
+            error.NameTooLong => return socket.printSessionNameTooLong(sesh, cfg.socket_dir),
+            error.OutOfMemory => return err,
+        };
+        return send(&cfg, sesh, socket_path, text_parts.items, .Output);
     } else if (std.mem.eql(u8, cmd, "kill") or std.mem.eql(u8, cmd, "k")) {
         var stderr_buffer: [1024]u8 = undefined;
         var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
@@ -1109,6 +1126,20 @@ const Daemon = struct {
         std.log.debug("run command len={d}", .{payload.len});
     }
 
+    pub fn handleOutput(self: *Daemon, payload: []const u8, vt_stream: anytype) !void {
+        try vt_stream.nextSlice(payload);
+        self.has_pty_output = true;
+        for (self.clients.items) |client| {
+            try ipc.appendMessage(self.alloc, &client.write_buf, .Output, payload);
+            client.has_pending_output = true;
+        }
+        if (self.clients.items.len > 0) {
+            posix.kill(self.pid, posix.SIG.WINCH) catch |err| {
+                std.log.warn("failed to send SIGWINCH err={s}", .{@errorName(err)});
+            };
+        }
+    }
+
     pub fn handleWrite(self: *Daemon, client: *Client, payload: []const u8) !void {
         // Wire format: [u32 path len][path bytes][file content]
         if (payload.len < @sizeOf(u32)) return error.InvalidPayload;
@@ -1191,7 +1222,8 @@ fn help() !void {
         \\Commands:
         \\  [a]ttach <name> [command...]             Attach to session, creating if needed
         \\  [r]un <name> [-d] [--fish] [command...]  Send command without attaching
-        \\  [s]end <name> <text...>                   Send raw input to session PTY
+        \\  [s]end <name> <text...>                  Send raw input to session PTY
+        \\  [p]rint <name> <text...>                 Inject text into session display
         \\  [wr]ite <name> <file_path>               Write stdin to file_path through the session
         \\  [d]etach                                 Detach all clients (ctrl+\\ for current client)
         \\  [l]ist [--short]                         List active sessions
@@ -1257,6 +1289,15 @@ fn help() !void {
         \\    printf 'echo hello\r' | zmx send dev
         \\    zmx send dev $(printf '\x03')
         \\    zmx send dev /compact
+        \\
+        \\Print:
+        \\  Injects text directly into the session display and scrollback.
+        \\  Never touches the PTY input -- the shell sees nothing.
+        \\  Caller is responsible for newlines (\\r\\n).
+        \\
+        \\  Examples:
+        \\    printf '\\r\\nhello\\r\\n' | zmx print dev
+        \\    zmx print dev "$(printf '\\r\\nalert\\r\\n')"
         \\
         \\Write:
         \\  Writes stdin to file_path inside the session. Works over SSH.
@@ -1926,7 +1967,7 @@ fn writeFile(daemon: *Daemon, file_path: []const u8) !void {
     return error.NoAckReceived;
 }
 
-fn send(cfg: *Cfg, session_name: []const u8, socket_path: []const u8, text_parts: [][]const u8) !void {
+fn send(cfg: *Cfg, session_name: []const u8, socket_path: []const u8, text_parts: [][]const u8, tag: ipc.Tag) !void {
     const alloc = std.heap.c_allocator;
     var buf: [4096]u8 = undefined;
     var w = std.fs.File.stdout().writer(&buf);
@@ -1954,7 +1995,8 @@ fn send(cfg: *Cfg, session_name: []const u8, socket_path: []const u8, text_parts
             }
             // Strip trailing newline from piped input; the caller is
             // responsible for including \r when submission is desired.
-            if (payload.items.len > 0 and payload.items[payload.items.len - 1] == '\n') {
+            // For .Output the caller controls exact bytes, so don't strip.
+            if (tag != .Output and payload.items.len > 0 and payload.items[payload.items.len - 1] == '\n') {
                 _ = payload.pop();
             }
         }
@@ -1981,7 +2023,7 @@ fn send(cfg: *Cfg, session_name: []const u8, socket_path: []const u8, text_parts
     };
     defer posix.close(probe_result.fd);
 
-    ipc.send(probe_result.fd, .Input, payload.items) catch |err| switch (err) {
+    ipc.send(probe_result.fd, tag, payload.items) catch |err| switch (err) {
         error.ConnectionResetByPeer, error.BrokenPipe => return,
         else => return err,
     };
@@ -2474,6 +2516,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                 while (client.read_buf.next()) |msg| {
                     switch (msg.header.tag) {
                         .Input => try daemon.handleInput(client, msg.payload),
+                        .Output => try daemon.handleOutput(msg.payload, &vt_stream),
                         .Init => try daemon.handleInit(client, pty_fd, &term, msg.payload),
                         .Switch => try daemon.handleSwitch(msg.payload),
                         .Resize => try daemon.handleResize(client, pty_fd, &term, msg.payload),
@@ -2491,7 +2534,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                         .Info => try daemon.handleInfo(client),
                         .History => try daemon.handleHistory(client, &term, msg.payload),
                         .Run => try daemon.handleRun(client, msg.payload),
-                        .Output, .Ack, .TaskComplete => {},
+                        .Ack, .TaskComplete => {},
                         .Write => try daemon.handleWrite(client, msg.payload),
                         _ => std.log.warn(
                             "ignoring unknown IPC tag={d}",

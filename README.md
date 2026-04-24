@@ -79,6 +79,8 @@ Usage: zmx <command> [args...]
 Commands:
   [a]ttach <name> [command...]             Attach to session, creating if needed
   [r]un <name> [-d] [--fish] [command...]  Send command without attaching
+  [s]end <name> <text...>                  Send raw input to session PTY
+  [p]rint <name> <text...>                 Inject text into session display
   [wr]ite <name> <file_path>               Write stdin to file_path through the session
   [d]etach                                 Detach all clients (ctrl+\\ for current client)
   [l]ist [--short]                         List active sessions
@@ -127,6 +129,32 @@ Run:
     zmx run dev zig build
     zmx run dev grep -r TODO src
     zmx run dev git -c core.pager=cat diff
+
+Send:
+  Sends raw text to the session's PTY input (fire-and-forget).
+  Unlike `run`, no completion marker is appended and no exit code
+  is tracked.  Useful for TUI applications, interactive prompts,
+  or any program that reads stdin directly.
+
+  Text is sent byte-for-byte with no automatic carriage return.
+  Append \r yourself when you want the shell to execute a command.
+
+  Text can also be piped via stdin:
+    printf 'ls -la\r' | zmx send dev
+
+  Examples:
+    printf 'echo hello\r' | zmx send dev
+    zmx send dev $(printf '\x03')
+    zmx send dev /compact
+
+Print:
+  Injects text directly into the session display and scrollback.
+  Never touches the PTY input -- the shell sees nothing.
+  Caller is responsible for newlines (\\r\\n).
+
+  Examples:
+    printf '\\r\\nhello\\r\\n' | zmx print dev
+    zmx print dev "$(printf '\\r\\nalert\\r\\n')"
 
 Write:
   Writes stdin to file_path inside the session. Works over SSH.

@@ -232,3 +232,28 @@ load test_helper
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
+
+
+# ============================================================================
+# Print (inject text into terminal state)
+# ============================================================================
+
+@test "print: text appears in history" {
+  "$ZMX" run test-print-hist -d $SHELL_FLAG echo ready
+  wait_for_session test-print-hist
+  sleep 0.3
+
+  # Caller is responsible for newlines; trailing \r\n ensures the text
+  # lands on its own line before SIGWINCH triggers a prompt redraw.
+  printf "\r\nbats-print-marker-abc123\r\n" | "$ZMX" print test-print-hist
+  sleep 0.3
+
+  run "$ZMX" history test-print-hist
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"bats-print-marker-abc123"* ]]
+}
+
+@test "print: requires a session name" {
+  run "$ZMX" print
+  [ "$status" -ne 0 ]
+}
