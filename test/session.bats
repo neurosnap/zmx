@@ -100,6 +100,12 @@ load test_helper
   [[ "$output" == *"no sessions found"* ]]
 }
 
+@test "ls aliases list" {
+  run "$ZMX" ls
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no sessions found"* ]]
+}
+
 @test "list: shows session details" {
   "$ZMX" run test-list -d echo hello
   wait_for_session test-list

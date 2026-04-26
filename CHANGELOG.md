@@ -4,6 +4,10 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
+### Added
+
+- `zmx ls` is accepted as an alias for `zmx list`
+
 ## v0.5.0 - 2026-04-16
 
 ### Added
