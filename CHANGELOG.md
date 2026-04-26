@@ -8,6 +8,7 @@ Use spec: https://common-changelog.org/
 
 - `zmx send` send raw bytes to session without ZMX completion marker or auto-newline
 - `zmx print` send raw bytes to client's stdout
+- `zmx ls` is accepted as an alias for `zmx list`
 
 ### Fixed
 
