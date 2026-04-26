@@ -539,6 +539,7 @@ const Daemon = struct {
     cwd: []const u8 = "",
     has_pty_output: bool = false,
     has_had_client: bool = false,
+    has_terminal_client: bool = false, // true only after a real attach (.Init received)
     created_at: u64, // unix timestamp (ns)
     is_task_mode: bool = false, // flag for when session is run as a task
     task_exit_code: ?u8 = null, // null = running or n/a, set when task completes
@@ -943,6 +944,7 @@ const Daemon = struct {
 
             // Mark that we've had a client init, so subsequent clients get terminal state
             self.has_had_client = true;
+            self.has_terminal_client = true;
 
             std.log.debug("init resize rows={d} cols={d}", .{ resize.rows, resize.cols });
         }
@@ -2408,12 +2410,13 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                     try vt_stream.nextSlice(buf[0..n]);
                     daemon.has_pty_output = true;
 
-                    // When no clients are attached, respond to terminal
-                    // queries (e.g. DA1/DA2) on behalf of the terminal.
-                    // This prevents shells like from fish from waiting 2s
-                    // and then sending a no DA query response warning because
-                    // there's no client terminal to respond to the query.
-                    if (daemon.clients.items.len == 0 and
+                    // When no real terminal client has attached yet, respond to
+                    // terminal queries (e.g. DA1/DA2) on behalf of the terminal.
+                    // This prevents fish from waiting 10s for unanswered queries.
+                    // `has_terminal_client` is only set when a client sends .Init
+                    // (a real zmx attach), not when a `zmx run` tail-only client
+                    // connects.
+                    if (!daemon.has_terminal_client and
                         daemon.pty_write_buf.items.len < Daemon.PTY_WRITE_BUF_MAX)
                     {
                         util.respondToDeviceAttributes(daemon.alloc, &daemon.pty_write_buf, buf[0..n]);
