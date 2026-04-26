@@ -537,5 +537,6 @@ abduco provides session management (i.e. it allows programs to be run independen
 
 ## community tools
 
+- [pi-zmx](https://github.com/deevus/pi-zmx) -- [pi](https://pi.dev) extension for zmx.
 - [zsm](https://github.com/mdsakalu/zmx-session-manager) — TUI session manager for zmx. List, preview, filter, and kill sessions from an interactive terminal UI.
 - [zmosh](https://github.com/mmonad/zmosh) — A fork of zmx that adds encrypted UDP auto-reconnect for remote sessions (like mosh).
