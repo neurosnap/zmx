@@ -980,9 +980,9 @@ test "serializeTerminalState excludes synchronized output replay" {
     var stream = term.vtStream();
     defer stream.deinit();
 
-    try stream.nextSlice("\x1b[?2004h"); // Bracketed paste
-    try stream.nextSlice("\x1b[?2026h"); // Synchronized output
-    try stream.nextSlice("hello");
+    stream.nextSlice("\x1b[?2004h"); // Bracketed paste
+    stream.nextSlice("\x1b[?2026h"); // Synchronized output
+    stream.nextSlice("hello");
 
     try testing.expect(term.modes.get(.bracketed_paste));
     try testing.expect(term.modes.get(.synchronized_output));
@@ -1005,7 +1005,7 @@ fn testCreateTerminal(alloc: std.mem.Allocator, cols: u16, rows: u16, vt_data: [
     if (vt_data.len > 0) {
         var stream = term.vtStream();
         defer stream.deinit();
-        try stream.nextSlice(vt_data);
+        stream.nextSlice(vt_data);
     }
     return term;
 }
@@ -1036,7 +1036,7 @@ fn serializeRoundtrip(alloc: std.mem.Allocator, source: *ghostty_vt.Terminal) !g
     });
     var stream = dest.vtStream();
     defer stream.deinit();
-    try stream.nextSlice(serialized);
+    stream.nextSlice(serialized);
     return dest;
 }
 
@@ -1107,11 +1107,11 @@ test "serializeTerminalState with scrollback preserves visible content" {
     var buf: [32]u8 = undefined;
     for (0..80) |i| {
         const line = std.fmt.bufPrint(&buf, "SCROLL_{d}\r\n", .{i}) catch unreachable;
-        try stream.nextSlice(line);
+        stream.nextSlice(line);
     }
 
     // Clear screen and place markers at specific positions
-    try stream.nextSlice("\x1b[2J" ++
+    stream.nextSlice("\x1b[2J" ++
         "\x1b[2;5HMARK_A" ++
         "\x1b[6;15HMARK_B" ++
         "\x1b[10;30HMARK_C" ++
@@ -1149,9 +1149,9 @@ test "serializeTerminalState nested roundtrip preserves content" {
         var buf: [32]u8 = undefined;
         for (0..60) |i| {
             const line = std.fmt.bufPrint(&buf, "SCROLL_{d}\r\n", .{i}) catch unreachable;
-            try inner_stream.nextSlice(line);
+            inner_stream.nextSlice(line);
         }
-        try inner_stream.nextSlice("\x1b[2J" ++
+        inner_stream.nextSlice("\x1b[2J" ++
             "\x1b[3;10HINNER_A" ++
             "\x1b[12;25HINNER_B" ++
             "\x1b[20;5H");
@@ -1173,7 +1173,7 @@ test "serializeTerminalState nested roundtrip preserves content" {
     {
         var outer_stream = outer.vtStream();
         defer outer_stream.deinit();
-        try outer_stream.nextSlice(inner_serialized);
+        outer_stream.nextSlice(inner_serialized);
     }
 
     // Serialize outer (simulates outer daemon re-attach after detach)
@@ -1240,9 +1240,9 @@ test "serializeTerminalState scrollback + size mismatch nested roundtrip" {
         var buf: [32]u8 = undefined;
         for (0..80) |i| {
             const line = std.fmt.bufPrint(&buf, "LINE_{d}\r\n", .{i}) catch unreachable;
-            try inner_stream.nextSlice(line);
+            inner_stream.nextSlice(line);
         }
-        try inner_stream.nextSlice("\x1b[2J" ++
+        inner_stream.nextSlice("\x1b[2J" ++
             "\x1b[3;10HSTRESS_A" ++
             "\x1b[12;25HSTRESS_B" ++
             "\x1b[16;20H");
@@ -1264,7 +1264,7 @@ test "serializeTerminalState scrollback + size mismatch nested roundtrip" {
     {
         var outer_stream = outer.vtStream();
         defer outer_stream.deinit();
-        try outer_stream.nextSlice(inner_ser);
+        outer_stream.nextSlice(inner_ser);
     }
 
     var client = try serializeRoundtrip(alloc, &outer);
