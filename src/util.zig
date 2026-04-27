@@ -480,11 +480,31 @@ fn isKeyPressed(buf: []const u8, expected_key: u32, expected_mods: u32) bool {
 /// and alternate key sub-fields from the kitty protocol's progressive
 /// enhancement flags.
 fn keypressWithMod(buf: []const u8, expected_key: u32, expected_mods: u32) bool {
+    const parsed = parseKittyCsiU(buf) orelse return false;
+    if (parsed.key_code != expected_key) return false;
+
+    // Only accept intentional modifiers. Lock modifiers
+    // (caps_lock=0b1000000, num_lock=0b10000000) are tolerated because
+    // they are ambient state, not deliberate key combinations.
+    const intentional_mods = parsed.modifiers & 0b00111111;
+    if (expected_mods > 0 and expected_mods != intentional_mods) return false;
+
+    // 3 = release -- reject. Accept press (1) and repeat (2).
+    return parsed.event_type != 3;
+}
+
+const KittyCsiU = struct {
+    key_code: u32,
+    modifiers: u32,
+    event_type: u32,
+    consumed: usize,
+};
+
+fn parseKittyCsiU(buf: []const u8) ?KittyCsiU {
     var pos: usize = 0;
 
     // 1. Parse key code.
-    const key_code = parseDecimal(buf, &pos) orelse return false;
-    if (key_code != expected_key) return false;
+    const key_code = parseDecimal(buf, &pos) orelse return null;
 
     // 2. Skip any ':alternate-key' sub-fields (shifted key, base layout key).
     while (pos < buf.len and buf[pos] == ':') {
@@ -493,29 +513,22 @@ fn keypressWithMod(buf: []const u8, expected_key: u32, expected_mods: u32) bool 
     }
 
     // 3. Expect ';' separator before modifiers.
-    if (pos >= buf.len or buf[pos] != ';') return false;
+    if (pos >= buf.len or buf[pos] != ';') return null;
     pos += 1;
 
     // 4. Parse modifier value. Kitty encodes as 1 + bitfield.
-    const mod_encoded = parseDecimal(buf, &pos) orelse return false;
-    if (mod_encoded < 1) return false;
+    const mod_encoded = parseDecimal(buf, &pos) orelse return null;
+    if (mod_encoded < 1) return null;
     const mod_raw = mod_encoded - 1;
 
-    // 5. Only accept intentional modifiers. Lock modifiers
-    //    (caps_lock=0b1000000, num_lock=0b10000000) are tolerated because
-    //    they are ambient state, not deliberate key combinations.
-    const intentional_mods = mod_raw & 0b00111111;
-    if (expected_mods > 0 and expected_mods != intentional_mods) return false;
-
-    // 6. Parse optional event type after ':'.
+    var event_type: u32 = 1;
+    // 5. Parse optional event type after ':'.
     if (pos < buf.len and buf[pos] == ':') {
         pos += 1;
-        const event_type = parseDecimal(buf, &pos) orelse return false;
-        // 3 = release -- reject. Accept press (1) and repeat (2).
-        if (event_type == 3) return false;
+        event_type = parseDecimal(buf, &pos) orelse return null;
     }
 
-    // 7. Skip optional ';text-codepoints' section.
+    // 6. Skip optional ';text-codepoints' section.
     if (pos < buf.len and buf[pos] == ';') {
         pos += 1;
         // Consume remaining digits and colons until 'u'.
@@ -524,8 +537,16 @@ fn keypressWithMod(buf: []const u8, expected_key: u32, expected_mods: u32) bool 
         }
     }
 
-    // 8. Expect terminal 'u'.
-    return pos < buf.len and buf[pos] == 'u';
+    // 7. Expect terminal 'u'.
+    if (pos >= buf.len or buf[pos] != 'u') return null;
+    pos += 1;
+
+    return .{
+        .key_code = key_code,
+        .modifiers = mod_raw,
+        .event_type = event_type,
+        .consumed = pos,
+    };
 }
 
 /// Parse a decimal integer from buf starting at pos, advancing pos past the
@@ -545,8 +566,17 @@ fn parseDecimal(buf: []const u8, pos: *usize) ?u32 {
 /// is a key combination like up-arrow, backspace, enter, ctrl+f, etc.
 pub fn isUserInput(payload: []const u8) bool {
     var parser = ghostty_vt.Parser.init();
-    for (payload) |c| {
-        const actions = parser.next(c);
+    var i: usize = 0;
+    while (i < payload.len) {
+        if (payload[i] == 0x1b and i + 2 < payload.len and payload[i + 1] == '[') {
+            if (parseKittyCsiU(payload[i + 2 ..])) |kitty| {
+                if (kitty.event_type != 3) return true;
+                i += 2 + kitty.consumed;
+                continue;
+            }
+        }
+
+        const actions = parser.next(payload[i]);
         for (actions) |action_opt| {
             const action = action_opt orelse continue;
             switch (action) {
@@ -572,6 +602,7 @@ pub fn isUserInput(payload: []const u8) bool {
                 else => {},
             }
         }
+        i += 1;
     }
     return false;
 }
@@ -1555,6 +1586,10 @@ test "isUserInput: kitty keyboard sequences" {
     // Kitty keyboard protocol uses CSI u
     try testing.expect(isUserInput("\x1b[11;2u")); // F1 with modifier
     try testing.expect(isUserInput("\x1b[12;2u")); // F2 with modifier
+    try testing.expect(isUserInput("\x1b[102;1:1u")); // literal "f" press
+    try testing.expect(isUserInput("\x1b[57444;1:1u")); // Kitty functional key press
+    try testing.expect(!isUserInput("\x1b[102;1:3u")); // literal "f" release only
+    try testing.expect(isUserInput("\x1b[102;1:1u\x1b[67;65;31M")); // key press with mouse noise
 }
 
 test "isUserInput: mouse events (CSI M) excluded" {
