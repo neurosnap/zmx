@@ -2580,7 +2580,7 @@ fn wakeSignalPipe(_: i32, _: *const posix.siginfo_t, _: ?*anyopaque) callconv(.c
     std.c._errno().* = saved;
 }
 
-// std.posix.poll retries EINTR internally, so SA_RESTART is moot — neither
+// std.posix.poll retries EINTR internally, so SA_RESTART is moot -- neither
 // setting wakes the loop. The handler writes to sig_pipe instead; poll()
 // wakes on its read end.
 fn installWakeHandler(sig: u6) void {
@@ -2599,8 +2599,4 @@ fn ignoreSigpipe() void {
         .flags = 0,
     };
     posix.sigaction(posix.SIG.PIPE, &act, null);
-}
-
-test {
-    _ = ipc;
 }

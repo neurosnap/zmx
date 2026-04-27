@@ -245,15 +245,13 @@ pub fn probeSession(
     return error.Unexpected;
 }
 
-// ╔════════════════════════════════════════════════════════════════════╗
-// ║ WIRE PROTOCOL FREEZE — read before "fixing" any test below.        ║
-// ║                                                                    ║
-// ║ Changing these constants does not fix the test; it breaks every    ║
-// ║ running daemon for every user until they `pkill -f zmx`.           ║
-// ║                                                                    ║
-// ║ Need a new field?  → add a new `Tag` value (next free integer).    ║
-// ║ Need to remove one? → don't. Reserve the integer, stop sending it. ║
-// ╚════════════════════════════════════════════════════════════════════╝
+//  WIRE PROTOCOL FREEZE — read before "fixing" any test below.
+//
+//  Changing these constants does not fix the test; it breaks every
+//  running daemon for every user until they `pkill -f zmx`.
+//
+//  Need a new field?   → add a new `Tag` value (next free integer).
+//  Need to remove one? → don't. Reserve the integer, stop sending it.
 test "Info wire size is frozen" {
     try std.testing.expectEqual(@as(usize, 552), @sizeOf(Info));
     // packed struct{u8,u32} backs to u40 → @sizeOf rounds to 8, not 5.
