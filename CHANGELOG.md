@@ -4,6 +4,17 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
+### Added
+
+- `zmx send` send raw bytes to session without ZMX completion marker or auto-newline
+- `zmx print` send raw bytes to client's stdout
+
+### Fixed
+
+- An idle daemon (no clients, no PTY traffic) used to ignore SIGTERM indefinitely.
+- An idle attached client used to ignore SIGWINCH until the next keystroke or daemon output.
+- Don't kill all sessions when `.Info` ipc event changed
+
 ## v0.5.0 - 2026-04-16
 
 ### Added

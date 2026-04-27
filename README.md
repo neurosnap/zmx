@@ -306,7 +306,7 @@ end
 
 ## session picker
 
-You can add an interactive session picker to your shell that lets you fuzzy-find existing sessions, preview their scrollback history, or create new ones — all from a single prompt. This is especially useful for remote SSH workflows: add it to your shell startup so that connecting to a machine immediately presents the picker.
+You can add an interactive session picker to your shell that lets you fuzzy-find existing sessions, preview their scrollback history, or create new ones -- all from a single prompt. This is especially useful for remote SSH workflows: add it to your shell startup so that connecting to a machine immediately presents the picker.
 
 Requires [fzf](https://github.com/junegunn/fzf).
 
@@ -538,5 +538,5 @@ abduco provides session management (i.e. it allows programs to be run independen
 ## community tools
 
 - [pi-zmx](https://github.com/deevus/pi-zmx) -- [pi](https://pi.dev) extension for zmx.
-- [zsm](https://github.com/mdsakalu/zmx-session-manager) — TUI session manager for zmx. List, preview, filter, and kill sessions from an interactive terminal UI.
-- [zmosh](https://github.com/mmonad/zmosh) — A fork of zmx that adds encrypted UDP auto-reconnect for remote sessions (like mosh).
+- [zsm](https://github.com/mdsakalu/zmx-session-manager) -- TUI session manager for zmx. List, preview, filter, and kill sessions from an interactive terminal UI.
+- [zmosh](https://github.com/mmonad/zmosh) -- A fork of zmx that adds encrypted UDP auto-reconnect for remote sessions (like mosh).
