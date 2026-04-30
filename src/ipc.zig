@@ -1,5 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
+const compat = @import("compat.zig");
 const cross = @import("cross.zig");
 const socket = @import("socket.zig");
 
@@ -106,7 +107,7 @@ pub fn appendMessage(
 fn writeAll(fd: i32, data: []const u8) !void {
     var index: usize = 0;
     while (index < data.len) {
-        const n = try posix.write(fd, data[index..]);
+        const n = try compat.write(fd, data[index..]);
         if (n == 0) return error.DiskQuota;
         index += n;
     }
@@ -217,7 +218,7 @@ pub fn probeSession(
 ) SessionProbeError!SessionProbeResult {
     const timeout_ms = 1000;
     const fd = try connectSession(socket_path);
-    errdefer posix.close(fd);
+    errdefer compat.close(fd);
 
     send(fd, .Info, "") catch return error.Unexpected;
 

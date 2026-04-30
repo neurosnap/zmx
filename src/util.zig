@@ -3,6 +3,8 @@ const posix = std.posix;
 const ghostty_vt = @import("ghostty-vt");
 const ipc = @import("ipc.zig");
 const socket = @import("socket.zig");
+const env = @import("env.zig");
+const compat = @import("compat.zig");
 const testing = std.testing;
 
 pub const SessionEntry = struct {
@@ -32,13 +34,13 @@ pub fn get_session_entries(
     alloc: std.mem.Allocator,
     socket_dir: []const u8,
 ) !std.ArrayList(SessionEntry) {
-    var dir = try std.fs.openDirAbsolute(socket_dir, .{ .iterate = true });
-    defer dir.close();
+    var dir = try std.Io.Dir.openDirAbsolute(std.Options.debug_io, socket_dir, .{ .iterate = true });
+    defer dir.close(std.Options.debug_io);
     var iter = dir.iterate();
 
     var sessions = try std.ArrayList(SessionEntry).initCapacity(alloc, 30);
 
-    while (try iter.next()) |entry| {
+    while (try iter.next(std.Options.debug_io)) |entry| {
         const exists = socket.sessionExists(dir, entry.name) catch continue;
         if (exists) {
             const name = try alloc.dupe(u8, entry.name);
@@ -69,7 +71,7 @@ pub fn get_session_entries(
                 }
                 continue;
             };
-            posix.close(result.fd);
+            compat.close(result.fd);
 
             // Extract cmd and cwd from the fixed-size arrays. Lengths come
             // off the wire (u16 range), so clamp to the actual array size.
@@ -635,7 +637,7 @@ pub fn serializeTerminal(
 }
 
 pub fn detectShell() [:0]const u8 {
-    return std.posix.getenv("SHELL") orelse "/bin/sh";
+    return env.get("SHELL") orelse "/bin/sh";
 }
 
 /// Formats a session entry for list output (only the name when `short` is

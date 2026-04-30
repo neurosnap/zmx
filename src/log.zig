@@ -1,8 +1,8 @@
 const std = @import("std");
 
 pub const LogSystem = struct {
-    file: ?std.fs.File = null,
-    mutex: std.Thread.Mutex = .{},
+    file: ?std.Io.File = null,
+    mutex: std.atomic.Mutex = .unlocked,
     current_size: u64 = 0,
     max_size: u64 = 5 * 1024 * 1024, // 5MB
     path: []const u8 = "",
@@ -14,33 +14,37 @@ pub const LogSystem = struct {
         self.path = try alloc.dupe(u8, path);
         self.mode = mode;
 
-        const file = std.fs.openFileAbsolute(path, .{ .mode = .read_write }) catch |err| switch (err) {
-            error.FileNotFound => try std.fs.createFileAbsolute(
+        const io = std.Options.debug_io;
+        const file = std.Io.Dir.openFileAbsolute(io, path, .{ .mode = .read_write }) catch |err| switch (err) {
+            error.FileNotFound => try std.Io.Dir.createFileAbsolute(
+                io,
                 path,
-                .{ .read = true, .mode = @intCast(self.mode) },
+                .{
+                    .read = true,
+                    .permissions = .fromMode(@intCast(self.mode)),
+                },
             ),
             else => return err,
         };
 
-        const end_pos = try file.getEndPos();
-        try file.seekTo(end_pos);
+        const end_pos = try file.length(io);
         self.current_size = end_pos;
         self.file = file;
     }
 
     pub fn deinit(self: *LogSystem) void {
-        if (self.file) |f| f.close();
+        if (self.file) |f| f.close(std.Options.debug_io);
         if (self.path.len > 0) self.alloc.free(self.path);
     }
 
     pub fn log(
         self: *LogSystem,
         comptime level: std.log.Level,
-        comptime scope: @Type(.enum_literal),
+        comptime scope: @EnumLiteral(),
         comptime format: []const u8,
         args: anytype,
     ) void {
-        self.mutex.lock();
+        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
         defer self.mutex.unlock();
 
         if (self.file == null) {
@@ -54,7 +58,7 @@ pub const LogSystem = struct {
             };
         }
 
-        const now = std.time.milliTimestamp();
+        const now = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds();
         const prefix = "[{d}] [{s}] ({s}): ";
         const scope_name = @tagName(scope);
         const level_name = level.asText();
@@ -70,10 +74,12 @@ pub const LogSystem = struct {
             const msg_len = std.fmt.count(format, args);
             const newline_len = 1;
             const total_len = prefix_len + msg_len + newline_len;
+            const write_pos = self.current_size;
             self.current_size += total_len;
 
             var buf: [4096]u8 = undefined;
-            var w = f.writerStreaming(&buf);
+            var w = f.writer(std.Options.debug_io, &buf);
+            w.seekTo(write_pos) catch unreachable;
             w.interface.print(prefix ++ format ++ "\n", prefix_args ++ args) catch {};
             w.interface.flush() catch {};
         }
@@ -81,21 +87,26 @@ pub const LogSystem = struct {
 
     fn rotate(self: *LogSystem) !void {
         if (self.file) |f| {
-            f.close();
+            f.close(std.Options.debug_io);
             self.file = null;
         }
 
         const old_path = try std.fmt.allocPrint(self.alloc, "{s}.old", .{self.path});
         defer self.alloc.free(old_path);
 
-        std.fs.renameAbsolute(self.path, old_path) catch |err| switch (err) {
+        std.Io.Dir.renameAbsolute(self.path, old_path, std.Options.debug_io) catch |err| switch (err) {
             error.FileNotFound => {},
             else => return err,
         };
 
-        self.file = try std.fs.createFileAbsolute(
+        self.file = try std.Io.Dir.createFileAbsolute(
+            std.Options.debug_io,
             self.path,
-            .{ .truncate = true, .read = true, .mode = @intCast(self.mode) },
+            .{
+                .truncate = true,
+                .read = true,
+                .permissions = .fromMode(@intCast(self.mode)),
+            },
         );
         self.current_size = 0;
     }

@@ -1,6 +1,5 @@
 const builtin = @import("builtin");
 const std = @import("std");
-const posix = std.posix;
 
 pub const c = switch (builtin.os.tag) {
     .macos => @cImport({
@@ -77,9 +76,8 @@ pub fn getForegroundProcessName(pty_fd: i32, buf: []u8) ?[]const u8 {
             // /proc/<pid>/comm contains just the process name + newline
             var path_buf: [64]u8 = undefined;
             const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/comm", .{pgid}) catch return null;
-            const file = std.fs.openFileAbsolute(path, .{}) catch return null;
-            defer file.close();
-            const n = file.read(buf) catch return null;
+            const contents = std.Io.Dir.cwd().readFile(std.Options.debug_io, path, buf) catch return null;
+            const n = contents.len;
             // strip trailing newline
             const end = if (n > 0 and buf[n - 1] == '\n') n - 1 else n;
             return buf[0..end];

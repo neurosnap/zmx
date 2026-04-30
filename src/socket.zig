@@ -1,12 +1,14 @@
 const std = @import("std");
 const posix = std.posix;
+const compat = @import("compat.zig");
+const env = @import("env.zig");
 
 pub fn getSeshPrefix() []const u8 {
-    return std.posix.getenv("ZMX_SESSION_PREFIX") orelse "";
+    return env.get("ZMX_SESSION_PREFIX") orelse "";
 }
 
 pub fn getSeshNameFromEnv() []const u8 {
-    return std.posix.getenv("ZMX_SESSION") orelse "";
+    return env.get("ZMX_SESSION") orelse "";
 }
 
 pub fn getSeshName(alloc: std.mem.Allocator, sesh: []const u8) ![]const u8 {
@@ -29,22 +31,22 @@ pub fn getSeshName(alloc: std.mem.Allocator, sesh: []const u8) ![]const u8 {
 }
 
 pub fn sessionConnect(sesh: []const u8) !i32 {
-    var unix_addr = try std.net.Address.initUnix(sesh);
-    const socket_fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
-    errdefer posix.close(socket_fd);
-    try posix.connect(socket_fd, &unix_addr.any, unix_addr.getOsSockLen());
+    var unix_addr = try compat.UnixAddr.init(sesh);
+    const socket_fd = try compat.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    errdefer compat.close(socket_fd);
+    try compat.connect(socket_fd, unix_addr.sockaddr(), unix_addr.socklen());
     return socket_fd;
 }
 
-pub fn cleanupStaleSocket(dir: std.fs.Dir, session_name: []const u8) void {
+pub fn cleanupStaleSocket(dir: std.Io.Dir, session_name: []const u8) void {
     std.log.warn("stale socket found, cleaning up session={s}", .{session_name});
-    dir.deleteFile(session_name) catch |err| {
+    dir.deleteFile(std.Options.debug_io, session_name) catch |err| {
         std.log.warn("failed to delete stale socket err={s}", .{@errorName(err)});
     };
 }
 
-pub fn sessionExists(dir: std.fs.Dir, name: []const u8) !bool {
-    const stat = dir.statFile(name) catch |err| switch (err) {
+pub fn sessionExists(dir: std.Io.Dir, name: []const u8) !bool {
+    const stat = dir.statFile(std.Options.debug_io, name, .{}) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => return err,
     };
@@ -58,16 +60,16 @@ pub fn createSocket(fname: []const u8) !i32 {
     // AF.UNIX: Unix domain socket for local IPC with client processes
     // SOCK.STREAM: Reliable, bidirectional communication
     // SOCK.NONBLOCK: Set socket to non-blocking
-    const fd = try posix.socket(
+    const fd = try compat.socket(
         posix.AF.UNIX,
         posix.SOCK.STREAM | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC,
         0,
     );
-    errdefer posix.close(fd);
+    errdefer compat.close(fd);
 
-    var unix_addr = try std.net.Address.initUnix(fname);
-    try posix.bind(fd, &unix_addr.any, unix_addr.getOsSockLen());
-    try posix.listen(fd, 128);
+    var unix_addr = try compat.UnixAddr.init(fname);
+    try compat.bind(fd, unix_addr.sockaddr(), unix_addr.socklen());
+    try compat.listen(fd, 128);
     return fd;
 }
 
@@ -95,7 +97,7 @@ pub fn getSocketPath(
 
 pub fn printSessionNameTooLong(session_name: []const u8, socket_dir: []const u8) void {
     var buf: [4096]u8 = undefined;
-    var w = std.fs.File.stderr().writer(&buf);
+    var w = std.Io.File.stderr().writer(std.Options.debug_io, &buf);
     if (maxSessionNameLen(socket_dir)) |max_len| {
         w.interface.print(
             "error: session name is too long ({d} bytes, max {d} for socket directory \"{s}\")\n",
