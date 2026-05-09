@@ -1,6 +1,5 @@
 const std = @import("std");
 const posix = std.posix;
-const builtin = @import("builtin");
 const build_options = @import("build_options");
 const ghostty_vt = @import("ghostty-vt");
 const ipc = @import("ipc.zig");
@@ -11,7 +10,6 @@ const cross = @import("cross.zig");
 const socket = @import("socket.zig");
 
 pub const version = build_options.version;
-pub const git_sha = build_options.git_sha;
 pub const ghostty_version = build_options.ghostty_version;
 
 var log_system = log.LogSystem{};
@@ -1202,13 +1200,9 @@ const Daemon = struct {
 fn printVersion(cfg: *Cfg) !void {
     var buf: [256]u8 = undefined;
     var w = std.fs.File.stdout().writer(&buf);
-    var ver = version;
-    if (builtin.mode == .Debug) {
-        ver = git_sha;
-    }
     try w.interface.print(
         "zmx\t\t{s}\nghostty_vt\t{s}\nsocket_dir\t{s}\nlog_dir\t\t{s}\n",
-        .{ ver, ghostty_version, cfg.socket_dir, cfg.log_dir },
+        .{ version, ghostty_version, cfg.socket_dir, cfg.log_dir },
     );
     try w.interface.flush();
 }

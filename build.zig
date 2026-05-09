@@ -16,16 +16,8 @@ pub fn build(b: *std.Build) void {
     const version = b.option([]const u8, "version", "Version string for release") orelse
         @as([]const u8, @import("build.zig.zon").version);
 
-    var code: u8 = 0;
-    const git_sha = std.mem.trim(u8, b.runAllowFail(
-        &.{ "git", "rev-parse", "--short", "HEAD" },
-        &code,
-        .Inherit,
-    ) catch "unknown", "\n");
-
     const options = b.addOptions();
     options.addOption([]const u8, "version", version);
-    options.addOption([]const u8, "git_sha", git_sha);
     const ghostty_ver = @import("build.zig.zon").dependencies.ghostty.hash;
     options.addOption([]const u8, "ghostty_version", ghostty_ver);
 
@@ -139,14 +131,14 @@ pub fn build(b: *std.Build) void {
             const arch_name = @tagName(release_target.cpu_arch orelse .x86_64);
             const tarball_name = b.fmt("zmx-{s}-{s}-{s}.tar.gz", .{ version, os_name, arch_name });
 
-            const tar = b.addSystemCommand(&.{ "tar", "--no-xattrs", "-czf" });
+            const tar = b.addSystemCommand(&.{ "tar", "-czf" });
 
             const tarball = tar.addOutputFileArg(tarball_name);
             tar.addArg("-C");
             tar.addDirectoryArg(release_exe.getEmittedBinDirectory());
             tar.addArg("zmx");
 
-            const shasum = b.addSystemCommand(&.{ "shasum", "-a", "256" });
+            const shasum = b.addSystemCommand(&.{"sha256sum"});
             shasum.addFileArg(tarball);
             const shasum_output = shasum.captureStdOut();
 
