@@ -50,6 +50,16 @@ load test_helper
   [ "$status" -ne 0 ]
 }
 
+@test "run --help shows help without creating a session" {
+  run "$ZMX" run --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Usage:"* ]]
+
+  run "$ZMX" list --short
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"--help"* ]]
+}
+
 # ============================================================================
 # Send (raw PTY input)
 # ============================================================================
