@@ -56,6 +56,7 @@ const bash_completions =
 ;
 
 const zsh_completions =
+    \\#compdef zmx
     \\_zmx() {
     \\  local context state state_descr line
     \\  typeset -A opt_args
