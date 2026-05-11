@@ -100,10 +100,19 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "h") or std.mem.eql(u8, cmd, "-h")) {
         return help();
     } else if (std.mem.eql(u8, cmd, "list") or std.mem.eql(u8, cmd, "l") or std.mem.eql(u8, cmd, "ls")) {
-        const short = if (args.next()) |arg| std.mem.eql(u8, arg, "--short") else false;
+        var short = false;
+        if (args.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+                return help();
+            }
+            short = std.mem.eql(u8, arg, "--short");
+        }
         return list(&cfg, short);
     } else if (std.mem.eql(u8, cmd, "completions") or std.mem.eql(u8, cmd, "c")) {
         const arg = args.next() orelse return;
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            return help();
+        }
         const shell = completions.Shell.fromString(arg) orelse return;
         return printCompletions(shell);
     } else if (std.mem.eql(u8, cmd, "detach") or std.mem.eql(u8, cmd, "d")) {
@@ -112,7 +121,9 @@ pub fn main() !void {
         var session_name: ?[]const u8 = null;
         var format: util.HistoryFormat = .plain;
         while (args.next()) |arg| {
-            if (std.mem.eql(u8, arg, "--vt")) {
+            if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+                return help();
+            } else if (std.mem.eql(u8, arg, "--vt")) {
                 format = .vt;
             } else if (std.mem.eql(u8, arg, "--html")) {
                 format = .html;
@@ -126,6 +137,9 @@ pub fn main() !void {
         return history(&cfg, sesh, format);
     } else if (std.mem.eql(u8, cmd, "attach") or std.mem.eql(u8, cmd, "a")) {
         const session_name = args.next() orelse "";
+        if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
+            return help();
+        }
 
         var command_args: std.ArrayList([]const u8) = .empty;
         defer command_args.deinit(alloc);
@@ -208,6 +222,9 @@ pub fn main() !void {
         return run(&daemon, detached, cmd_args_raw.items);
     } else if (std.mem.eql(u8, cmd, "send") or std.mem.eql(u8, cmd, "s")) {
         const session_name = args.next() orelse "";
+        if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
+            return help();
+        }
         if (session_name.len == 0) return error.SessionNameRequired;
 
         var text_parts: std.ArrayList([]const u8) = .empty;
@@ -225,6 +242,9 @@ pub fn main() !void {
         return send(&cfg, sesh, socket_path, text_parts.items, .Input);
     } else if (std.mem.eql(u8, cmd, "print") or std.mem.eql(u8, cmd, "p")) {
         const session_name = args.next() orelse "";
+        if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
+            return help();
+        }
         if (session_name.len == 0) return error.SessionNameRequired;
 
         var text_parts: std.ArrayList([]const u8) = .empty;
@@ -254,6 +274,9 @@ pub fn main() !void {
         }
         var force = false;
         while (args.next()) |session_name| {
+            if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
+                return help();
+            }
             if (std.mem.eql(u8, session_name, "--force")) {
                 force = true;
                 continue;
@@ -297,6 +320,9 @@ pub fn main() !void {
             matchers.deinit(alloc);
         }
         while (args.next()) |session_name| {
+            if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
+                return help();
+            }
             const m = try parseSessionArg(alloc, session_name);
             try matchers.append(alloc, m);
         }
@@ -313,6 +339,9 @@ pub fn main() !void {
             matchers.deinit(alloc);
         }
         while (args.next()) |session_name| {
+            if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
+                return help();
+            }
             const m = try parseSessionArg(alloc, session_name);
             try matchers.append(alloc, m);
         }
@@ -380,8 +409,14 @@ pub fn main() !void {
         _ = try tail(client_socket_fds, false, false);
     } else if (std.mem.eql(u8, cmd, "write") or std.mem.eql(u8, cmd, "wr")) {
         const session_name = args.next() orelse "";
+        if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
+            return help();
+        }
         if (session_name.len == 0) return error.SessionNameRequired;
         const file_path = args.next() orelse "";
+        if (std.mem.eql(u8, file_path, "--help") or std.mem.eql(u8, file_path, "-h")) {
+            return help();
+        }
         if (file_path.len == 0) return error.FilePathRequired;
 
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;

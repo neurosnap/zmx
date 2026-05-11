@@ -60,6 +60,23 @@ load test_helper
   [[ "$output" != *"--help"* ]]
 }
 
+@test "subcommands handle --help and -h without side effects" {
+  for cmd in attach send print write kill wait tail history list completions; do
+    run "$ZMX" "$cmd" --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Usage:"* ]]
+
+    run "$ZMX" "$cmd" -h
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Usage:"* ]]
+  done
+
+  run "$ZMX" list --short
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"--help"* ]]
+  [[ "$output" != *"-h"* ]]
+}
+
 # ============================================================================
 # Send (raw PTY input)
 # ============================================================================
