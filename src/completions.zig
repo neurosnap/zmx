@@ -4,11 +4,13 @@ pub const Shell = enum {
     bash,
     zsh,
     fish,
+    nu,
 
     pub fn fromString(s: []const u8) ?Shell {
         if (std.mem.eql(u8, s, "bash")) return .bash;
         if (std.mem.eql(u8, s, "zsh")) return .zsh;
         if (std.mem.eql(u8, s, "fish")) return .fish;
+        if (std.mem.eql(u8, s, "nu")) return .nu;
 
         return null;
     }
@@ -18,6 +20,7 @@ pub const Shell = enum {
             .bash => bash_completions,
             .zsh => zsh_completions,
             .fish => fish_completions,
+            .nu => nu_completions,
         };
     }
 };
@@ -152,4 +155,45 @@ const fish_completions =
     \\complete -c zmx -n "__fish_seen_subcommand_from k kill" -l force -d 'Force kill'
     \\complete -c zmx -n "__fish_seen_subcommand_from hi history" -l vt -d 'History format for escape sequences'
     \\complete -c zmx -n "__fish_seen_subcommand_from hi history" -l html -d 'History format for escape sequences'
+;
+
+const nu_completions =
+    \\def "nu-complete zmx sessions" [] {
+    \\    zmx list --short | lines
+    \\}
+    \\
+    \\def "nu-complete zmx complete" [] {
+    \\    [bash fish nu zsh]
+    \\}
+    \\
+    \\export extern "zmx attach" [
+    \\    name: string@"nu-complete zmx sessions"
+    \\    ...rest: string
+    \\]
+    \\
+    \\export extern "zmx run" [
+    \\    name: string@"nu-complete zmx sessions"
+    \\    -d
+    \\    --fish
+    \\    ...rest: string
+    \\]
+    \\
+    \\export extern "zmx write" [
+    \\    name: string@"nu-complete zmx sessions"
+    \\    path: path
+    \\]
+    \\
+    \\export extern "zmx kill" [
+    \\    --force
+    \\    name: string@"nu-complete zmx sessions"
+    \\]
+    \\
+    \\export extern "zmx detach" []
+    \\export extern "zmx list" [--short]
+    \\export extern "zmx history" [name: string@"nu-complete zmx sessions", --vt, --html]
+    \\export extern "zmx wait" [...sessions: string@"nu-complete zmx sessions"]
+    \\export extern "zmx tail" [...sessions: string@"nu-complete zmx sessions"]
+    \\export extern "zmx version" []
+    \\export extern "completions" [shell: string@"nu-complete zmx complete"]
+    \\export extern "zmx help" []
 ;
