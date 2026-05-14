@@ -358,6 +358,63 @@ zmx-select() {
 }
 ```
 
+OR if you're using ZSH
+```bash
+_zmx-select() {
+    # Prepare terminal for interactive fzf
+    zle -I
+
+    local output selected action cmd
+    output=$(zmx list --short 2>/dev/null | fzf \
+        --prompt='ZMX [C-k > Kill | C-n > New | C-\ > Detach]' \
+        --expect=enter,ctrl-k,ctrl-n \
+        --layout=reverse \
+        --preview='zmx list | grep {1}; zmx history {1} | /usr/bin/tail -n 30' \
+        --preview-window=right:66%
+    )
+
+    # Cleanly exit if fzf was cancelled
+    [[ -z "$output" ]] && { zle reset-prompt; return }
+
+    action="${output%%$'\n'*}"
+    selected="${output#*$'\n'}"
+    [[ "$selected" == "$output" ]] && selected=""
+
+    case "$action" in
+        enter)
+            if [[ -n "$selected" ]]; then
+                cmd="zmx attach ${(q)selected}"
+            fi
+            ;;
+        ctrl-n)
+            local new_session="$(basename "$PWD")-$(date +%s)-$IDE_TERM"
+            cmd="zmx attach ${(q)new_session}"
+            ;;
+        ctrl-k)
+            if [[ -n "$selected" ]]; then
+                zmx kill "$selected"
+            fi
+            # Reset prompt and return so the user can pick another or exit
+            zle reset-prompt
+            return
+            ;;
+    esac
+
+    # If a command was generated, push it to the stack and execute
+    if [[ -n "$cmd" ]]; then
+        # Clear the current buffer
+        BUFFER=""
+        # Feed the command + a newline into the input stack
+        zle -U "$cmd"$'\n'
+    else
+        zle reset-prompt
+    fi
+}
+zle -N _zmx-select
+bindkey '^z' _zmx-select
+```
+
+
 You can call `zmx-select` manually, bind it to a key, or auto-launch it on shell startup when outside a zmx session. With `&& exit`, the normal flow becomes: connect via SSH → pick a session → work → detach or exit the session → SSH disconnects automatically. Cancelling the picker with **Ctrl-C** drops you into a regular shell as an escape hatch.
 
 ```bash
