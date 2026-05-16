@@ -45,7 +45,7 @@ pub fn getTerminalSize(fd: i32) Resize {
     if (cross.c.ioctl(fd, cross.c.TIOCGWINSZ, &ws) == 0 and ws.ws_row > 0 and ws.ws_col > 0) {
         return .{ .rows = ws.ws_row, .cols = ws.ws_col };
     }
-    return .{ .rows = 24, .cols = 80 };
+    return .{ .rows = 24, .cols = 160 };
 }
 
 pub const MAX_CMD_LEN = 256;
