@@ -1472,6 +1472,7 @@ fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
     var zero_match_iters: u32 = 0;
 
     var agg_exit_code: u8 = 0;
+    var last_print: i64 = 0;
     while (true) {
         agg_exit_code = 0;
         var sessions = try util.get_session_entries(alloc, cfg.socket_dir);
@@ -1506,11 +1507,15 @@ fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
                 continue;
             }
             if (session.task_ended_at == 0) {
-                try stdout.print(
-                    "[{d}] waiting task={s}\n",
-                    .{ std.time.timestamp(), session.name },
-                );
-                try stdout.flush();
+                const now = std.time.timestamp();
+                if (now - last_print >= 5) {
+                    try stdout.print(
+                        "[{d}] waiting task={s}\n",
+                        .{ now, session.name },
+                    );
+                    try stdout.flush();
+                    last_print = now;
+                }
                 continue;
             }
             try stdout.print(
