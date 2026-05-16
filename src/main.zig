@@ -1473,6 +1473,7 @@ fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
 
     var agg_exit_code: u8 = 0;
     var last_print: i64 = 0;
+    var prev_done: i32 = 0;
     while (true) {
         agg_exit_code = 0;
         var sessions = try util.get_session_entries(alloc, cfg.socket_dir);
@@ -1518,11 +1519,14 @@ fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
                 }
                 continue;
             }
-            try stdout.print(
-                "[{d}] completed task={s} exit_code={d}\n",
-                .{ session.task_ended_at.?, session.name, session.task_exit_code.? },
-            );
-            try stdout.flush();
+            if (done >= prev_done) {
+                // Newly completed — print immediately
+                try stdout.print(
+                    "[{d}] completed task={s} exit_code={d}\n",
+                    .{ session.task_ended_at.?, session.name, session.task_exit_code.? },
+                );
+                try stdout.flush();
+            }
             if (session.task_exit_code != 0) {
                 agg_exit_code = session.task_exit_code orelse 0;
             }
@@ -1566,6 +1570,7 @@ fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
             }
         }
 
+        prev_done = done;
         std.Thread.sleep(1000 * std.time.ns_per_ms);
     }
 
