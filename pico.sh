@@ -7,9 +7,9 @@ EVENT_TYPE="${PICO_CI_EVENT_TYPE:-manual}"
 echo "running ci event=${EVENT_TYPE} session=${ZMX_SESSION_PREFIX}"
 
 zmx run build docker build -t zig-zmx .
-zmx run fmt -d docker run --rm -it -v "$(pwd)":/app zig-zmx zig fmt --check .
-zmx run test -d docker run --rm -it -v "$(pwd)":/app zig-zmx zig build test
-zmx run integration -d docker run --rm -it -v "$(pwd)":/app zig-zmx zig build test-integration
+zmx run fmt -d docker run --rm -it zig-zmx zig fmt --check .
+zmx run test -d docker run --rm -it zig-zmx zig build test
+zmx run integration -d docker run --rm -it zig-zmx zig build test-integration
 zmx wait "*"
 
 if [[ $EVENT_TYPE != "release" ]]; then
