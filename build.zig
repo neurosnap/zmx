@@ -11,7 +11,13 @@ const macos_targets: []const std.Target.Query = &.{
 };
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
+    const target = b.standardTargetOptions(.{
+        .default_target = .{
+            .cpu_arch = .x86_64,
+            .os_tag = .linux,
+            .abi = .musl,
+        },
+    });
     const optimize = b.standardOptimizeOption(.{});
     const version = b.option([]const u8, "version", "Version string for release") orelse
         @as([]const u8, @import("build.zig.zon").version);
@@ -71,6 +77,7 @@ pub fn build(b: *std.Build) void {
         const exe_unit_tests = b.addTest(.{
             .root_module = test_module,
         });
+        exe_unit_tests.linkLibC();
         const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
         test_step.dependOn(&run_exe_unit_tests.step);
     }
