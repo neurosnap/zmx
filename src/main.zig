@@ -1585,12 +1585,38 @@ fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
         }
         if (session.task_exit_code.? > 0) {
             try stdout.print("---\n", .{});
-            try stdout.print("[{d}] failed task={s} exit_status={d}\n\n", .{
+            try stdout.print("[{d}] failed task={s} exit_status={d}\n", .{
                 session.task_ended_at.?,
                 session.name,
                 session.task_exit_code.?,
             });
-            try stdout.print("See the logs:\nzmx history {s}\nzmx attach {s}\n", .{ session.name, session.name });
+
+            // Fetch and print the last 20 lines of history for debugging
+            const history_lines: usize = 20;
+            const history_text = fetchHistory(alloc, cfg, session.name) catch null;
+            if (history_text) |text| {
+                defer alloc.free(text);
+                try stdout.print("\nLast {d} lines of {s} history:\n", .{ history_lines, session.name });
+
+                // Count lines and find the start of the last N lines
+                var total_lines: usize = 0;
+                var it = std.mem.splitScalar(u8, text, '\n');
+                while (it.next()) |_| {
+                    total_lines += 1;
+                }
+
+                const skip = if (total_lines > history_lines) total_lines - history_lines else 0;
+                var current: usize = 0;
+                it = std.mem.splitScalar(u8, text, '\n');
+                while (it.next()) |line| {
+                    if (current >= skip) {
+                        try stdout.print("{s}\n", .{line});
+                    }
+                    current += 1;
+                }
+            }
+
+            try stdout.print("\nSee the logs:\nzmx history {s}\nzmx attach {s}\n", .{ session.name, session.name });
             try stdout.flush();
         }
     }
@@ -1711,6 +1737,70 @@ fn kill(cfg: *Cfg, session_name: []const u8, force: bool) !void {
     var w = std.fs.File.stdout().writer(&buf);
     try w.interface.print("killed session {s}\n", .{session_name});
     try w.interface.flush();
+}
+
+/// Fetch terminal history from a session socket, returning it as an allocated
+/// string. Caller owns the returned memory and must free it.
+fn fetchHistory(
+    alloc: std.mem.Allocator,
+    cfg: *Cfg,
+    session_name: []const u8,
+) ![]const u8 {
+    const socket_path = socket.getSocketPath(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
+        error.NameTooLong => {
+            socket.printSessionNameTooLong(session_name, cfg.socket_dir);
+            return error.NameTooLong;
+        },
+        error.OutOfMemory => return err,
+    };
+    defer alloc.free(socket_path);
+
+    var dir = try std.fs.openDirAbsolute(cfg.socket_dir, .{});
+    defer dir.close();
+
+    const exists = try socket.sessionExists(dir, session_name);
+    if (!exists) {
+        return error.SessionNotFound;
+    }
+
+    const fd = ipc.connectSession(socket_path) catch |err| {
+        if (err == error.ConnectionRefused) socket.cleanupStaleSocket(dir, session_name);
+        return err;
+    };
+    defer posix.close(fd);
+
+    const format_byte: u8 = @intFromEnum(util.HistoryFormat.plain);
+    const payload = [_]u8{format_byte};
+    ipc.send(fd, .History, &payload) catch |err| switch (err) {
+        error.BrokenPipe, error.ConnectionResetByPeer => return error.SessionUnresponsive,
+        else => return err,
+    };
+
+    var sb = try ipc.SocketBuffer.init(alloc);
+    defer sb.deinit();
+
+    var result = std.ArrayList(u8).initCapacity(alloc, 4096) catch return error.OutOfMemory;
+    errdefer result.deinit(alloc);
+
+    while (true) {
+        var poll_fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
+        const poll_result = posix.poll(&poll_fds, 5000) catch return error.Timeout;
+        if (poll_result == 0) {
+            return error.Timeout;
+        }
+
+        const n = sb.read(fd) catch return error.ReadFailed;
+        if (n == 0) break;
+
+        while (sb.next()) |msg| {
+            if (msg.header.tag == .History) {
+                try result.appendSlice(alloc, msg.payload);
+                return result.toOwnedSlice(alloc);
+            }
+        }
+    }
+
+    return error.NoHistoryResponse;
 }
 
 fn history(cfg: *Cfg, session_name: []const u8, format: util.HistoryFormat) !void {
