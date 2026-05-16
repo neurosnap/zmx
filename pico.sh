@@ -6,6 +6,11 @@ EVENT_TYPE="${PICO_CI_EVENT_TYPE:-manual}"
 
 echo "running ci event=${EVENT_TYPE} session=${ZMX_SESSION_PREFIX}"
 
+if command -v mise &> /dev/null; then
+  echo "mise is installed trusting workspace to suppress errors"
+  mise trust
+fi
+
 zmx run build docker build -t zig-zmx .
 zmx run fmt -d docker run --rm -it zig-zmx zig fmt --check .
 zmx run test -d docker run --rm -it zig-zmx zig build test
