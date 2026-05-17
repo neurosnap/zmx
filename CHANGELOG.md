@@ -4,6 +4,8 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
+## v0.6.0 - 2026-05-16
+
 ### Added
 
 - `zmx send` send raw bytes to session without ZMX completion marker or auto-newline
