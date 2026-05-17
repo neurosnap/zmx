@@ -9,6 +9,7 @@ Use spec: https://common-changelog.org/
 - `zmx send` send raw bytes to session without ZMX completion marker or auto-newline
 - `zmx print` send raw bytes to client's stdout
 - `zmx ls` is accepted as an alias for `zmx list`
+- Added `--help` flag for all commands (it just returns the main help cmd for now)
 
 ### Fixed
 
@@ -16,6 +17,11 @@ Use spec: https://common-changelog.org/
 - An idle attached client used to ignore SIGWINCH until the next keystroke or daemon output.
 - Don't kill all sessions when `.Info` ipc event changed
 - Reset terminal emulator to default state on detach
+
+### Changed
+
+- `zmx wait` output will tail the last 20 lines of every task that failed
+- Detaching from a session will now do a full terminal reset
 
 ## v0.5.0 - 2026-04-16
 
