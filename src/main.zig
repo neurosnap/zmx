@@ -1,6 +1,5 @@
 const std = @import("std");
 const posix = std.posix;
-const builtin = @import("builtin");
 const build_options = @import("build_options");
 const ghostty_vt = @import("ghostty-vt");
 const ipc = @import("ipc.zig");
@@ -11,7 +10,6 @@ const cross = @import("cross.zig");
 const socket = @import("socket.zig");
 
 pub const version = build_options.version;
-pub const git_sha = build_options.git_sha;
 pub const ghostty_version = build_options.ghostty_version;
 
 var log_system = log.LogSystem{};
@@ -100,10 +98,19 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "h") or std.mem.eql(u8, cmd, "-h")) {
         return help();
     } else if (std.mem.eql(u8, cmd, "list") or std.mem.eql(u8, cmd, "l") or std.mem.eql(u8, cmd, "ls")) {
-        const short = if (args.next()) |arg| std.mem.eql(u8, arg, "--short") else false;
+        var short = false;
+        if (args.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+                return help();
+            }
+            short = std.mem.eql(u8, arg, "--short");
+        }
         return list(&cfg, short);
     } else if (std.mem.eql(u8, cmd, "completions") or std.mem.eql(u8, cmd, "c")) {
         const arg = args.next() orelse return;
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            return help();
+        }
         const shell = completions.Shell.fromString(arg) orelse return;
         return printCompletions(shell);
     } else if (std.mem.eql(u8, cmd, "detach") or std.mem.eql(u8, cmd, "d")) {
@@ -112,7 +119,9 @@ pub fn main() !void {
         var session_name: ?[]const u8 = null;
         var format: util.HistoryFormat = .plain;
         while (args.next()) |arg| {
-            if (std.mem.eql(u8, arg, "--vt")) {
+            if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+                return help();
+            } else if (std.mem.eql(u8, arg, "--vt")) {
                 format = .vt;
             } else if (std.mem.eql(u8, arg, "--html")) {
                 format = .html;
@@ -126,6 +135,9 @@ pub fn main() !void {
         return history(&cfg, sesh, format);
     } else if (std.mem.eql(u8, cmd, "attach") or std.mem.eql(u8, cmd, "a")) {
         const session_name = args.next() orelse "";
+        if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
+            return help();
+        }
 
         var command_args: std.ArrayList([]const u8) = .empty;
         defer command_args.deinit(alloc);
@@ -165,6 +177,9 @@ pub fn main() !void {
         return attach(&daemon);
     } else if (std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "r")) {
         const session_name = args.next() orelse "";
+        if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
+            return help();
+        }
 
         var cmd_args_raw: std.ArrayList([]const u8) = .empty;
         defer cmd_args_raw.deinit(alloc);
@@ -205,6 +220,9 @@ pub fn main() !void {
         return run(&daemon, detached, cmd_args_raw.items);
     } else if (std.mem.eql(u8, cmd, "send") or std.mem.eql(u8, cmd, "s")) {
         const session_name = args.next() orelse "";
+        if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
+            return help();
+        }
         if (session_name.len == 0) return error.SessionNameRequired;
 
         var text_parts: std.ArrayList([]const u8) = .empty;
@@ -222,6 +240,9 @@ pub fn main() !void {
         return send(&cfg, sesh, socket_path, text_parts.items, .Input);
     } else if (std.mem.eql(u8, cmd, "print") or std.mem.eql(u8, cmd, "p")) {
         const session_name = args.next() orelse "";
+        if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
+            return help();
+        }
         if (session_name.len == 0) return error.SessionNameRequired;
 
         var text_parts: std.ArrayList([]const u8) = .empty;
@@ -251,6 +272,9 @@ pub fn main() !void {
         }
         var force = false;
         while (args.next()) |session_name| {
+            if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
+                return help();
+            }
             if (std.mem.eql(u8, session_name, "--force")) {
                 force = true;
                 continue;
@@ -294,6 +318,9 @@ pub fn main() !void {
             matchers.deinit(alloc);
         }
         while (args.next()) |session_name| {
+            if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
+                return help();
+            }
             const m = try parseSessionArg(alloc, session_name);
             try matchers.append(alloc, m);
         }
@@ -310,6 +337,9 @@ pub fn main() !void {
             matchers.deinit(alloc);
         }
         while (args.next()) |session_name| {
+            if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
+                return help();
+            }
             const m = try parseSessionArg(alloc, session_name);
             try matchers.append(alloc, m);
         }
@@ -377,8 +407,14 @@ pub fn main() !void {
         _ = try tail(client_socket_fds, false, false);
     } else if (std.mem.eql(u8, cmd, "write") or std.mem.eql(u8, cmd, "wr")) {
         const session_name = args.next() orelse "";
+        if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
+            return help();
+        }
         if (session_name.len == 0) return error.SessionNameRequired;
         const file_path = args.next() orelse "";
+        if (std.mem.eql(u8, file_path, "--help") or std.mem.eql(u8, file_path, "-h")) {
+            return help();
+        }
         if (file_path.len == 0) return error.FilePathRequired;
 
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -1202,13 +1238,9 @@ const Daemon = struct {
 fn printVersion(cfg: *Cfg) !void {
     var buf: [256]u8 = undefined;
     var w = std.fs.File.stdout().writer(&buf);
-    var ver = version;
-    if (builtin.mode == .Debug) {
-        ver = git_sha;
-    }
     try w.interface.print(
         "zmx\t\t{s}\nghostty_vt\t{s}\nsocket_dir\t{s}\nlog_dir\t\t{s}\n",
-        .{ ver, ghostty_version, cfg.socket_dir, cfg.log_dir },
+        .{ version, ghostty_version, cfg.socket_dir, cfg.log_dir },
     );
     try w.interface.flush();
 }
@@ -1478,6 +1510,8 @@ fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
     var zero_match_iters: u32 = 0;
 
     var agg_exit_code: u8 = 0;
+    var last_print: i64 = 0;
+    var prev_done: i32 = 0;
     while (true) {
         agg_exit_code = 0;
         var sessions = try util.get_session_entries(alloc, cfg.socket_dir);
@@ -1512,18 +1546,25 @@ fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
                 continue;
             }
             if (session.task_ended_at == 0) {
-                try stdout.print(
-                    "[{d}] waiting task={s}\n",
-                    .{ std.time.timestamp(), session.name },
-                );
-                try stdout.flush();
+                const now = std.time.timestamp();
+                if (now - last_print >= 5) {
+                    try stdout.print(
+                        "[{d}] waiting task={s}\n",
+                        .{ now, session.name },
+                    );
+                    try stdout.flush();
+                    last_print = now;
+                }
                 continue;
             }
-            try stdout.print(
-                "[{d}] completed task={s} exit_code={d}\n",
-                .{ session.task_ended_at.?, session.name, session.task_exit_code.? },
-            );
-            try stdout.flush();
+            if (done >= prev_done) {
+                // Newly completed — print immediately
+                try stdout.print(
+                    "[{d}] completed task={s} exit_code={d}\n",
+                    .{ session.task_ended_at.?, session.name, session.task_exit_code.? },
+                );
+                try stdout.flush();
+            }
             if (session.task_exit_code != 0) {
                 agg_exit_code = session.task_exit_code orelse 0;
             }
@@ -1567,6 +1608,7 @@ fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
             }
         }
 
+        prev_done = done;
         std.Thread.sleep(1000 * std.time.ns_per_ms);
     }
 
@@ -1591,12 +1633,38 @@ fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
         }
         if (session.task_exit_code.? > 0) {
             try stdout.print("---\n", .{});
-            try stdout.print("[{d}] failed task={s} exit_status={d}\n\n", .{
+            try stdout.print("[{d}] failed task={s} exit_status={d}\n", .{
                 session.task_ended_at.?,
                 session.name,
                 session.task_exit_code.?,
             });
-            try stdout.print("See the logs:\nzmx history {s}\nzmx attach {s}\n", .{ session.name, session.name });
+
+            // Fetch and print the last 20 lines of history for debugging
+            const history_lines: usize = 20;
+            const history_text = fetchHistory(alloc, cfg, session.name) catch null;
+            if (history_text) |text| {
+                defer alloc.free(text);
+                try stdout.print("\nLast {d} lines of {s} history:\n", .{ history_lines, session.name });
+
+                // Count lines and find the start of the last N lines
+                var total_lines: usize = 0;
+                var it = std.mem.splitScalar(u8, text, '\n');
+                while (it.next()) |_| {
+                    total_lines += 1;
+                }
+
+                const skip = if (total_lines > history_lines) total_lines - history_lines else 0;
+                var current: usize = 0;
+                it = std.mem.splitScalar(u8, text, '\n');
+                while (it.next()) |line| {
+                    if (current >= skip) {
+                        try stdout.print("{s}\n", .{line});
+                    }
+                    current += 1;
+                }
+            }
+
+            try stdout.print("\nSee the logs:\nzmx history {s}\nzmx attach {s}\n", .{ session.name, session.name });
             try stdout.flush();
         }
     }
@@ -1717,6 +1785,70 @@ fn kill(cfg: *Cfg, session_name: []const u8, force: bool) !void {
     var w = std.fs.File.stdout().writer(&buf);
     try w.interface.print("killed session {s}\n", .{session_name});
     try w.interface.flush();
+}
+
+/// Fetch terminal history from a session socket, returning it as an allocated
+/// string. Caller owns the returned memory and must free it.
+fn fetchHistory(
+    alloc: std.mem.Allocator,
+    cfg: *Cfg,
+    session_name: []const u8,
+) ![]const u8 {
+    const socket_path = socket.getSocketPath(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
+        error.NameTooLong => {
+            socket.printSessionNameTooLong(session_name, cfg.socket_dir);
+            return error.NameTooLong;
+        },
+        error.OutOfMemory => return err,
+    };
+    defer alloc.free(socket_path);
+
+    var dir = try std.fs.openDirAbsolute(cfg.socket_dir, .{});
+    defer dir.close();
+
+    const exists = try socket.sessionExists(dir, session_name);
+    if (!exists) {
+        return error.SessionNotFound;
+    }
+
+    const fd = ipc.connectSession(socket_path) catch |err| {
+        if (err == error.ConnectionRefused) socket.cleanupStaleSocket(dir, session_name);
+        return err;
+    };
+    defer posix.close(fd);
+
+    const format_byte: u8 = @intFromEnum(util.HistoryFormat.plain);
+    const payload = [_]u8{format_byte};
+    ipc.send(fd, .History, &payload) catch |err| switch (err) {
+        error.BrokenPipe, error.ConnectionResetByPeer => return error.SessionUnresponsive,
+        else => return err,
+    };
+
+    var sb = try ipc.SocketBuffer.init(alloc);
+    defer sb.deinit();
+
+    var result = std.ArrayList(u8).initCapacity(alloc, 4096) catch return error.OutOfMemory;
+    errdefer result.deinit(alloc);
+
+    while (true) {
+        var poll_fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
+        const poll_result = posix.poll(&poll_fds, 5000) catch return error.Timeout;
+        if (poll_result == 0) {
+            return error.Timeout;
+        }
+
+        const n = sb.read(fd) catch return error.ReadFailed;
+        if (n == 0) break;
+
+        while (sb.next()) |msg| {
+            if (msg.header.tag == .History) {
+                try result.appendSlice(alloc, msg.payload);
+                return result.toOwnedSlice(alloc);
+            }
+        }
+    }
+
+    return error.NoHistoryResponse;
 }
 
 fn history(cfg: *Cfg, session_name: []const u8, format: util.HistoryFormat) !void {

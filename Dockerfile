@@ -15,6 +15,8 @@ WORKDIR /app
 
 COPY . /app/
 
+RUN rm ./mise.toml
+
 RUN zig build
 
 CMD ["zig", "build"]
