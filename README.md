@@ -78,7 +78,7 @@ Usage: zmx <command> [args...]
 
 Commands:
   [a]ttach <name> [command...]             Attach to session, creating if needed
-  [r]un <name> [-d] [--fish] [command...]  Send command without attaching
+  [r]un <name> [-d] [command...]           Send command without attaching
   [s]end <name> <text...>                  Send raw input to session PTY
   [p]rint <name> <text...>                 Inject text into session display
   [wr]ite <name> <file_path>               Write stdin to file_path through the session

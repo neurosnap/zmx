@@ -594,7 +594,6 @@ const Daemon = struct {
     is_task_mode: bool = false, // flag for when session is run as a task
     task_exit_code: ?u8 = null, // null = running or n/a, set when task completes
     task_ended_at: ?u64 = null, // timestamp when task exited
-    is_fish: bool = false, // true if session shell is fish (affects exit code variable)
     pty_fd: i32 = -1, // set by daemonLoop so handleRun can probe the foreground process
     pty_write_buf: std.ArrayList(u8) = .empty,
 
@@ -683,7 +682,7 @@ const Daemon = struct {
             std.posix.exit(1);
         }
 
-        const shell = util.detectShell();
+        const shell: [:0]const u8 = if (self.is_task_mode) "/bin/bash" else util.detectShell();
         // Use "-shellname" as argv[0] to signal login shell (traditional method)
         const login_shell = try std.fmt.allocPrintSentinel(
             alloc,
@@ -1139,30 +1138,19 @@ const Daemon = struct {
 
         if (payload.len == 0) return;
 
-        // Auto-detect the foreground process on the PTY to determine shell type.
-        if (self.pty_fd >= 0) {
-            var name_buf: [64]u8 = undefined;
-            if (cross.getForegroundProcessName(self.pty_fd, &name_buf)) |name| {
-                self.is_fish = std.mem.eql(u8, name, "fish");
-                std.log.debug("foreground process={s} is_fish={}", .{ name, self.is_fish });
-            }
-        }
         const cmd = payload;
 
-        // Daemon appends the task marker so the client never injects
-        // shell-specific syntax, keeping Ctrl-C recovery clean.
-        const marker = if (self.is_fish)
-            "; echo ZMX_TASK_COMPLETED:$status"
-        else
-            "; echo ZMX_TASK_COMPLETED:$?";
+        // Daemon appends the task marker so we know when a task is done with
+        // exit status
+        const marker = "\necho ZMX_TASK_COMPLETED:$?\r";
 
         if (cmd.len > 0 and cmd[cmd.len - 1] == '\r') {
             self.queuePtyInput(cmd[0 .. cmd.len - 1]);
         } else {
             self.queuePtyInput(cmd);
         }
-        self.queuePtyInput(marker);
         self.queuePtyInput("\r");
+        self.queuePtyInput(marker);
 
         try ipc.appendMessage(self.alloc, &client.write_buf, .Ack, "");
         client.has_pending_output = true;
