@@ -1142,7 +1142,7 @@ const Daemon = struct {
 
         // Daemon appends the task marker so we know when a task is done with
         // exit status
-        const marker = "\necho ZMX_TASK_COMPLETED:$?\r";
+        const marker = "echo ZMX_TASK_COMPLETED:$?\r";
 
         if (cmd.len > 0 and cmd[cmd.len - 1] == '\r') {
             self.queuePtyInput(cmd[0 .. cmd.len - 1]);
