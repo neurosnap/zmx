@@ -1140,17 +1140,20 @@ const Daemon = struct {
 
         const cmd = payload;
 
-        // Redirect stdin from /dev/null to prevent interactive programs
-        // (pagers, editors, prompts) from blocking the task. Programs that
-        // detect a TTY and open a pager (e.g. git, man) or read stdin
-        // (e.g. cat, head) will receive EOF instead of blocking. This
-        // matches the behavior of CI runners and `tmux send-keys`.
+        // Prefix the command with environment variables to prevent it from
+        // blocking. Commands run in a PTY where stdout looks like a TTY,
+        // so programs like git/man/less will open a pager and hang. We set
+        // pager-related env vars to force non-interactive behavior:
+        //   PAGER=cat       — default pager fallback
+        //   GIT_PAGER=cat   — git ignores PAGER, uses its own
+        //   LESS=-F         — auto-exit if content fits (catches edge cases)
+        //   MANPAGER=cat    — man overrides PAGER with MANPAGER
+        //   COLORTERM=      — disable color (avoid ANSI in output)
+        // Plus < /dev/null to prevent programs that read stdin from blocking.
         //
         // Commands that legitimately need stdin should use `zmx send`
         // instead, or pipe data directly: `echo data | zmx run dev cat`.
-        // Here-documents still work because the shell processes the
-        // here-document before applying the /dev/null redirection.
-        const stdin_redirect = "< /dev/null ";
+        const cmd_prefix = "PAGER=cat GIT_PAGER=cat LESS=-F MANPAGER=cat COLORTERM= < /dev/null ";
 
         // Chain the exit marker with `;` on the same line. `$?` captures the
         // exit code of the command (not the `;`). The sole exception is when
@@ -1160,7 +1163,7 @@ const Daemon = struct {
         const heredoc_marker = "\r\necho ZMX_TASK_COMPLETED:$?\r";
         const uses_heredoc = std.mem.indexOf(u8, cmd, "<<") != null;
 
-        self.queuePtyInput(stdin_redirect);
+        self.queuePtyInput(cmd_prefix);
         if (cmd.len > 0 and cmd[cmd.len - 1] == '\r') {
             self.queuePtyInput(cmd[0 .. cmd.len - 1]);
         } else {
@@ -1451,17 +1454,30 @@ fn tail(client_socket_fds: std.ArrayList(i32), detached: bool, is_run_cmd: bool)
                         },
                         .Output => {
                             if (msg.payload.len > 0) {
-                                // strip the first line since it is an echo of
-                                // the command.
+                                // Strip the first line (command echo) for run mode.
+                                var payload = msg.payload;
                                 if (!detached and is_run_cmd and is_first_line) {
-                                    if (std.mem.indexOfScalar(u8, msg.payload, '\n')) |nl| {
+                                    if (std.mem.indexOfScalar(u8, payload, '\n')) |nl| {
                                         is_first_line = false;
-                                        if (nl + 1 < msg.payload.len) {
-                                            try stdout_buf.appendSlice(alloc, msg.payload[nl + 1 ..]);
-                                        }
+                                        payload = payload[nl + 1 ..];
+                                    } else {
+                                        is_first_line = false;
+                                        payload = payload[payload.len..]; // consume entire echo line
                                     }
-                                } else {
-                                    try stdout_buf.appendSlice(alloc, msg.payload);
+                                }
+
+                                if (payload.len > 0) {
+                                    // Strip ANSI escape sequences to produce plain text.
+                                    // This prevents shell prompts, colors, cursor movements,
+                                    // and other VT sequences from corrupting the caller's terminal.
+                                    const plain = util.stripAnsi(alloc, payload) catch |err| {
+                                        std.log.warn("stripAnsi failed: {s}", .{@errorName(err)});
+                                        continue;
+                                    };
+                                    defer alloc.free(plain);
+                                    if (plain.len > 0) {
+                                        try stdout_buf.appendSlice(alloc, plain);
+                                    }
                                 }
                             }
                         },

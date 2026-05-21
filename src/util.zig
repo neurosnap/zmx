@@ -350,7 +350,41 @@ pub fn findTaskExitMarker(output: []const u8) ?u8 {
     return null;
 }
 
-/// Detects Kitty keyboard protocol escape sequence for Ctrl+\.
+/// Strip ANSI escape sequences from data, returning only printable characters
+/// and essential whitespace (CR, LF, tab, backspace). Uses the ghostty VT
+/// parser to correctly handle multi-byte sequences (CSI, OSC, DCS, etc.).n/// The returned slice is owned by the caller and must be freed.
+pub fn stripAnsi(alloc: std.mem.Allocator, data: []const u8) ![]const u8 {
+    var result = std.ArrayList(u8).initCapacity(alloc, data.len) catch unreachable;
+    defer result.deinit(alloc);
+
+    var parser = ghostty_vt.Parser.init();
+    for (data) |c| {
+        const actions = parser.next(c);
+        for (actions) |action_opt| {
+            const action = action_opt orelse continue;
+            switch (action) {
+                .print => {
+                    result.append(alloc, c) catch unreachable;
+                },
+                .execute => |code| {
+                    // Pass through essential whitespace/control chars
+                    switch (code) {
+                        '\r', '\n', '\t', 0x08 => { // CR, LF, TAB, BS
+                            result.append(alloc, @as(u8, @intCast(code))) catch unreachable;
+                        },
+                        else => {},
+                    }
+                },
+                // All other actions (CSI, OSC, DCS, etc.) are silently dropped
+                else => {},
+            }
+        }
+    }
+
+    return result.toOwnedSlice(alloc);
+}
+
+/// Detects Kitty keyboard protocol escape sequence for Ctrl+\
 pub fn isCtrlBackslash(buf: []const u8) bool {
     if (buf.len == 0) return false;
     return buf[0] == 0x1C or isKeyPressed(buf, 0x5c, 0b100);
@@ -1416,4 +1450,75 @@ test "isUserInput: bracketed paste included" {
     try testing.expect(isUserInput("\x1b[201~")); // paste end
     // Content between start/end is also user input
     try testing.expect(isUserInput("\x1b[200~hello\x1b[201~"));
+}
+
+test "stripAnsi: plain text passes through" {
+    const alloc = testing.allocator;
+    const result = try stripAnsi(alloc, "hello world\n");
+    defer alloc.free(result);
+    try testing.expectEqualStrings("hello world\n", result);
+}
+
+test "stripAnsi: removes SGR color codes" {
+    const alloc = testing.allocator;
+    // \e[31m = red, \e[0m = reset
+    const result = try stripAnsi(alloc, "\x1b[31mred\x1b[0m");
+    defer alloc.free(result);
+    try testing.expectEqualStrings("red", result);
+}
+
+test "stripAnsi: removes cursor movement" {
+    const alloc = testing.allocator;
+    // \e[2J = clear screen, \e[H = home cursor
+    const result = try stripAnsi(alloc, "\x1b[2J\x1b[Hhello");
+    defer alloc.free(result);
+    try testing.expectEqualStrings("hello", result);
+}
+
+test "stripAnsi: preserves newlines and tabs" {
+    const alloc = testing.allocator;
+    const result = try stripAnsi(alloc, "line1\nline2\ttab\r");
+    defer alloc.free(result);
+    try testing.expectEqualStrings("line1\nline2\ttab\r", result);
+}
+
+test "stripAnsi: removes OSC sequences" {
+    const alloc = testing.allocator;
+    // OSC 0;title BEL = set window title
+    const result = try stripAnsi(alloc, "\x1b]0;My Title\x07hello");
+    defer alloc.free(result);
+    try testing.expectEqualStrings("hello", result);
+}
+
+test "stripAnsi: removes DA query and response" {
+    const alloc = testing.allocator;
+    // DA1 query: \e[c, DA1 response: \e[?62;22c
+    const result = try stripAnsi(alloc, "\x1b[c\x1b[?62;22chello");
+    defer alloc.free(result);
+    try testing.expectEqualStrings("hello", result);
+}
+
+test "stripAnsi: complex mixed content" {
+    const alloc = testing.allocator;
+    // Shell prompt with colors + command echo + output
+    const input = "\x1b[0;32m[user@host ~]$\x1b[0m git log\n" ++
+        "abc1234 commit message\n" ++
+        "\x1b[0;32m[user@host ~]$\x1b[0m";
+    const result = try stripAnsi(alloc, input);
+    defer alloc.free(result);
+    try testing.expectEqualStrings("[user@host ~]$ git log\nabc1234 commit message\n[user@host ~]$", result);
+}
+
+test "stripAnsi: empty input" {
+    const alloc = testing.allocator;
+    const result = try stripAnsi(alloc, "");
+    defer alloc.free(result);
+    try testing.expectEqualStrings("", result);
+}
+
+test "stripAnsi: only escape sequences" {
+    const alloc = testing.allocator;
+    const result = try stripAnsi(alloc, "\x1b[31m\x1b[1m\x1b[0m");
+    defer alloc.free(result);
+    try testing.expectEqualStrings("", result);
 }
