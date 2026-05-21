@@ -1140,17 +1140,33 @@ const Daemon = struct {
 
         const cmd = payload;
 
-        // Daemon appends the task marker so we know when a task is done with
-        // exit status
-        const marker = "echo ZMX_TASK_COMPLETED:$?\r";
+        // Redirect stdin from /dev/null to prevent interactive programs
+        // (pagers, editors, prompts) from blocking the task. Programs that
+        // detect a TTY and open a pager (e.g. git, man) or read stdin
+        // (e.g. cat, head) will receive EOF instead of blocking. This
+        // matches the behavior of CI runners and `tmux send-keys`.
+        //
+        // Commands that legitimately need stdin should use `zmx send`
+        // instead, or pipe data directly: `echo data | zmx run dev cat`.
+        // Here-documents still work because the shell processes the
+        // here-document before applying the /dev/null redirection.
+        const stdin_redirect = "< /dev/null ";
 
+        // Chain the exit marker with `;` on the same line. `$?` captures the
+        // exit code of the command (not the `;`). The sole exception is when
+        // the command contains a heredoc (`<<`) — the delimiter must be alone
+        // on its line, so the marker goes on the next line instead.
+        const single_line_marker = "; echo ZMX_TASK_COMPLETED:$?\r";
+        const heredoc_marker = "\r\necho ZMX_TASK_COMPLETED:$?\r";
+        const uses_heredoc = std.mem.indexOf(u8, cmd, "<<") != null;
+
+        self.queuePtyInput(stdin_redirect);
         if (cmd.len > 0 and cmd[cmd.len - 1] == '\r') {
             self.queuePtyInput(cmd[0 .. cmd.len - 1]);
         } else {
             self.queuePtyInput(cmd);
         }
-        self.queuePtyInput("\r");
-        self.queuePtyInput(marker);
+        self.queuePtyInput(if (uses_heredoc) heredoc_marker else single_line_marker);
 
         try ipc.appendMessage(self.alloc, &client.write_buf, .Ack, "");
         client.has_pending_output = true;
@@ -1282,13 +1298,10 @@ fn help() !void {
         \\  Commands run inside a PTY using bash
         \\  Commands are passed as-is: do not wrap in quotes.
         \\  Commands run sequentially: do not send multiple in parallel.
-        \\  Avoid interactive programs (pagers, editors, prompts): they hang.
-        \\
-        \\  If the command hangs, send Ctrl+C to recover:
-        \\    zmx run <session> $(printf '\x03')
-        \\
-        \\  If the command hangs, print the history to see the error:
-        \\    zmx history <session> | tail -100
+        \\  Stdin is redirected from /dev/null to prevent interactive programs
+        \\  (pagers, editors, prompts) from blocking. Use `zmx send` for
+        \\  commands that need user input, or pipe data directly:
+        \\    echo "data" | zmx run dev cat
         \\
         \\  `-d` will detach from the calling terminal. Use `wait` to track
         \\  its status.
@@ -1297,7 +1310,8 @@ fn help() !void {
         \\    zmx run dev ls
         \\    zmx run dev zig build
         \\    zmx run dev grep -r TODO src
-        \\    zmx run dev git -c core.pager=cat diff
+        \\    zmx run dev git log --oneline          # pager won't block
+        \\    echo "hello" | zmx run dev cat         # piped stdin still works
         \\
         \\    zmx run dev -d sleep 10
         \\    zmx wait dev
