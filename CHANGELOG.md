@@ -10,6 +10,7 @@ Use spec: https://common-changelog.org/
   - There are just too many edge cases with tracking exit status in other shells which makes
     `zmx run` much less useful for task management.
   - This means when using `zmx run` the target shell must have support for `$?` exit code tracking
+- *BREAKING* `zmx tail` now strips ansi escape codes
 
 ## v0.6.0 - 2026-05-16
 

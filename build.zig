@@ -80,14 +80,6 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_exe_unit_tests.step);
     }
 
-    // Integration tests (bats)
-    {
-        const integration_step = b.step("test-integration", "Run bats integration tests");
-        const bats = b.addSystemCommand(&.{ "bats", "test/session.bats" });
-        bats.step.dependOn(b.getInstallStep());
-        integration_step.dependOn(&bats.step);
-    }
-
     // Check for LSP integration
     {
         const check = b.step("check", "Check if zmx compiles");
@@ -128,10 +120,11 @@ pub fn build(b: *std.Build) void {
                 release_mod.addImport("ghostty-vt", release_dep.module("ghostty-vt"));
             }
 
+            const is_macos = resolved.result.os.tag == .macos;
             const release_exe = b.addExecutable(.{
                 .name = "zmx",
                 .use_llvm = true,
-                .use_lld = true,
+                .use_lld = !is_macos,
                 .root_module = release_mod,
             });
             release_exe.linkLibC();
@@ -161,15 +154,4 @@ pub fn build(b: *std.Build) void {
         }
     }
 
-    // Upload artifacts to pgs
-    {
-        const upload_step = b.step("upload", "Upload docs and dist to pgs.sh:/zmx");
-        const gen_doc = b.addSystemCommand(&.{ "sh", "-c", "cat README.md | pdocs -tmpl index.tmpl -toc | ssh pgs.sh /zmx/index.html" });
-        const rsync_docs = b.addSystemCommand(&.{ "rsync", "-v", "./logo.png", "pgs.sh:/zmx/" });
-        const rsync_dist = b.addSystemCommand(&.{ "rsync", "-rv", "zig-out/dist/", "pgs.sh:/zmx/a" });
-
-        upload_step.dependOn(&gen_doc.step);
-        upload_step.dependOn(&rsync_docs.step);
-        upload_step.dependOn(&rsync_dist.step);
-    }
 }

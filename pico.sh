@@ -6,26 +6,45 @@ EVENT_TYPE="${PICO_CI_EVENT_TYPE:-manual}"
 
 echo "running ci event=${EVENT_TYPE} session=${ZMX_SESSION_PREFIX}"
 
-if command -v mise &> /dev/null; then
-  echo "mise is installed trusting workspace to suppress errors"
-  mise trust
+if ! command -v mise &> /dev/null; then
+  echo "ERR: mise is required"
+  exit 1
 fi
 
+zmx run install bash -c "mise trust && mise install"
+
 zmx run build docker build -t zig-zmx .
-zmx run fmt -d docker run --rm -it zig-zmx zig fmt --check .
-zmx run test -d docker run --rm -it zig-zmx zig build test
-zmx run integration -d docker run --rm -it zig-zmx zig build test-integration
+zmx run fmt -d docker run --rm -t zig-zmx:latest zig fmt --check .
+zmx run test -d docker run --rm -t zig-zmx:latest zig build test
+zmx run integration -d docker run --rm -t zig-zmx:latest zig build test-integration
 zmx wait "*"
 
-if [[ $EVENT_TYPE != "release" ]]; then
+if [[ $EVENT_TYPE != "git.tag" ]]; then
   echo "success!"
   exit 0
 fi
 
-NEW_VERSION="0.6.0"
+TAG="${PICO_CI_TAG_NAME}"
+NEW_VERSION="${PICO_CI_TAG_NAME#v}"
+
 zmx run semver sed -i "s/\.version = \"[^\"]*\"/.version = \"$NEW_VERSION\"/" build.zig.zon && cat build.zig.zon
-zmx run build-release -d docker run --rm -it -v "$(pwd)":/app zig-zmx zig build release
-# zmx run upload -d docker run --rm -it -v "$(pwd)":/app -v ~/.ssh:/root/.ssh:ro zig-zmx zig build upload
-zmx wait "*"
+zmx run update-readme sed -i "s/zmx-[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*/zmx-$NEW_VERSION/g" README.md
+zmx run build-release -d docker run --rm -t zig-zmx:latest zig build release
+
+echo "distributing bins"
+zmx run upload-build docker build -t zmx-upload -f Dockerfile.upload .
+zmx run upload docker run --rm \
+  -v "$(pwd)/README.md:/app/README.md:ro" \
+  -v "$(pwd)/logo.png:/app/logo.png:ro" \
+  -v "$(pwd)/index.tmpl:/app/index.tmpl:ro" \
+  -v "$(pwd)/zig-out/dist:/app/dist:ro" \
+  -v ~/.ssh:/root/.ssh:ro \
+  zmx-upload
+zmx run gh-build docker build -t gh-release -f Dockerfile.release .
+zmx run gh docker run --rm \
+  -v "$(pwd)/zig-out/dist":/dist \
+  -e GH_TOKEN \
+  -e TAG="$TAG" \
+  gh-release
 
 echo "success!"

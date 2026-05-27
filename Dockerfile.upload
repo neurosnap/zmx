@@ -1,0 +1,17 @@
+# Dockerfile for uploading release artifacts and docs to pgs.sh
+
+FROM golang:1.21-alpine AS builder
+RUN go install github.com/picosh/pdocs/cmd@latest && mv /go/bin/cmd /go/bin/pdocs
+
+FROM alpine:3.23
+RUN apk add --no-cache rsync openssh-client
+
+COPY --from=builder /go/bin/pdocs /usr/local/bin/pdocs
+
+WORKDIR /app
+
+CMD ["sh", "-c", " \
+    cat README.md | pdocs -tmpl index.tmpl -toc | ssh pgs.sh /zmx/index.html && \
+    rsync -v ./logo.png pgs.sh:/zmx/ && \
+    rsync -rv dist/ pgs.sh:/zmx/a \
+"]

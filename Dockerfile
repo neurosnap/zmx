@@ -19,4 +19,4 @@ RUN rm ./mise.toml
 
 RUN zig build
 
-CMD ["zig", "build"]
+CMD ["zig", "build", "-Doptimize=ReleaseSafe"]

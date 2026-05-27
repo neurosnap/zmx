@@ -10,6 +10,7 @@ zig_std_src/
 ghostty_src/
 prior_art/
 .beads/
+.envrc
 
 # Nix
 result
