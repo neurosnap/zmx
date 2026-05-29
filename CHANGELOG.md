@@ -4,6 +4,12 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
+## v0.7.0 - 2026-05-29
+
+### Fixed
+
+- `zmx run` will now detect heredocs and add the completion marker to a newline
+
 ### Changed
 
 - *BREAKING* `zmx run` when creating session it runs `/bin/bash` instead of `$SHELL`
