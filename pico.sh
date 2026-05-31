@@ -16,7 +16,7 @@ zmx run install bash -c "mise trust && mise install"
 zmx run build docker build -t zig-zmx .
 zmx run fmt -d docker run --rm -t zig-zmx:latest zig fmt --check .
 zmx run test -d docker run --rm -t zig-zmx:latest zig build test
-zmx run integration -d docker run --rm -t zig-zmx:latest zig build test-integration
+zmx run integration -d docker run --rm -t zig-zmx:latest bats test/session.bats
 zmx wait "*"
 
 if [[ $EVENT_TYPE != "git.tag" ]]; then

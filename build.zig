@@ -153,5 +153,4 @@ pub fn build(b: *std.Build) void {
             release_step.dependOn(&install_sha.step);
         }
     }
-
 }
