@@ -873,15 +873,19 @@ const Daemon = struct {
                 };
 
                 defer {
-                    self.handleKill();
-                    self.deinit();
-                    posix.close(pty_fd);
-                    _ = posix.waitpid(self.pid, 0);
+                    // Close and unlink the listen socket BEFORE handleKill()'s
+                    // 500ms SIGHUP->SIGKILL grace sleep. Otherwise a `zmx run`
+                    // for the same name issued in that window will hang waiting
+                    // for a connect.
                     posix.close(server_sock_fd);
                     std.log.info("deleting socket file session={s}", .{self.session_name});
                     dir.deleteFile(self.session_name) catch |err| {
                         std.log.warn("failed to delete socket file err={s}", .{@errorName(err)});
                     };
+                    self.handleKill();
+                    self.deinit();
+                    posix.close(pty_fd);
+                    _ = posix.waitpid(self.pid, 0);
                 }
 
                 try daemonLoop(self, server_sock_fd, pty_fd);
@@ -1816,6 +1820,17 @@ fn kill(cfg: *Cfg, session_name: []const u8, force: bool) !void {
         error.BrokenPipe, error.ConnectionResetByPeer => return,
         else => return err,
     };
+
+    // Block until the daemon hangs up. The daemon's shutdown defer closes
+    // and unlinks the listen socket before it closes client connections,
+    // so by the time we read EOF here the session name is free for reuse
+    // and a subsequent `zmx run <name>` can't land in the dying daemon's
+    // accept backlog.
+    var drain: [256]u8 = undefined;
+    while (true) {
+        const n = posix.read(fd, &drain) catch break;
+        if (n == 0) break;
+    }
 
     var buf: [100]u8 = undefined;
     var w = std.fs.File.stdout().writer(&buf);
