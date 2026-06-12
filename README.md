@@ -4,7 +4,7 @@
   <br>zmx
 </h1>
 <p align="center">
-  Session persistence for terminal processes.
+  Session attach/detach for the terminal.
   <br />
   <a href="https://zmx.sh">Docs</a>
   ·
@@ -16,7 +16,7 @@
 ## features
 
 - Persist terminal shell sessions
-- Ability to attach and detach from a shell session without killing it
+- Ability to attach and detach from a shell session it being killed
 - Native terminal scrollback
 - Multiple clients can connect to the same session
 - Re-attaching to a session restores previous terminal state and output
@@ -461,10 +461,6 @@ This is particularly useful when running `zmx` as a system service with a shared
 
 We store global logs for cli commands in `{socket_dir}/logs/zmx.log`. We store session-specific logs in `{socket_dir}/logs/{session_name}.log`. Right now they are enabled by default and cannot be disabled. The idea here is to help with initial development until we reach a stable state.
 
-## a note on configuration
-
-We are evaluating what should be configurable and what should not. Every configuration option is a burden for us maintainers. For example, being able to change the default detach shortcut is difficult in a terminal environment.
-
 ## a smol contract
 
 - Write programs that solve a well defined problem.
@@ -478,13 +474,14 @@ We are evaluating what should be configurable and what should not. Every configu
 - When upgrading versions of `zmx` where we make changes to the underlying IPC communication, it will kill all your sessions because it cannot communicate through the daemon socket properly
 - Terminal state restoration with nested `zmx` sessions through SSH: host A `zmx` -> SSH -> host B `zmx`
   - Specifically cursor position gets corrupted
+  - Essentially this is unspecified and unsupported behavior
 - When re-attaching and kitty keyboard mode was previously enable, we try to re-send that CSI query to re-enable it
   - Some programs don't know how to handle that CSI query (e.g. `psql`) so when you type it echos kitty escape sequences erroneously
 
 ## impl
 
 - The `daemon` and client processes communicate via a unix socket
-- Both `daemon` and `client` loops leverage `poll()`
+- Both `daemon` and `client` loops leverage `poll(2)`
 - Each session creates its own unix socket file
 - We restore terminal state and output using `libghostty-vt`
 
