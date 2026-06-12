@@ -71,9 +71,9 @@ zig build -Doptimize=ReleaseSafe --prefix ~/.local
 > [!IMPORTANT]
 > We recommend closing the terminal window to detach from the session but you can also press `ctrl+\` or run `zmx detach`.
 
-```
-zmx - session persistence for terminal processes
+Run `zmx help` for more information on usage, with examples.
 
+```
 Usage: zmx <command> [args...]
 
 Commands:
@@ -91,100 +91,6 @@ Commands:
   [c]ompletions <shell>                    Shell completions (bash, zsh, fish)
   [v]ersion                                Show version
   [h]elp                                   Show this help
-
-Attach:
-  This will spawn a login $SHELL with a PTY.  You can provide a
-  command instead of creating a shell.
-
-  Examples:
-    zmx attach dev
-    zmx attach dev vim
-
-History:
-  This should generally be used with `tail` to print the last lines
-  of the session's scrollback history.
-
-  Examples:
-    zmx history <session> | tail -100
-
-Run:
-  Commands are passed as-is: do not wrap in quotes.
-  Commands run sequentially: do not send multiple in parallel.
-  Avoid interactive programs (pagers, editors, prompts): they hang.
-
-  `--fish` is required when the session runs fish shell.
-
-  If the command hangs, send Ctrl+C to recover:
-    zmx run <session> $(printf '\x03')
-
-  If the command hangs, print the history to see the error:
-    zmx history <session> | tail -100
-
-  `-d` will detach from the calling terminal. Use `wait` to track
-  its status.
-
-  Examples:
-    zmx run dev ls
-    zmx run dev --fish ls src
-    zmx run dev zig build
-    zmx run dev grep -r TODO src
-    zmx run dev git -c core.pager=cat diff
-
-Send:
-  Sends raw text to the session's PTY input (fire-and-forget).
-  Unlike `run`, no completion marker is appended and no exit code
-  is tracked.  Useful for TUI applications, interactive prompts,
-  or any program that reads stdin directly.
-
-  Text is sent byte-for-byte with no automatic carriage return.
-  Append \r yourself when you want the shell to execute a command.
-
-  Text can also be piped via stdin:
-    printf 'ls -la\r' | zmx send dev
-
-  Examples:
-    printf 'echo hello\r' | zmx send dev
-    zmx send dev $(printf '\x03')
-    zmx send dev /compact
-
-Print:
-  Injects text directly into the session display and scrollback.
-  Never touches the PTY input -- the shell sees nothing.
-  Caller is responsible for newlines (\\r\\n).
-
-  Examples:
-    printf '\\r\\nhello\\r\\n' | zmx print dev
-    zmx print dev "$(printf '\\r\\nalert\\r\\n')"
-
-Write:
-  Writes stdin to file_path inside the session. Works over SSH.
-  file_path can be absolute or relative to the session shell's cwd.
-  Requires base64 and printf in the remote environment.
-  Large files are chunked automatically (~48KB per chunk).
-  File path must not contain single quotes.
-
-  Examples:
-    echo "hello" | zmx write dev /tmp/hello.txt
-    cat main.zig | zmx write dev src/main.zig
-
-Wait:
-  Used with a detached run task to track its status.  Multiple
-  sessions can be provided.
-
-  Examples:
-    zmx run -d dev sleep 10
-    zmx wait dev
-    zmx wait dev other
-
-Environment variables:
-  SHELL                Default shell for new sessions
-  ZMX_DIR              Socket directory (priority 1)
-  XDG_RUNTIME_DIR      Socket directory (priority 2)
-  TMPDIR               Socket directory (priority 3)
-  ZMX_SESSION          Session name (injected automatically)
-  ZMX_SESSION_PREFIX   Prefix added to all session names
-  ZMX_DIR_MODE         Sets mode for socket and log directories (octal, defaults to 0750)
-  ZMX_LOG_MODE         Sets mode for log files (octal, defaults to 0640)
 ```
 
 ## shell prompt

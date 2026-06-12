@@ -1279,6 +1279,7 @@ fn help() !void {
         \\    zmx history <session> | tail -100
         \\
         \\Run:
+        \\  Commands run inside a PTY using bash
         \\  Commands are passed as-is: do not wrap in quotes.
         \\  Commands run sequentially: do not send multiple in parallel.
         \\  Avoid interactive programs (pagers, editors, prompts): they hang.
@@ -1297,6 +1298,9 @@ fn help() !void {
         \\    zmx run dev zig build
         \\    zmx run dev grep -r TODO src
         \\    zmx run dev git -c core.pager=cat diff
+        \\
+        \\    zmx run dev -d sleep 10
+        \\    zmx wait dev
         \\
         \\Send:
         \\  Sends raw text to the session's PTY input (fire-and-forget).
