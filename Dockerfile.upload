@@ -12,6 +12,5 @@ WORKDIR /app
 
 CMD ["sh", "-c", " \
     cat README.md | pdocs -tmpl index.tmpl -toc | ssh pgs.sh /zmx/index.html && \
-    rsync -v ./logo.png pgs.sh:/zmx/ && \
-    rsync -rv dist/ pgs.sh:/zmx/a \
+    rsync -v ./logo.png pgs.sh:/zmx/ \
 "]
