@@ -12,6 +12,7 @@ const macos_targets: []const std.Target.Query = &.{
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
+    const is_macos = target.result.os.tag == .macos;
     const optimize = b.standardOptimizeOption(.{});
     const version = b.option([]const u8, "version", "Version string for release") orelse
         @as([]const u8, @import("build.zig.zon").version);
@@ -43,7 +44,7 @@ pub fn build(b: *std.Build) void {
         const exe = b.addExecutable(.{
             .name = "zmx",
             .use_llvm = true,
-            .use_lld = true,
+            .use_lld = !is_macos,
             .root_module = exe_mod,
         });
         exe.linkLibC();
@@ -73,7 +74,7 @@ pub fn build(b: *std.Build) void {
         const exe_unit_tests = b.addTest(.{
             .root_module = test_module,
             .use_llvm = true,
-            .use_lld = true,
+            .use_lld = !is_macos,
         });
         exe_unit_tests.linkLibC();
         const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
@@ -86,7 +87,7 @@ pub fn build(b: *std.Build) void {
         const exe_check = b.addExecutable(.{
             .name = "zmx",
             .use_llvm = true,
-            .use_lld = true,
+            .use_lld = !is_macos,
             .root_module = exe_mod,
         });
         exe_check.linkLibC();
@@ -120,11 +121,11 @@ pub fn build(b: *std.Build) void {
                 release_mod.addImport("ghostty-vt", release_dep.module("ghostty-vt"));
             }
 
-            const is_macos = resolved.result.os.tag == .macos;
+            const is_local_macos = resolved.result.os.tag == .macos;
             const release_exe = b.addExecutable(.{
                 .name = "zmx",
                 .use_llvm = true,
-                .use_lld = !is_macos,
+                .use_lld = !is_local_macos,
                 .root_module = release_mod,
             });
             release_exe.linkLibC();
