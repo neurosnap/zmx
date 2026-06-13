@@ -1260,7 +1260,7 @@ fn help() !void {
         \\  [w]ait <name>...                         Wait for session tasks to complete
         \\  [t]ail <name>...                         Follow session output
         \\  [c]ompletions <shell>                    Shell completions (bash, zsh, fish)
-        \\  [v]ersion                                Show version
+        \\  [v]ersion                                Show version and metadata (socket dir, log dir)
         \\  [h]elp                                   Show this help
         \\
         \\Attach:
