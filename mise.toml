@@ -1,7 +1,0 @@
-[tools]
-zig = "0.15.2"
-zls = "0.15.1"
-bats = "1.13.0"
-
-[tasks.test_int]
-run = "bats test/session.bats"

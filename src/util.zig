@@ -352,7 +352,8 @@ pub fn findTaskExitMarker(output: []const u8) ?u8 {
 
 /// Strip ANSI escape sequences from data, returning only printable characters
 /// and essential whitespace (CR, LF, tab, backspace). Uses the ghostty VT
-/// parser to correctly handle multi-byte sequences (CSI, OSC, DCS, etc.).n/// The returned slice is owned by the caller and must be freed.
+/// parser to correctly handle multi-byte sequences (CSI, OSC, DCS, etc.).
+/// The returned slice is owned by the caller and must be freed.
 pub fn stripAnsi(alloc: std.mem.Allocator, data: []const u8) ![]const u8 {
     var result = std.ArrayList(u8).initCapacity(alloc, data.len) catch unreachable;
     defer result.deinit(alloc);

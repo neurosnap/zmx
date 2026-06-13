@@ -1140,30 +1140,14 @@ const Daemon = struct {
 
         const cmd = payload;
 
-        // Prefix the command with environment variables to prevent it from
-        // blocking. Commands run in a PTY where stdout looks like a TTY,
-        // so programs like git/man/less will open a pager and hang. We set
-        // pager-related env vars to force non-interactive behavior:
-        //   PAGER=cat       — default pager fallback
-        //   GIT_PAGER=cat   — git ignores PAGER, uses its own
-        //   LESS=-F         — auto-exit if content fits (catches edge cases)
-        //   MANPAGER=cat    — man overrides PAGER with MANPAGER
-        //   COLORTERM=      — disable color (avoid ANSI in output)
-        // Plus < /dev/null to prevent programs that read stdin from blocking.
-        //
-        // Commands that legitimately need stdin should use `zmx send`
-        // instead, or pipe data directly: `echo data | zmx run dev cat`.
-        const cmd_prefix = "PAGER=cat GIT_PAGER=cat LESS=-F MANPAGER=cat COLORTERM= < /dev/null ";
-
         // Chain the exit marker with `;` on the same line. `$?` captures the
         // exit code of the command (not the `;`). The sole exception is when
-        // the command contains a heredoc (`<<`) — the delimiter must be alone
+        // the command contains a heredoc (`<<`), the delimiter must be alone
         // on its line, so the marker goes on the next line instead.
         const single_line_marker = "; echo ZMX_TASK_COMPLETED:$?\r";
         const heredoc_marker = "\r\necho ZMX_TASK_COMPLETED:$?\r";
         const uses_heredoc = std.mem.indexOf(u8, cmd, "<<") != null;
 
-        self.queuePtyInput(cmd_prefix);
         if (cmd.len > 0 and cmd[cmd.len - 1] == '\r') {
             self.queuePtyInput(cmd[0 .. cmd.len - 1]);
         } else {
@@ -1316,6 +1300,10 @@ fn help() !void {
         \\    zmx run dev git log --oneline          # pager won't block
         \\    echo "hello" | zmx run dev cat         # piped stdin still works
         \\
+        \\    # heredoc
+        \\    printf "cat << 'EOF'\r\nHello $USER\r\nToday is $(date).\r\nEOF" | zmx run dev
+        \\
+        \\    # non-blocking
         \\    zmx run dev -d sleep 10
         \\    zmx wait dev
         \\

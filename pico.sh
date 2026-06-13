@@ -6,13 +6,6 @@ EVENT_TYPE="${PICO_CI_EVENT_TYPE:-manual}"
 
 echo "running ci event=${EVENT_TYPE} session=${ZMX_SESSION_PREFIX}"
 
-if ! command -v mise &> /dev/null; then
-  echo "ERR: mise is required"
-  exit 1
-fi
-
-zmx run install bash -c "mise trust && mise install"
-
 zmx run build docker build -t zig-zmx .
 zmx run fmt -d docker run --rm -t zig-zmx:latest zig fmt --check .
 zmx run test -d docker run --rm -t zig-zmx:latest zig build test

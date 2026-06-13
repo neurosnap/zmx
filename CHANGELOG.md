@@ -12,9 +12,8 @@ Use spec: https://common-changelog.org/
 
 ### Changed
 
-- *BREAKING* `zmx run` when creating session it runs `/bin/bash` instead of `$SHELL`
-  - There are just too many edge cases with tracking exit status in other shells which makes
-    `zmx run` much less useful for task management.
+- *BREAKING* `zmx run` when creating session it runs `bash` instead of `$SHELL`
+  - There are just too many edge cases with tracking exit status in other shells which makes `zmx run` much less useful for task management.
   - This means when using `zmx run` the target shell must have support for `$?` exit code tracking
 - *BREAKING* `zmx tail` now strips ansi escape codes
 
