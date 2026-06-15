@@ -5,6 +5,95 @@ const ipc = @import("ipc.zig");
 const socket = @import("socket.zig");
 const testing = std.testing;
 
+pub const Osc8Stripper = struct {
+    state: State = .ground,
+    pending: std.ArrayList(u8) = .empty,
+    output: std.ArrayList(u8) = .empty,
+
+    const State = enum {
+        ground,
+        esc,
+        osc,
+        osc_8,
+        skip_osc_8,
+        skip_osc_8_esc,
+    };
+
+    pub fn deinit(self: *Osc8Stripper, alloc: std.mem.Allocator) void {
+        self.pending.deinit(alloc);
+        self.output.deinit(alloc);
+    }
+
+    pub fn strip(self: *Osc8Stripper, alloc: std.mem.Allocator, input: []const u8) ![]const u8 {
+        if (self.state == .ground and std.mem.indexOfScalar(u8, input, 0x1b) == null and
+            std.mem.indexOfScalar(u8, input, 0x9d) == null)
+        {
+            return input;
+        }
+
+        self.output.clearRetainingCapacity();
+        for (input) |byte| {
+            switch (self.state) {
+                .ground => switch (byte) {
+                    0x1b => {
+                        self.pending.clearRetainingCapacity();
+                        try self.pending.append(alloc, byte);
+                        self.state = .esc;
+                    },
+                    0x9d => {
+                        self.pending.clearRetainingCapacity();
+                        try self.pending.append(alloc, byte);
+                        self.state = .osc;
+                    },
+                    else => try self.output.append(alloc, byte),
+                },
+                .esc => {
+                    try self.pending.append(alloc, byte);
+                    if (byte == ']') {
+                        self.state = .osc;
+                    } else {
+                        try self.flushPending(alloc);
+                    }
+                },
+                .osc => {
+                    try self.pending.append(alloc, byte);
+                    if (byte == '8') {
+                        self.state = .osc_8;
+                    } else {
+                        try self.flushPending(alloc);
+                    }
+                },
+                .osc_8 => {
+                    try self.pending.append(alloc, byte);
+                    if (byte == ';') {
+                        self.pending.clearRetainingCapacity();
+                        self.state = .skip_osc_8;
+                    } else {
+                        try self.flushPending(alloc);
+                    }
+                },
+                .skip_osc_8 => switch (byte) {
+                    0x07, 0x9c => self.state = .ground,
+                    0x1b => self.state = .skip_osc_8_esc,
+                    else => {},
+                },
+                .skip_osc_8_esc => switch (byte) {
+                    '\\' => self.state = .ground,
+                    0x1b => {},
+                    else => self.state = .skip_osc_8,
+                },
+            }
+        }
+        return self.output.items;
+    }
+
+    fn flushPending(self: *Osc8Stripper, alloc: std.mem.Allocator) !void {
+        try self.output.appendSlice(alloc, self.pending.items);
+        self.pending.clearRetainingCapacity();
+        self.state = .ground;
+    }
+};
+
 pub const SessionEntry = struct {
     name: []const u8,
     pid: ?i32,
@@ -1029,6 +1118,33 @@ test "serializeTerminalState excludes synchronized output replay" {
     // but NOT synchronized output (DECSET 2026)
     try testing.expect(std.mem.indexOf(u8, output, "\x1b[?2004h") != null);
     try testing.expect(std.mem.indexOf(u8, output, "\x1b[?2026h") == null);
+}
+
+test "Osc8Stripper strips split hyperlinks" {
+    const chunks = [_][]const u8{
+        "\x1b]8;;file:///tmp/very-long-path\x1b\\hel",
+        "lo\x1b]8;;\x1b\\!",
+    };
+    try expectStripped(&chunks, "hello!");
+}
+
+test "Osc8Stripper preserves non-hyperlink escape sequences" {
+    const chunks = [_][]const u8{
+        "\x1b]0;title\x1b\\",
+        "\x1b[31mred\x1b[0m",
+    };
+    try expectStripped(&chunks, "\x1b]0;title\x1b\\\x1b[31mred\x1b[0m");
+}
+
+fn expectStripped(chunks: []const []const u8, expected: []const u8) !void {
+    var stripper = Osc8Stripper{};
+    defer stripper.deinit(testing.allocator);
+    var actual = std.ArrayList(u8).empty;
+    defer actual.deinit(testing.allocator);
+    for (chunks) |chunk| {
+        try actual.appendSlice(testing.allocator, try stripper.strip(testing.allocator, chunk));
+    }
+    try testing.expectEqualStrings(expected, actual.items);
 }
 
 fn testCreateTerminal(alloc: std.mem.Allocator, cols: u16, rows: u16, vt_data: []const u8) !ghostty_vt.Terminal {
