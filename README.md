@@ -16,7 +16,7 @@
 ## features
 
 - Persist terminal shell sessions
-- Ability to attach and detach from a shell session it being killed
+- Ability to attach and detach from a shell session without it being killed
 - Native terminal scrollback
 - Multiple clients can connect to the same session
 - Re-attaching to a session restores previous terminal state and output
