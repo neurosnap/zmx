@@ -226,10 +226,10 @@ Requires [fzf](https://github.com/junegunn/fzf).
 zmx-select() {
   local display
   display=$(zmx list 2>/dev/null | while IFS=$'\t' read -r name pid clients created dir; do
-    name=${name#session_name=}
-    pid=${pid#pid=}
-    clients=${clients#clients=}
-    dir=${dir#started_in=}
+    name=${name#*name=}
+    pid=${pid#*pid=}
+    clients=${clients#*clients=}
+    dir=${dir#*start_dir=}
     printf "%-20s  pid:%-8s  clients:%-2s  %s\n" "$name" "$pid" "$clients" "$dir"
   done)
 
