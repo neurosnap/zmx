@@ -38,12 +38,14 @@ pub const Header = packed struct {
 pub const Resize = packed struct {
     rows: u16,
     cols: u16,
+    xpixel: u16 = 0,
+    ypixel: u16 = 0,
 };
 
 pub fn getTerminalSize(fd: i32) Resize {
     var ws: cross.c.struct_winsize = undefined;
     if (cross.c.ioctl(fd, cross.c.TIOCGWINSZ, &ws) == 0 and ws.ws_row > 0 and ws.ws_col > 0) {
-        return .{ .rows = ws.ws_row, .cols = ws.ws_col };
+        return .{ .rows = ws.ws_row, .cols = ws.ws_col, .xpixel = ws.ws_xpixel, .ypixel = ws.ws_ypixel };
     }
     return .{ .rows = 24, .cols = 160 };
 }
