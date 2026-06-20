@@ -197,7 +197,9 @@ const OSC_133_A = "\x1b]133;A";
 /// makes the prompt invisible.
 /// See: https://github.com/neurosnap/zmx/issues/111
 pub fn rewritePromptRedraw(alloc: std.mem.Allocator, data: []const u8) ?[]const u8 {
-    // Quick scan: is there any OSC 133;A in this chunk?
+    // Fast-path: most PTY output has no escape sequences at all. A scalar
+    // byte scan for ESC is cheaper than the full string indexOf below.
+    if (std.mem.indexOfScalar(u8, data, '\x1b') == null) return null;
     if (std.mem.indexOf(u8, data, OSC_133_A) == null) return null;
 
     var result = std.ArrayList(u8).initCapacity(alloc, data.len + 200) catch return null;

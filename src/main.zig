@@ -2558,7 +2558,11 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                 .read_buf = try ipc.SocketBuffer.init(daemon.alloc),
                 .write_buf = undefined,
             };
-            client.write_buf = try std.ArrayList(u8).initCapacity(client.alloc, 4096);
+            // 64KB initial capacity lets ~15 broadcast cycles (N_TTY_BUF_SIZE reads
+            // * header) accumulate before the first ArrayList growth. The write
+            // buffer is userspace-only: it drains via POLLOUT to the client socket,
+            // which has no corresponding kernel-imposed per-write limit.
+            client.write_buf = try std.ArrayList(u8).initCapacity(client.alloc, 65536);
             try daemon.clients.append(daemon.alloc, client);
             std.log.info(
                 "client connected fd={d} total={d}",
@@ -2568,7 +2572,10 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
 
         const inp_flags = posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL;
         if (poll_fds.items[1].revents & inp_flags != 0) {
-            // Read from PTY
+            // Read from PTY. Buffer is sized to N_TTY_BUF_SIZE (4096): the hard
+            // kernel limit for the N_TTY line discipline. A larger buffer doesn't
+            // help: each read() from a PTY master returns at most 4096 bytes
+            // regardless of the userspace buffer size.
             var buf: [4096]u8 = undefined;
             const n_opt: ?usize = posix.read(pty_fd, &buf) catch |err| blk: {
                 if (err == error.WouldBlock) break :blk null;

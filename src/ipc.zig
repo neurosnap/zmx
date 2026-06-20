@@ -92,14 +92,16 @@ pub fn appendMessage(
     tag: Tag,
     data: []const u8,
 ) !void {
-    std.log.info("sending ipc message tag={s}", .{@tagName(tag)});
     const header = Header{
         .tag = tag,
         .len = @intCast(data.len),
     };
-    try list.appendSlice(alloc, std.mem.asBytes(&header));
+    // Guarantee capacity for header + payload in one check to avoid
+    // intermediate realloc between the two appends on the hot path.
+    try list.ensureTotalCapacity(alloc, list.items.len + @sizeOf(Header) + data.len);
+    list.appendSliceAssumeCapacity(std.mem.asBytes(&header));
     if (data.len > 0) {
-        try list.appendSlice(alloc, data);
+        list.appendSliceAssumeCapacity(data);
     }
 }
 
