@@ -294,6 +294,19 @@ Instead, this tool specifically focuses on session persistence and defers window
 
 ## ssh workflow
 
+### Try it out quickly
+If you'd like to try out `zmx` and `ssh` without fiddling your `ssh` config, make sure to pass the `-t` option to `ssh`.  Here's an example:
+
+```bash
+ssh -t dev-box zmx attach default
+```
+
+Without `-t`, the remote shell will not know it's talking to a terminal, and the display will likely get messed up.
+
+This option isn't needed if you follow the configuration steps below, because `RequestTTY yes` does the same thing.
+
+### Configure it for regular use
+
 Using `zmx` with `ssh` is a first-class citizen. Instead of using `ssh` to remote into your system with a single terminal and `n` tmux panes, you open `n` terminals and run `ssh` for all of them. This might sound tedious, but there are tools to make this a delightful workflow.
 
 First, create an `ssh` config entry for your remote dev server:
