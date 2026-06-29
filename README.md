@@ -378,7 +378,14 @@ This is particularly useful when running `zmx` as a system service with a shared
 
 ## debugging
 
-We store global logs for cli commands in `{socket_dir}/logs/zmx.log`. We store session-specific logs in `{socket_dir}/logs/{session_name}.log`. Right now they are enabled by default and cannot be disabled. The idea here is to help with initial development until we reach a stable state.
+We store global logs for cli commands in `{log_dir}/zmx.log`. We store session-specific logs in `{log_dir}/{session_name}.log`. Right now they are enabled by default and cannot be disabled. The idea here is to help with initial development until we reach a stable state.
+
+The log directory is resolved in this order:
+
+1. `ZMX_DIR/logs` if `ZMX_DIR` is set
+2. `XDG_STATE_HOME/zmx/logs` if `XDG_STATE_HOME` is set
+3. `HOME/.local/state/zmx/logs`
+4. `TMPDIR/zmx-$UID` (or `/tmp/zmx-$UID`) as a last resort
 
 ## a smol contract
 

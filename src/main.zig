@@ -476,7 +476,8 @@ const Cfg = struct {
 
     pub fn init(alloc: std.mem.Allocator) !Cfg {
         const socket_dir = try socketDir(alloc);
-        const log_dir = try std.fmt.allocPrint(alloc, "{s}/logs", .{socket_dir});
+        errdefer alloc.free(socket_dir);
+        const log_dir = try logDir(alloc);
         errdefer alloc.free(log_dir);
 
         const dir_mode = if (std.posix.getenv("ZMX_DIR_MODE")) |m|
@@ -511,9 +512,25 @@ const Cfg = struct {
             try std.fmt.allocPrint(alloc, "{s}/zmx", .{xdg_runtime})
         else
             try std.fmt.allocPrint(alloc, "{s}/zmx-{d}", .{ tmpdir, uid });
-        errdefer alloc.free(socket_dir);
 
         return socket_dir;
+    }
+
+    fn logDir(alloc: std.mem.Allocator) ![]const u8 {
+        const log_dir = if (posix.getenv("ZMX_DIR")) |zmxdir|
+            try std.fmt.allocPrint(alloc, "{s}/logs", .{zmxdir})
+        else if (posix.getenv("XDG_STATE_HOME")) |xdg_state_home|
+            try std.fmt.allocPrint(alloc, "{s}/zmx/logs", .{xdg_state_home})
+        else if (posix.getenv("HOME")) |home_dir|
+            try std.fmt.allocPrint(alloc, "{s}/.local/state/zmx/logs", .{home_dir})
+        else fallback: {
+            // This is the last resort: falling back to /tmp/$UID if HOME is unset.
+            const tmpdir = std.mem.trimRight(u8, posix.getenv("TMPDIR") orelse "/tmp", "/");
+            const uid = posix.getuid();
+            break :fallback try std.fmt.allocPrint(alloc, "{s}/zmx-{d}", .{ tmpdir, uid });
+        };
+
+        return log_dir;
     }
 
     pub fn deinit(self: *Cfg, alloc: std.mem.Allocator) void {
@@ -522,15 +539,24 @@ const Cfg = struct {
     }
 
     pub fn mkdir(self: *Cfg) !void {
-        posix.mkdirat(posix.AT.FDCWD, self.socket_dir, @intCast(self.dir_mode)) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
+        try mkdirAll(self.socket_dir, @intCast(self.dir_mode));
+        try mkdirAll(self.log_dir, @intCast(self.dir_mode));
+    }
 
-        posix.mkdirat(posix.AT.FDCWD, self.log_dir, @intCast(self.dir_mode)) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
+    fn mkdirAll(sub_dir_path: []const u8, mode: posix.mode_t) !void {
+        var it = try std.fs.path.componentIterator(sub_dir_path);
+        var component = it.last() orelse return error.BadPathName;
+        while (true) {
+            posix.mkdirat(posix.AT.FDCWD, component.path, mode) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                error.FileNotFound => |e| {
+                    component = it.previous() orelse return e;
+                    continue;
+                },
+                else => |e| return e,
+            };
+            component = it.next() orelse return;
+        }
     }
 };
 
