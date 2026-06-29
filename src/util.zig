@@ -3,6 +3,7 @@ const posix = std.posix;
 const ghostty_vt = @import("ghostty-vt");
 const ipc = @import("ipc.zig");
 const socket = @import("socket.zig");
+const label = @import("label.zig");
 const testing = std.testing;
 
 pub const SessionEntry = struct {
@@ -13,6 +14,7 @@ pub const SessionEntry = struct {
     error_name: ?[]const u8,
     cmd: ?[]const u8 = null,
     cwd: ?[]const u8 = null,
+    labels: ?[]const u8 = null,
     created_at: u64,
     task_ended_at: ?u64,
     task_exit_code: ?u8,
@@ -21,6 +23,7 @@ pub const SessionEntry = struct {
         alloc.free(self.name);
         if (self.cmd) |cmd| alloc.free(cmd);
         if (self.cwd) |cwd| alloc.free(cwd);
+        if (self.labels) |l| alloc.free(l);
     }
 
     pub fn lessThan(_: void, a: SessionEntry, b: SessionEntry) bool {
@@ -32,6 +35,7 @@ pub fn get_session_entries(
     alloc: std.mem.Allocator,
     socket_dir: []const u8,
 ) !std.ArrayList(SessionEntry) {
+    std.log.info("get session entries socket_dir={s}", .{socket_dir});
     var dir = try std.fs.openDirAbsolute(socket_dir, .{ .iterate = true });
     defer dir.close();
     var iter = dir.iterate();
@@ -60,6 +64,7 @@ pub fn get_session_entries(
                     .created_at = 0,
                     .task_exit_code = 1,
                     .task_ended_at = 0,
+                    .labels = "",
                 });
                 // Only clean up when the daemon is definitively gone. A busy
                 // daemon can miss the probe timeout; deleting its socket
@@ -69,7 +74,7 @@ pub fn get_session_entries(
                 }
                 continue;
             };
-            posix.close(result.fd);
+            defer result.deinit();
 
             // Extract cmd and cwd from the fixed-size arrays. Lengths come
             // off the wire (u16 range), so clamp to the actual array size.
@@ -79,8 +84,14 @@ pub fn get_session_entries(
                 alloc.dupe(u8, result.info.cmd[0..cmd_len]) catch null
             else
                 null;
+
             const cwd: ?[]const u8 = if (cwd_len > 0)
                 alloc.dupe(u8, result.info.cwd[0..cwd_len]) catch null
+            else
+                null;
+
+            const labels = if (result.labels) |lbl|
+                alloc.dupe(u8, lbl) catch null
             else
                 null;
 
@@ -92,6 +103,7 @@ pub fn get_session_entries(
                 .error_name = null,
                 .cmd = cmd,
                 .cwd = cwd,
+                .labels = labels,
                 .created_at = result.info.created_at,
                 .task_ended_at = result.info.task_ended_at,
                 .task_exit_code = result.info.task_exit_code,
@@ -737,6 +749,12 @@ pub fn writeSessionLine(
             if (session.task_exit_code) |exit_code| {
                 try writer.print("\texit_code={d}", .{exit_code});
             }
+        }
+    }
+    if (session.labels) |labels| {
+        var kvs = label.LabelIterator.init(labels);
+        while (kvs.next()) |kv| {
+            try writer.print("\t{s}={s}", .{ kv.key, kv.value });
         }
     }
     try writer.print("\n", .{});

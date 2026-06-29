@@ -3,6 +3,7 @@ set -euo pipefail
 
 export ZMX_SESSION_PREFIX="${ZMX_SESSION_PREFIX:-ci.zmx.}"
 EVENT="${PICI_EVENT:-manual}"
+BRANCH="${PICI_BRANCH:-tmp}"
 
 echo "running ci event=${EVENT} session=${ZMX_SESSION_PREFIX}"
 

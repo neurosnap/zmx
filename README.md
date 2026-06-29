@@ -83,7 +83,11 @@ Commands:
   [p]rint <name> <text...>                 Inject text into session display
   [wr]ite <name> <file_path>               Write stdin to file_path through the session
   [d]etach                                 Detach all clients (ctrl+\\ for current client)
-  [l]ist|ls [--short]                      List active sessions
+  [l]ist|ls [--short|--where k=v]          List active sessions
+  [g]et <name>                             Get session labels
+  set <name> k=v ...                       Set session labels
+  [un]set <name> key ...                   Remove session labels
+  [cl]ear <name>                           Clear all session labels
   [k]ill <name>... [--force]               Kill session and all attached clients
   [hi]story <name> [--vt|--html]           Output session scrollback
   [w]ait <name>...                         Wait for session tasks to complete
@@ -284,6 +288,25 @@ zmx a runner # ZMX_SESSION=d.runner
 zmx a tests  # ZMX_SESSION=d.tests
 zmx k tests  # kills d.tests
 zmx wait     # suspends until all tasks prefixed with "d." are complete
+```
+
+## label inheritance
+
+When creating a new session from inside an existing one (`$ZMX_SESSION` is set), labels are automatically inherited from the parent session. This means if you set `project=zmx` on a session, any child sessions created from within it will also have `project=zmx`.
+
+To control which labels are inherited, set `ZMX_INHERIT_LABELS`:
+
+```bash
+# Inherit all labels (default)
+zmx a child
+
+# Inherit no labels
+export ZMX_INHERIT_LABELS=
+zmx a child
+
+# Inherit only specific labels
+export ZMX_INHERIT_LABELS=project,team
+zmx a child
 ```
 
 ## philosophy
