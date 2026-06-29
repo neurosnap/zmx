@@ -4,6 +4,20 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
+### Added
+
+- `zmx set <name> k=v ...` to attach key=value labels to live sessions
+- `zmx get <name>` to read labels from a session
+- `zmx set <name> key=` to remove a specific label (empty value = delete)
+- `zmx clear <name>` to remove all labels
+- `zmx list` now shows labels by default as tab-separated fields
+- `zmx list --where key=value` to filter sessions by exact match
+- `zmx list --where key=value*` to filter sessions by prefix match
+- Built-in fields `name`, `start_dir`, `cmd` are queryable via `--where` without setting labels
+- Built-in keys (`name`, `start_dir`, `cmd`) are read-only and rejected by `zmx set`
+- Shell completions for `get`, `set`, `clear` commands (bash, zsh, fish, nu)
+
+
 ### Fixed
 
 - `zmx run` will now detect heredocs and add the completion marker to a newline

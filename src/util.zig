@@ -13,6 +13,7 @@ pub const SessionEntry = struct {
     error_name: ?[]const u8,
     cmd: ?[]const u8 = null,
     cwd: ?[]const u8 = null,
+    labels: ?[]const u8 = null,
     created_at: u64,
     task_ended_at: ?u64,
     task_exit_code: ?u8,
@@ -21,6 +22,7 @@ pub const SessionEntry = struct {
         alloc.free(self.name);
         if (self.cmd) |cmd| alloc.free(cmd);
         if (self.cwd) |cwd| alloc.free(cwd);
+        if (self.labels) |l| alloc.free(l);
     }
 
     pub fn lessThan(_: void, a: SessionEntry, b: SessionEntry) bool {
@@ -31,6 +33,7 @@ pub const SessionEntry = struct {
 pub fn get_session_entries(
     alloc: std.mem.Allocator,
     socket_dir: []const u8,
+    fetch_labels: bool,
 ) !std.ArrayList(SessionEntry) {
     var dir = try std.fs.openDirAbsolute(socket_dir, .{ .iterate = true });
     defer dir.close();
@@ -50,7 +53,7 @@ pub fn get_session_entries(
             };
             defer alloc.free(socket_path);
 
-            const result = ipc.probeSession(alloc, socket_path) catch |err| {
+            const result = ipc.probeSessionWithLabels(alloc, socket_path, fetch_labels) catch |err| {
                 try sessions.append(alloc, .{
                     .name = name,
                     .pid = null,
@@ -69,6 +72,7 @@ pub fn get_session_entries(
                 }
                 continue;
             };
+            const labels = result.labels;
             posix.close(result.fd);
 
             // Extract cmd and cwd from the fixed-size arrays. Lengths come
@@ -92,6 +96,7 @@ pub fn get_session_entries(
                 .error_name = null,
                 .cmd = cmd,
                 .cwd = cwd,
+                .labels = labels,
                 .created_at = result.info.created_at,
                 .task_ended_at = result.info.task_ended_at,
                 .task_exit_code = result.info.task_exit_code,
@@ -682,6 +687,7 @@ pub fn writeSessionLine(
     session: SessionEntry,
     short: bool,
     current_session: ?[]const u8,
+    omit_newline: bool,
 ) !void {
     const current_arrow = "→";
     const prefix = if (current_session) |current|
@@ -734,7 +740,7 @@ pub fn writeSessionLine(
             }
         }
     }
-    try writer.print("\n", .{});
+    if (!omit_newline) try writer.print("\n", .{});
 }
 
 test "writeSessionLine formats output for current session and short output" {
@@ -801,7 +807,7 @@ test "writeSessionLine formats output for current session and short output" {
         var builder: std.Io.Writer.Allocating = .init(testing.allocator);
         defer builder.deinit();
 
-        try writeSessionLine(&builder.writer, case.session, case.short, case.current_session);
+        try writeSessionLine(&builder.writer, case.session, case.short, case.current_session, false);
         try testing.expectEqualStrings(case.expected, builder.writer.buffered());
     }
 }

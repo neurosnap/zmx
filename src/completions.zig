@@ -32,7 +32,7 @@ const bash_completions =
     \\  cur="${COMP_WORDS[COMP_CWORD]}"
     \\  prev="${COMP_WORDS[COMP_CWORD-1]}"
     \\
-    \\  local commands="attach run send detach list completions kill history version help"
+    \\  local commands="attach run send detach list completions kill history get set unset clear version help"
     \\
     \\  if [[ $COMP_CWORD -eq 1 ]]; then
     \\    COMPREPLY=($(compgen -W "$commands" -- "$cur"))
@@ -40,7 +40,7 @@ const bash_completions =
     \\  fi
     \\
     \\  case "$prev" in
-    \\    attach|run|send|kill|history)
+    \\    attach|run|send|kill|history|get|set|unset|clear)
     \\      local sessions=$(zmx list --short 2>/dev/null | tr '\n' ' ')
     \\      COMPREPLY=($(compgen -W "$sessions" -- "$cur"))
     \\      ;;
@@ -48,7 +48,7 @@ const bash_completions =
     \\      COMPREPLY=($(compgen -W "bash zsh fish" -- "$cur"))
     \\      ;;
     \\    list)
-    \\      COMPREPLY=($(compgen -W "--short" -- "$cur"))
+    \\      COMPREPLY=($(compgen -W "--short --where" -- "$cur"))
     \\      ;;
     \\    *)
     \\      ;;
@@ -82,6 +82,10 @@ const zsh_completions =
     \\        'completions:Shell completion scripts'
     \\        'kill:Kill a session'
     \\        'history:Output session scrollback'
+    \\        'get:Get session labels'
+    \\        'set:Set session labels'
+    \\        'unset:Remove session labels'
+    \\        'clear:Clear all session labels'
     \\        'version:Show version'
     \\        'help:Show help message'
     \\      )
@@ -89,14 +93,14 @@ const zsh_completions =
     \\      ;;
     \\    args)
     \\      case $words[2] in
-    \\        attach|a|kill|k|run|r|send|s|history|hi)
+    \\        attach|a|kill|k|run|r|send|s|history|hi|get|g|set|se|unset|un|clear|cl)
     \\          _zmx_sessions
     \\          ;;
     \\        completions|c)
     \\          _values 'shell' 'bash' 'zsh' 'fish'
     \\          ;;
     \\        list|l)
-    \\          _values 'options' '--short'
+    \\          _values 'options' '--short' '--where'
     \\          ;;
     \\      esac
     \\      ;;
@@ -140,10 +144,14 @@ const fish_completions =
     \\complete -c zmx -n "__fish_is_nth_token 1" -a tail -d 'Follow session output'
     \\complete -c zmx -n "__fish_is_nth_token 1" -a completions -d 'Shell completions (bash, zsh, fish)'
     \\complete -c zmx -n "__fish_is_nth_token 1" -a version -d 'Show version'
+    \\complete -c zmx -n "__fish_is_nth_token 1" -a get -d 'Get session labels'
+    \\complete -c zmx -n "__fish_is_nth_token 1" -a set -d 'Set session labels'
+    \\complete -c zmx -n "__fish_is_nth_token 1" -a unset -d 'Remove session labels'
+    \\complete -c zmx -n "__fish_is_nth_token 1" -a clear -d 'Clear all session labels'
     \\complete -c zmx -n "__fish_is_nth_token 1" -a help -d 'Show help message'
     \\
     \\# Complete session names and shells
-    \\complete -c zmx -n "__fish_is_nth_token 2; and __fish_seen_subcommand_from a attach r run s send wr write hi history" -a '(zmx list --short 2>/dev/null)' -d 'Session name'
+    \\complete -c zmx -n "__fish_is_nth_token 2; and __fish_seen_subcommand_from a attach r run s send wr write hi history g get se set un unset cl clear" -a '(zmx list --short 2>/dev/null)' -d 'Session name'
     \\complete -c zmx -n "not __fish_is_nth_token 1; and __fish_seen_subcommand_from k kill w wait t tail" -a '(zmx list --short 2>/dev/null)' -d 'Session name'
     \\
     \\complete -c zmx -n "__fish_is_nth_token 2; and __fish_seen_subcommand_from c completions" -a 'bash zsh fish' -d Shell
@@ -152,6 +160,7 @@ const fish_completions =
     \\complete -c zmx -n "__fish_seen_subcommand_from r run" -s d -d 'Detach from the calling terminal; use `wait` to track its status'
     \\complete -c zmx -n "__fish_seen_subcommand_from r run" -l fish -d 'Required when the session runs fish shell'
     \\complete -c zmx -n "__fish_seen_subcommand_from l list" -l short -d 'Short output'
+    \\complete -c zmx -n "__fish_seen_subcommand_from l list" -l where -d 'Filter by label (key=value)' -r
     \\complete -c zmx -n "__fish_seen_subcommand_from k kill" -l force -d 'Force kill'
     \\complete -c zmx -n "__fish_seen_subcommand_from hi history" -l vt -d 'History format for escape sequences'
     \\complete -c zmx -n "__fish_seen_subcommand_from hi history" -l html -d 'History format for escape sequences'
@@ -189,11 +198,29 @@ const nu_completions =
     \\]
     \\
     \\export extern "zmx detach" []
-    \\export extern "zmx list" [--short]
+    \\export extern "zmx list" [--short, --where: string]
     \\export extern "zmx history" [name: string@"nu-complete zmx sessions", --vt, --html]
     \\export extern "zmx wait" [...sessions: string@"nu-complete zmx sessions"]
     \\export extern "zmx tail" [...sessions: string@"nu-complete zmx sessions"]
     \\export extern "zmx version" []
     \\export extern "completions" [shell: string@"nu-complete zmx complete"]
+    \\export extern "zmx get" [
+    \\    name?: string@"nu-complete zmx sessions"
+    \\]
+    \\
+    \\export extern "zmx set" [
+    \\    name?: string@"nu-complete zmx sessions"
+    \\    ...pairs: string
+    \\]
+    \\
+    \\export extern "zmx unset" [
+    \\    name?: string@"nu-complete zmx sessions"
+    \\    ...keys: string
+    \\]
+    \\
+    \\export extern "zmx clear" [
+    \\    name?: string@"nu-complete zmx sessions"
+    \\]
+    \\
     \\export extern "zmx help" []
 ;

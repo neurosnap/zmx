@@ -46,6 +46,97 @@ const SessionMatch = struct {
     }
 };
 
+const LabelKeyValue = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
+const WhereFilter = struct {
+    key: []const u8,
+    value: []const u8,
+    is_prefix: bool,
+};
+
+fn resolveSessionOrEnv(alloc: std.mem.Allocator, session_name: ?[]const u8) ![]const u8 {
+    const sesh_env = socket.getSeshNameFromEnv();
+    const raw = if (session_name) |name|
+        if (std.mem.eql(u8, name, ".")) blk: {
+            if (sesh_env.len > 0) break :blk sesh_env;
+            var buf: [4096]u8 = undefined;
+            var w = std.fs.File.stderr().writer(&buf);
+            w.interface.print("error: \".\" requires ZMX_SESSION (are you inside a zmx session?)\n", .{}) catch {};
+            w.interface.flush() catch {};
+            return error.SessionNameRequired;
+        } else
+            name
+    else if (sesh_env.len > 0)
+        sesh_env
+    else {
+        var buf: [4096]u8 = undefined;
+        var w = std.fs.File.stderr().writer(&buf);
+        w.interface.print("error: session name required\n", .{}) catch {};
+        w.interface.flush() catch {};
+        return error.SessionNameRequired;
+    };
+    return socket.getSeshName(alloc, raw);
+}
+
+fn parseLabelSetArgs(alloc: std.mem.Allocator, args: *std.process.ArgIterator) !struct {
+    session_name: ?[]const u8,
+    pairs: std.ArrayList(LabelKeyValue),
+} {
+    var session_name: ?[]const u8 = null;
+    var pairs: std.ArrayList(LabelKeyValue) = .empty;
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) return error.InvalidArgument;
+        if (std.mem.indexOfScalar(u8, arg, '=')) |idx| {
+            try pairs.append(alloc, .{ .key = arg[0..idx], .value = arg[idx + 1 ..] });
+        } else if (session_name == null) {
+            session_name = arg;
+        } else {
+            return error.InvalidArgument;
+        }
+    }
+    return .{ .session_name = session_name, .pairs = pairs };
+}
+
+fn parseLabelKeyArgs(alloc: std.mem.Allocator, args: *std.process.ArgIterator) !struct {
+    session_name: ?[]const u8,
+    keys: std.ArrayList([]const u8),
+} {
+    var session_name: ?[]const u8 = null;
+    var keys: std.ArrayList([]const u8) = .empty;
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) return error.InvalidArgument;
+        if (session_name == null and std.mem.indexOfScalar(u8, arg, '=' ) == null and keys.items.len == 0) {
+            session_name = arg;
+        } else {
+            try keys.append(alloc, arg);
+        }
+    }
+    return .{ .session_name = session_name, .keys = keys };
+}
+
+fn serializeLabelSet(alloc: std.mem.Allocator, pairs: []const LabelKeyValue) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    for (pairs) |pair| {
+        try out.appendSlice(alloc, pair.key);
+        try out.append(alloc, '=');
+        try out.appendSlice(alloc, pair.value);
+        try out.append(alloc, '\n');
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+fn serializeLabelKeys(alloc: std.mem.Allocator, keys: []const []const u8) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    for (keys) |key| {
+        try out.appendSlice(alloc, key);
+        try out.append(alloc, '\n');
+    }
+    return out.toOwnedSlice(alloc);
+}
+
 fn parseSessionArg(alloc: std.mem.Allocator, raw: []const u8) !SessionMatch {
     if (raw.len > 0 and raw[raw.len - 1] == '*') {
         const name = try socket.getSeshName(alloc, raw[0 .. raw.len - 1]);
@@ -90,7 +181,7 @@ pub fn main() !void {
     defer log_system.deinit();
 
     const cmd = args.next() orelse {
-        return list(&cfg, false);
+        return list(&cfg, false, &.{});
     };
 
     if (std.mem.eql(u8, cmd, "version") or std.mem.eql(u8, cmd, "v") or std.mem.eql(u8, cmd, "-v") or std.mem.eql(u8, cmd, "--version")) {
@@ -99,13 +190,52 @@ pub fn main() !void {
         return help();
     } else if (std.mem.eql(u8, cmd, "list") or std.mem.eql(u8, cmd, "l") or std.mem.eql(u8, cmd, "ls")) {
         var short = false;
-        if (args.next()) |arg| {
+        var where_filters = std.ArrayList(WhereFilter).empty;
+        defer where_filters.deinit(alloc);
+        while (args.next()) |arg| {
             if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
                 return help();
+            } else if (std.mem.eql(u8, arg, "--short")) {
+                short = true;
+            } else if (std.mem.startsWith(u8, arg, "--where")) {
+                // handle --where key=value or --where=key=value
+                const rest = if (arg.len > 7 and arg[7] == '=')
+                    arg[8..]
+                else
+                    args.next() orelse return help();
+                if (parseWhereExpr(rest)) |filter| {
+                    try where_filters.append(alloc, filter);
+                } else {
+                    return help();
+                }
             }
-            short = std.mem.eql(u8, arg, "--short");
         }
-        return list(&cfg, short);
+        return list(&cfg, short, where_filters.items);
+    } else if (std.mem.eql(u8, cmd, "get") or std.mem.eql(u8, cmd, "g")) {
+        var parsed = parseLabelKeyArgs(alloc, &args) catch return help();
+        defer parsed.keys.deinit(alloc);
+        const sesh = resolveSessionOrEnv(alloc, parsed.session_name) catch return;
+        defer alloc.free(sesh);
+        return labelGet(&cfg, sesh);
+    } else if (std.mem.eql(u8, cmd, "set") or std.mem.eql(u8, cmd, "z")) {
+        var parsed = parseLabelSetArgs(alloc, &args) catch return help();
+        defer parsed.pairs.deinit(alloc);
+        if (parsed.pairs.items.len == 0) return help();
+        const sesh = resolveSessionOrEnv(alloc, parsed.session_name) catch return;
+        defer alloc.free(sesh);
+        return labelSet(&cfg, sesh, parsed.pairs.items);
+    } else if (std.mem.eql(u8, cmd, "unset") or std.mem.eql(u8, cmd, "un")) {
+        var parsed = parseLabelKeyArgs(alloc, &args) catch return help();
+        defer parsed.keys.deinit(alloc);
+        if (parsed.keys.items.len == 0) return help();
+        const sesh = resolveSessionOrEnv(alloc, parsed.session_name) catch return;
+        defer alloc.free(sesh);
+        return labelUnset(&cfg, sesh, parsed.keys.items);
+    } else if (std.mem.eql(u8, cmd, "clear") or std.mem.eql(u8, cmd, "cl")) {
+        const parsed = parseLabelKeyArgs(alloc, &args) catch return help();
+        const sesh = resolveSessionOrEnv(alloc, parsed.session_name) catch return;
+        defer alloc.free(sesh);
+        return labelClear(&cfg, sesh);
     } else if (std.mem.eql(u8, cmd, "completions") or std.mem.eql(u8, cmd, "c")) {
         const arg = args.next() orelse return;
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
@@ -285,7 +415,7 @@ pub fn main() !void {
         if (matchers.items.len == 0) {
             return error.SessionNameRequired;
         }
-        var sessions = try util.get_session_entries(alloc, cfg.socket_dir);
+        var sessions = try util.get_session_entries(alloc, cfg.socket_dir, false);
         defer {
             for (sessions.items) |session| {
                 session.deinit(alloc);
@@ -365,7 +495,7 @@ pub fn main() !void {
         }
 
         if (any_prefix) {
-            var sessions = try util.get_session_entries(alloc, cfg.socket_dir);
+            var sessions = try util.get_session_entries(alloc, cfg.socket_dir, false);
             defer {
                 for (sessions.items) |session| {
                     session.deinit(alloc);
@@ -592,6 +722,46 @@ test "Cfg.init uses custom modes from env vars" {
     try std.testing.expectEqual(@as(u32, 0o660), cfg.log_mode);
 }
 
+test "parseWhereExpr: exact match" {
+    const f = parseWhereExpr("project=zmx").?;
+    try std.testing.expectEqualStrings("project", f.key);
+    try std.testing.expectEqualStrings("zmx", f.value);
+    try std.testing.expect(!f.is_prefix);
+}
+
+test "parseWhereExpr: prefix match with * suffix" {
+    const f = parseWhereExpr("start_dir=/Users/max*").?;
+    try std.testing.expectEqualStrings("start_dir", f.key);
+    try std.testing.expectEqualStrings("/Users/max", f.value);
+    try std.testing.expect(f.is_prefix);
+}
+
+test "parseWhereExpr: invalid" {
+    try std.testing.expect(parseWhereExpr("noequals") == null);
+    try std.testing.expect(parseWhereExpr("=nokey") == null);
+}
+
+test "whereMatch: exact" {
+    try std.testing.expect(whereMatch("hello", "hello", false));
+    try std.testing.expect(!whereMatch("hello", "hell", false));
+    try std.testing.expect(!whereMatch("hello", "hello world", false));
+}
+
+test "whereMatch: prefix" {
+    try std.testing.expect(whereMatch("/Users/max/code/zmx", "/Users/max", true));
+    try std.testing.expect(!whereMatch("/Users/max/code/zmx", "/code", true));
+    try std.testing.expect(whereMatch("hello", "", true));
+    try std.testing.expect(whereMatch("hello", "hello", true));
+}
+
+test "isReservedKey" {
+    try std.testing.expect(isReservedKey("name"));
+    try std.testing.expect(isReservedKey("start_dir"));
+    try std.testing.expect(isReservedKey("cmd"));
+    try std.testing.expect(!isReservedKey("project"));
+    try std.testing.expect(!isReservedKey("status"));
+}
+
 /// Daemon is responsible for managing a zmx session.
 ///
 /// It holds all the state for a running session.  Instead of a single daemon for all sessions, we
@@ -604,6 +774,7 @@ const Daemon = struct {
     cfg: *Cfg,
     alloc: std.mem.Allocator,
     clients: std.ArrayList(*Client),
+    labels: std.StringHashMapUnmanaged([]u8) = .empty,
     // This control which client is the leader.  The leader controls terminal state and
     // cols/rows of session.
     leader_client_fd: ?i32,
@@ -630,8 +801,92 @@ const Daemon = struct {
 
     pub fn deinit(self: *Daemon) void {
         self.clients.deinit(self.alloc);
+        var it = self.labels.iterator();
+        while (it.next()) |entry| {
+            self.alloc.free(entry.key_ptr.*);
+            self.alloc.free(entry.value_ptr.*);
+        }
+        self.labels.deinit(self.alloc);
         self.pty_write_buf.deinit(self.alloc);
         self.alloc.free(self.socket_path);
+    }
+
+    fn handleLabelGet(self: *Daemon, client: *Client) !void {
+        var out = std.ArrayList(u8).empty;
+        var keys = std.ArrayList([]const u8).empty;
+        defer out.deinit(self.alloc);
+        defer keys.deinit(self.alloc);
+
+        var it = self.labels.iterator();
+        while (it.next()) |entry| {
+            try keys.append(self.alloc, entry.key_ptr.*);
+        }
+        std.mem.sort([]const u8, keys.items, {}, struct {
+            fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.order(u8, a, b) == .lt;
+            }
+        }.lessThan);
+
+        for (keys.items) |key| {
+            const value = self.labels.get(key).?;
+            try out.appendSlice(self.alloc, key);
+            try out.append(self.alloc, '=');
+            try out.appendSlice(self.alloc, value);
+            try out.append(self.alloc, '\n');
+        }
+
+        try ipc.appendMessage(self.alloc, &client.write_buf, .LabelData, out.items);
+        client.has_pending_output = true;
+    }
+
+    fn handleLabelSet(self: *Daemon, client: *Client, payload: []const u8) !void {
+        var lines = std.mem.tokenizeScalar(u8, payload, '\n');
+        while (lines.next()) |line| {
+            if (line.len == 0) continue;
+            const idx = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+            const key = line[0..idx];
+            const value = line[idx + 1 ..];
+            if (key.len == 0) continue;
+            if (isReservedKey(key)) continue;
+
+            const owned_key = try self.alloc.dupe(u8, key);
+            errdefer self.alloc.free(owned_key);
+            const owned_value = try self.alloc.dupe(u8, value);
+            errdefer self.alloc.free(owned_value);
+            if (try self.labels.fetchPut(self.alloc, owned_key, owned_value)) |existing| {
+                // fetchPut does NOT replace the key in the map — the old
+                // key pointer stays. So free the new (unused) key and the
+                // old value.
+                self.alloc.free(owned_key);
+                self.alloc.free(existing.value);
+            }
+        }
+        try ipc.appendMessage(self.alloc, &client.write_buf, .Ack, "");
+        client.has_pending_output = true;
+    }
+
+    fn handleLabelUnset(self: *Daemon, client: *Client, payload: []const u8) !void {
+        var lines = std.mem.tokenizeScalar(u8, payload, '\n');
+        while (lines.next()) |line| {
+            if (line.len == 0) continue;
+            if (self.labels.fetchRemove(line)) |existing| {
+                self.alloc.free(existing.key);
+                self.alloc.free(existing.value);
+            }
+        }
+        try ipc.appendMessage(self.alloc, &client.write_buf, .Ack, "");
+        client.has_pending_output = true;
+    }
+
+    fn handleLabelClear(self: *Daemon, client: *Client) !void {
+        var it = self.labels.iterator();
+        while (it.next()) |entry| {
+            self.alloc.free(entry.key_ptr.*);
+            self.alloc.free(entry.value_ptr.*);
+        }
+        self.labels.clearRetainingCapacity();
+        try ipc.appendMessage(self.alloc, &client.write_buf, .Ack, "");
+        client.has_pending_output = true;
     }
 
     pub fn shutdown(self: *Daemon) void {
@@ -1287,7 +1542,11 @@ fn help() !void {
         \\  [p]rint <name> <text...>                 Inject text into session display
         \\  [wr]ite <name> <file_path>               Write stdin to file_path through the session
         \\  [d]etach                                 Detach all clients (ctrl+\\ for current client)
-        \\  [l]ist|ls [--short]                      List active sessions
+        \\  [l]ist|ls [--short|--where k=v]           List active sessions
+        \\  [g]et <name>                              Get session labels
+        \\  set|z <name> k=v ...                       Set session labels
+        \\  [un]set <name> key ...                    Remove session labels
+        \\  [cl]ear <name>                            Clear all session labels
         \\  [k]ill <name>... [--force]               Kill session and all attached clients
         \\  [hi]story <name> [--vt|--html]           Output session scrollback
         \\  [w]ait <name>...                         Wait for session tasks to complete
@@ -1554,7 +1813,7 @@ fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
     var prev_done: i32 = 0;
     while (true) {
         agg_exit_code = 0;
-        var sessions = try util.get_session_entries(alloc, cfg.socket_dir);
+        var sessions = try util.get_session_entries(alloc, cfg.socket_dir, false);
         var total: i32 = 0;
         var done: i32 = 0;
 
@@ -1659,7 +1918,7 @@ fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
     }
     try stdout.flush();
 
-    const sessions = try util.get_session_entries(alloc, cfg.socket_dir);
+    const sessions = try util.get_session_entries(alloc, cfg.socket_dir, false);
     for (sessions.items) |session| {
         var found = false;
         for (matchers.items) |m| {
@@ -1712,7 +1971,7 @@ fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
     std.process.exit(agg_exit_code);
 }
 
-fn list(cfg: *Cfg, short: bool) !void {
+fn list(cfg: *Cfg, short: bool, where_filters: []const WhereFilter) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
@@ -1721,7 +1980,13 @@ fn list(cfg: *Cfg, short: bool) !void {
     var buf: [4096]u8 = undefined;
     var stdout = std.fs.File.stdout().writer(&buf);
 
-    var sessions = try util.get_session_entries(alloc, cfg.socket_dir);
+    const need_labels = !short or blk: {
+        for (where_filters) |filter| {
+            if (!isReservedKey(filter.key)) break :blk true;
+        }
+        break :blk false;
+    };
+    var sessions = try util.get_session_entries(alloc, cfg.socket_dir, need_labels);
     defer {
         for (sessions.items) |session| {
             session.deinit(alloc);
@@ -1740,10 +2005,86 @@ fn list(cfg: *Cfg, short: bool) !void {
 
     std.mem.sort(util.SessionEntry, sessions.items, {}, util.SessionEntry.lessThan);
 
+    const has_filters = where_filters.len > 0;
+
     for (sessions.items) |session| {
-        try util.writeSessionLine(&stdout.interface, session, short, current_session);
+        if (session.is_error) {
+            if (!has_filters) {
+                try util.writeSessionLine(&stdout.interface, session, short, current_session, false);
+                try stdout.interface.flush();
+            }
+            continue;
+        }
+
+        // Apply --where filters
+        if (has_filters) {
+            var match = true;
+            for (where_filters) |filter| {
+                if (!sessionMatchesFilter(session, filter, session.labels)) {
+                    match = false;
+                    break;
+                }
+            }
+            if (!match) continue;
+        }
+
+        const append_labels = !short;
+        try util.writeSessionLine(&stdout.interface, session, short, current_session, append_labels);
+
+        if (append_labels) {
+            if (session.labels) |payload| {
+                if (payload.len > 0) {
+                    var lines = std.mem.tokenizeScalar(u8, payload, '\n');
+                    while (lines.next()) |line| {
+                        try stdout.interface.print("\t{s}", .{line});
+                    }
+                }
+            }
+            try stdout.interface.print("\n", .{});
+        }
         try stdout.interface.flush();
     }
+}
+
+/// Parse a where expression: "key=value" for exact match, "key=value*" for prefix match.
+fn parseWhereExpr(expr: []const u8) ?WhereFilter {
+    const idx = std.mem.indexOfScalar(u8, expr, '=') orelse return null;
+    if (idx == 0) return null;
+    const key = expr[0..idx];
+    const raw_value = expr[idx + 1 ..];
+    const is_prefix = raw_value.len > 0 and raw_value[raw_value.len - 1] == '*';
+    const value = if (is_prefix) raw_value[0 .. raw_value.len - 1] else raw_value;
+    return .{ .key = key, .value = value, .is_prefix = is_prefix };
+}
+
+fn whereMatch(value: []const u8, filter_value: []const u8, is_prefix: bool) bool {
+    if (is_prefix) return std.mem.startsWith(u8, value, filter_value);
+    return std.mem.eql(u8, value, filter_value);
+}
+
+/// Resolve a where filter against built-in session fields and label payload.
+fn sessionMatchesFilter(session: util.SessionEntry, filter: WhereFilter, labels: ?[]const u8) bool {
+    // Check built-in fields first
+    if (std.mem.eql(u8, filter.key, "name")) return whereMatch(session.name, filter.value, filter.is_prefix);
+    if (std.mem.eql(u8, filter.key, "start_dir")) {
+        if (session.cwd) |cwd| return whereMatch(cwd, filter.value, filter.is_prefix);
+        return false;
+    }
+    if (std.mem.eql(u8, filter.key, "cmd")) {
+        if (session.cmd) |cmd| return whereMatch(cmd, filter.value, filter.is_prefix);
+        return false;
+    }
+
+    // Check label payload
+    const payload = labels orelse return false;
+    var lines = std.mem.tokenizeScalar(u8, payload, '\n');
+    while (lines.next()) |line| {
+        const idx = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+        const lk = line[0..idx];
+        const lv = line[idx + 1 ..];
+        if (std.mem.eql(u8, lk, filter.key) and whereMatch(lv, filter.value, filter.is_prefix)) return true;
+    }
+    return false;
 }
 
 fn detachAll(cfg: *Cfg) !void {
@@ -1836,6 +2177,121 @@ fn kill(cfg: *Cfg, session_name: []const u8, force: bool) !void {
     var w = std.fs.File.stdout().writer(&buf);
     try w.interface.print("killed session {s}\n", .{session_name});
     try w.interface.flush();
+}
+
+fn printLabelError(session_name: []const u8, err: anyerror) noreturn {
+    var buf: [4096]u8 = undefined;
+    var w = std.fs.File.stderr().writer(&buf);
+    switch (err) {
+        error.Timeout => w.interface.print(
+            "error: session \"{s}\" does not support labels (daemon too old?)\n",
+            .{session_name},
+        ) catch {},
+        error.ConnectionRefused, error.Unexpected => w.interface.print(
+            "error: session \"{s}\" not found or unresponsive\n",
+            .{session_name},
+        ) catch {},
+        else => w.interface.print(
+            "error: {s}\n",
+            .{@errorName(err)},
+        ) catch {},
+    }
+    w.interface.flush() catch {};
+    std.process.exit(1);
+}
+
+fn labelGet(cfg: *Cfg, session_name: []const u8) !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    const socket_path = socket.getSocketPath(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
+        error.NameTooLong => return socket.printSessionNameTooLong(session_name, cfg.socket_dir),
+        error.OutOfMemory => return err,
+    };
+    defer alloc.free(socket_path);
+
+    const payload = ipc.roundTripForTag(alloc, socket_path, .LabelGet, "", .LabelData) catch |err| {
+        printLabelError(session_name, err);
+    };
+    defer alloc.free(payload);
+
+    var buf: [4096]u8 = undefined;
+    var stdout = std.fs.File.stdout().writer(&buf);
+    try stdout.interface.print("{s}", .{payload});
+    try stdout.interface.flush();
+}
+
+const reserved_keys = [_][]const u8{ "name", "start_dir", "cmd" };
+
+fn isReservedKey(key: []const u8) bool {
+    for (reserved_keys) |rk| {
+        if (std.mem.eql(u8, key, rk)) return true;
+    }
+    return false;
+}
+
+fn labelSet(cfg: *Cfg, session_name: []const u8, pairs: []const LabelKeyValue) !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    // Reject reserved built-in keys
+    for (pairs) |pair| {
+        if (isReservedKey(pair.key)) {
+            var buf: [4096]u8 = undefined;
+            var w = std.fs.File.stderr().writer(&buf);
+            w.interface.print("error: \"{s}\" is a read-only built-in field\n", .{pair.key}) catch {};
+            w.interface.flush() catch {};
+            std.process.exit(1);
+        }
+    }
+
+    const socket_path = socket.getSocketPath(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
+        error.NameTooLong => return socket.printSessionNameTooLong(session_name, cfg.socket_dir),
+        error.OutOfMemory => return err,
+    };
+    defer alloc.free(socket_path);
+
+    const payload = try serializeLabelSet(alloc, pairs);
+    defer alloc.free(payload);
+    _ = ipc.roundTripForTag(alloc, socket_path, .LabelSet, payload, .Ack) catch |err| {
+        printLabelError(session_name, err);
+    };
+}
+
+fn labelUnset(cfg: *Cfg, session_name: []const u8, keys: []const []const u8) !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    const socket_path = socket.getSocketPath(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
+        error.NameTooLong => return socket.printSessionNameTooLong(session_name, cfg.socket_dir),
+        error.OutOfMemory => return err,
+    };
+    defer alloc.free(socket_path);
+
+    const payload = try serializeLabelKeys(alloc, keys);
+    defer alloc.free(payload);
+    _ = ipc.roundTripForTag(alloc, socket_path, .LabelUnset, payload, .Ack) catch |err| {
+        printLabelError(session_name, err);
+    };
+}
+
+fn labelClear(cfg: *Cfg, session_name: []const u8) !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    const socket_path = socket.getSocketPath(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
+        error.NameTooLong => return socket.printSessionNameTooLong(session_name, cfg.socket_dir),
+        error.OutOfMemory => return err,
+    };
+    defer alloc.free(socket_path);
+
+    _ = ipc.roundTripForTag(alloc, socket_path, .LabelClear, "", .Ack) catch |err| {
+        printLabelError(session_name, err);
+    };
 }
 
 /// Fetch terminal history from a session socket, returning it as an allocated
@@ -2748,9 +3204,13 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                             break :daemon_loop;
                         },
                         .Info => try daemon.handleInfo(client),
+                        .LabelGet => try daemon.handleLabelGet(client),
+                        .LabelSet => try daemon.handleLabelSet(client, msg.payload),
+                        .LabelUnset => try daemon.handleLabelUnset(client, msg.payload),
+                        .LabelClear => try daemon.handleLabelClear(client),
                         .History => try daemon.handleHistory(client, &term, msg.payload),
                         .Run => try daemon.handleRun(client, msg.payload),
-                        .Ack, .TaskComplete => {},
+                        .Ack, .TaskComplete, .LabelData => {},
                         .Write => try daemon.handleWrite(client, msg.payload),
                         _ => std.log.warn(
                             "ignoring unknown IPC tag={d}",

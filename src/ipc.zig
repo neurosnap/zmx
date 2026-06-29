@@ -18,6 +18,11 @@ pub const Tag = enum(u8) {
     Switch = 11,
     Write = 12,
     TaskComplete = 13,
+    LabelGet = 14,
+    LabelSet = 15,
+    LabelUnset = 16,
+    LabelClear = 17,
+    LabelData = 18,
     // Non-exhaustive: this enum comes off the wire via bytesToValue and
     // @enumFromInt, so out-of-range values (14-255) are representable
     // rather than UB. Switches must handle `_` (unknown tag).
@@ -249,6 +254,71 @@ pub fn probeSession(
     return error.Unexpected;
 }
 
+const ProbeWithLabelsResult = struct {
+    fd: i32,
+    info: Info,
+    labels: ?[]const u8,
+};
+
+/// Send Info and optionally LabelGet in a single batch, then read all
+/// responses in one poll. Old daemons that don't understand LabelGet
+/// silently ignore it, so no extra timeout is incurred.
+pub fn probeSessionWithLabels(
+    alloc: std.mem.Allocator,
+    socket_path: []const u8,
+    fetch_labels: bool,
+) SessionProbeError!ProbeWithLabelsResult {
+    const timeout_ms = 1000;
+    const fd = try connectSession(socket_path);
+    errdefer posix.close(fd);
+
+    // Send both requests in one batch — daemon processes them in order.
+    send(fd, .Info, "") catch return error.Unexpected;
+    if (fetch_labels) {
+        send(fd, .LabelGet, "") catch {};
+    }
+
+    var poll_fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
+    const poll_result = posix.poll(&poll_fds, timeout_ms) catch return error.Unexpected;
+    if (poll_result == 0) return error.Timeout;
+
+    var sb = SocketBuffer.init(alloc) catch return error.Unexpected;
+    defer sb.deinit();
+
+    var info_result: ?Info = null;
+    var labels: ?[]const u8 = null;
+    errdefer if (labels) |l| alloc.free(l);
+
+    // Read all available data — both Info and LabelData responses
+    // may arrive in the same read.
+    while (true) {
+        const n = sb.read(fd) catch break;
+        if (n == 0) break;
+
+        while (sb.next()) |msg| {
+            if (msg.header.tag == .Info) {
+                if (msg.payload.len == @sizeOf(Info)) {
+                    info_result = std.mem.bytesToValue(Info, msg.payload[0..@sizeOf(Info)]);
+                }
+            } else if (msg.header.tag == .LabelData) {
+                labels = alloc.dupe(u8, msg.payload) catch null;
+            }
+        }
+
+        // If we have Info and either got labels or didn't ask, we're done.
+        if (info_result != null and (!fetch_labels or labels != null)) break;
+
+        // Poll briefly for more data (LabelData might come in a second packet).
+        const more = posix.poll(&poll_fds, 50) catch break;
+        if (more == 0) break;
+    }
+
+    if (info_result) |info| {
+        return .{ .fd = fd, .info = info, .labels = labels };
+    }
+    return error.Unexpected;
+}
+
 //  WIRE PROTOCOL FREEZE — read before "fixing" any test below.
 //
 //  Changing these constants does not fix the test; it breaks every
@@ -268,8 +338,41 @@ test "Tag wire values are frozen" {
         .{ Tag.Detach, 3 }, .{ Tag.DetachAll, 4 },     .{ Tag.Kill, 5 },
         .{ Tag.Info, 6 },   .{ Tag.Init, 7 },          .{ Tag.History, 8 },
         .{ Tag.Run, 9 },    .{ Tag.Ack, 10 },          .{ Tag.Switch, 11 },
-        .{ Tag.Write, 12 }, .{ Tag.TaskComplete, 13 },
+        .{ Tag.Write, 12 }, .{ Tag.TaskComplete, 13 }, .{ Tag.LabelGet, 14 },
+        .{ Tag.LabelSet, 15 }, .{ Tag.LabelUnset, 16 }, .{ Tag.LabelClear, 17 },
+        .{ Tag.LabelData, 18 },
     }) |p| try std.testing.expectEqual(@as(u8, p[1]), @intFromEnum(p[0]));
+}
+
+pub fn roundTripForTag(
+    alloc: std.mem.Allocator,
+    socket_path: []const u8,
+    request_tag: Tag,
+    payload: []const u8,
+    expected_tag: Tag,
+) SessionProbeError![]u8 {
+    const timeout_ms = 1000;
+    const fd = try connectSession(socket_path);
+    defer posix.close(fd);
+
+    send(fd, request_tag, payload) catch return error.Unexpected;
+
+    var poll_fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
+    const poll_result = posix.poll(&poll_fds, timeout_ms) catch return error.Unexpected;
+    if (poll_result == 0) return error.Timeout;
+
+    var sb = SocketBuffer.init(alloc) catch return error.Unexpected;
+    defer sb.deinit();
+
+    const n = sb.read(fd) catch return error.Unexpected;
+    if (n == 0) return error.Unexpected;
+
+    while (sb.next()) |msg| {
+        if (msg.header.tag == expected_tag) {
+            return alloc.dupe(u8, msg.payload) catch return error.Unexpected;
+        }
+    }
+    return error.Unexpected;
 }
 
 test "zeroed Info has no stack garbage in wire bytes" {

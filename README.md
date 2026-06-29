@@ -83,7 +83,11 @@ Commands:
   [p]rint <name> <text...>                 Inject text into session display
   [wr]ite <name> <file_path>               Write stdin to file_path through the session
   [d]etach                                 Detach all clients (ctrl+\\ for current client)
-  [l]ist|ls [--short]                      List active sessions
+  [l]ist|ls [--short|--where k=v]           List active sessions
+  [g]et <name>                              Get session labels
+  set|z <name> k=v ...                       Set session labels
+  [un]set <name> key ...                    Remove session labels
+  [cl]ear <name>                            Clear all session labels
   [k]ill <name>... [--force]               Kill session and all attached clients
   [hi]story <name> [--vt|--html]           Output session scrollback
   [w]ait <name>...                         Wait for session tasks to complete
@@ -92,6 +96,44 @@ Commands:
   [v]ersion                                Show version and metadata (socket dir, log dir)
   [h]elp                                   Show this help
 ```
+
+## session labels
+
+Attach key=value labels to live sessions for discovery and filtering.
+
+```bash
+# Set labels
+zmx set mysession project=zmx env=dev
+
+# Read labels
+zmx get mysession
+
+# Remove a label
+zmx unset mysession env
+
+# Inside a session, "." resolves to current session
+zmx set . status=busy
+```
+
+Labels are shown by default in `zmx list` output. Use `--where` to filter:
+
+```bash
+# Exact match on a label
+zmx list --where project=zmx
+
+# Prefix match (trailing * wildcard)
+zmx list --where start_dir=/Users/max/code*
+
+# Combine filters (AND logic)
+zmx list --where project=zmx --where env=dev
+
+# Just session names, for scripting
+zmx list --short --where project=zmx
+```
+
+Built-in fields `name`, `start_dir`, and `cmd` are queryable via `--where` without setting any labels.
+
+Labels are in-memory and scoped to the session lifetime — they are not persisted after the session dies.
 
 ## shell prompt
 

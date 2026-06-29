@@ -37,6 +37,7 @@ pub fn build(b: *std.Build) void {
         // on PATH" (true even via the CLT stub), which pulls in the iOS SDK at
         // configure time and breaks builds without full Xcode.
         .@"emit-xcframework" = false,
+        .@"emit-macos-app" = false,
     });
     exe_mod.addImport(
         "ghostty-vt",
@@ -73,6 +74,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .@"emit-lib-vt" = true,
             .@"emit-xcframework" = false,
+            .@"emit-macos-app" = false,
         });
         test_module.addImport(
             "ghostty-vt",
@@ -126,6 +128,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = .ReleaseSafe,
                 .@"emit-lib-vt" = true,
                 .@"emit-xcframework" = false,
+                .@"emit-macos-app" = false,
             })) |release_dep| {
                 release_mod.addImport("ghostty-vt", release_dep.module("ghostty-vt"));
             }
