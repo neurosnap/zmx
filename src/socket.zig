@@ -44,11 +44,14 @@ pub fn cleanupStaleSocket(dir: std.fs.Dir, session_name: []const u8) void {
 }
 
 pub fn sessionExists(dir: std.fs.Dir, name: []const u8) !bool {
-    const stat = dir.statFile(name) catch |err| switch (err) {
+    // fstatatZ (not statFile) to avoid the statx syscall
+    // https://github.com/neurosnap/zmx/issues/186
+    const name_c = try posix.toPosixPath(name);
+    const stat = posix.fstatatZ(dir.fd, &name_c, posix.AT.SYMLINK_NOFOLLOW) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => return err,
     };
-    if (stat.kind != .unix_domain_socket) {
+    if (!posix.S.ISSOCK(stat.mode)) {
         return error.FileNotUnixSocket;
     }
     return true;

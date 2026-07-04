@@ -1,4 +1,5 @@
 const std = @import("std");
+const posix = std.posix;
 
 pub const LogSystem = struct {
     file: ?std.fs.File = null,
@@ -22,7 +23,9 @@ pub const LogSystem = struct {
             else => return err,
         };
 
-        const end_pos = try file.getEndPos();
+        // fstat (not getEndPos) to avoid the statx syscall; see #186.
+        const st = try posix.fstat(file.handle);
+        const end_pos: u64 = @intCast(st.size);
         try file.seekTo(end_pos);
         self.current_size = end_pos;
         self.file = file;
