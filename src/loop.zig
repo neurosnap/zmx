@@ -63,6 +63,8 @@ pub fn clientLoop(client_sock_fd: i32) !ClientResult {
     _ = try lib_posix.fcntl(stdin_fd, lib_posix.F.SETFL, stdin_orig_flags | lib_posix.O_NONBLOCK);
     defer _ = lib_posix.fcntl(stdin_fd, lib_posix.F.SETFL, stdin_orig_flags) catch {};
 
+    const detach_key_disabled = util.isDetachKeyDisabled();
+
     while (true) {
         poll_fds.clearRetainingCapacity();
 
@@ -113,7 +115,7 @@ pub fn clientLoop(client_sock_fd: i32) !ClientResult {
             if (n_opt) |n| {
                 if (n > 0) {
                     // Check for detach sequences (ctrl+\ as first byte or Kitty escape sequence)
-                    if (util.isCtrlBackslash(buf[0..n])) {
+                    if (!detach_key_disabled and util.isCtrlBackslash(buf[0..n])) {
                         std.log.info("detach key detected", .{});
                         try ipc.appendMessage(gpa, &sock_write_buf, .Detach, "");
                     } else {

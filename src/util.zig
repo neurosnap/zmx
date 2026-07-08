@@ -2,7 +2,9 @@ const std = @import("std");
 const ghostty_vt = @import("ghostty-vt");
 const ipc = @import("ipc.zig");
 const socket = @import("socket.zig");
+const cross = @import("cross.zig");
 const label = @import("label.zig");
+const lib_posix = @import("posix.zig");
 const testing = std.testing;
 
 pub const SessionEntry = struct {
@@ -465,6 +467,13 @@ fn modifyOtherMatches(buf: []const u8, expected_key: u32, expected_mods: u32) bo
 
     // 6. Expect '~' terminator.
     return pos < buf.len and buf[pos] == '~';
+}
+
+/// Returns true when the user has opted out of the ctrl+\ detach shortcut
+/// via ZMX_NO_DETACH_KEY, e.g. to free up ctrl+\ for an inner program
+/// like vim, which uses ctrl+\ ctrl+n to escape its own terminal mode.
+pub fn isDetachKeyDisabled() bool {
+    return lib_posix.getenv("ZMX_NO_DETACH_KEY") != null;
 }
 
 /// Detects vt100 or kitty keyboard protocol escape sequence for up arrow.
@@ -1181,6 +1190,15 @@ test "isCtrlBackslash xterm modifyOtherKeys" {
     try expect(!isCtrlBackslash("\x1b[27;5"));
     try expect(!isCtrlBackslash("\x1b[27;5;"));
     try expect(!isCtrlBackslash("\x1b[27;5;92"));
+}
+
+test "isDetachKeyDisabled" {
+    _ = cross.c.unsetenv("ZMX_NO_DETACH_KEY");
+    try testing.expect(!isDetachKeyDisabled());
+
+    _ = cross.c.setenv("ZMX_NO_DETACH_KEY", "1", 1);
+    defer _ = cross.c.unsetenv("ZMX_NO_DETACH_KEY");
+    try testing.expect(isDetachKeyDisabled());
 }
 
 test "serializeTerminalState excludes synchronized output replay" {
