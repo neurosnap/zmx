@@ -10,7 +10,7 @@
     let
       flake-utils = zig2nix.inputs.flake-utils;
     in
-    (flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (
+    (flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" "x86_64-darwin" ] (
       system:
       let
         env = zig2nix.outputs.zig-env.${system} {
@@ -20,11 +20,30 @@
       with builtins;
       with env.pkgs.lib;
       let
-        zmx-package = env.package {
-          src = cleanSource ./.;
-          zigBuildFlags = [ "-Doptimize=ReleaseSafe" ];
-          zigPreferMusl = true;
-        };
+        isDarwin = env.pkgs.stdenv.hostPlatform.isDarwin;
+        sdkRoot = env.pkgs.apple-sdk.sdkroot;
+        xcrunWrapper = env.pkgs.writeShellScriptBin "xcrun" ''
+          echo "${sdkRoot}"
+        '';
+        xcodeselectWrapper = env.pkgs.writeShellScriptBin "xcode-select" ''
+          echo "${sdkRoot}"
+        '';
+
+        zmx-package = env.package (
+          {
+            src = cleanSource ./.;
+            zigBuildFlags = [ "-Doptimize=ReleaseSafe" ];
+            zigPreferMusl = !isDarwin;
+          }
+          // optionalAttrs isDarwin {
+            glibc = null;
+            musl = null;
+            nativeBuildInputs = [
+              xcrunWrapper
+              xcodeselectWrapper
+            ];
+          }
+        );
       in
       {
         packages = {
