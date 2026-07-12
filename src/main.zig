@@ -522,12 +522,20 @@ const Cfg = struct {
     }
 
     pub fn mkdir(self: *Cfg) !void {
-        posix.mkdirat(posix.AT.FDCWD, self.socket_dir, @intCast(self.dir_mode)) catch |err| switch (err) {
+        posix.mkdirat(
+            posix.AT.FDCWD,
+            self.socket_dir,
+            @intCast(self.dir_mode),
+        ) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
 
-        posix.mkdirat(posix.AT.FDCWD, self.log_dir, @intCast(self.dir_mode)) catch |err| switch (err) {
+        posix.mkdirat(
+            posix.AT.FDCWD,
+            self.log_dir,
+            @intCast(self.dir_mode),
+        ) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
@@ -596,6 +604,8 @@ const Daemon = struct {
     task_ended_at: ?u64 = null, // timestamp when task exited
     pty_fd: i32 = -1, // set by daemonLoop so handleRun can probe the foreground process
     pty_write_buf: std.ArrayList(u8) = .empty,
+
+    const PTY_WRITE_BUF_MAX = 256 * 1024;
 
     const EnsureSessionResult = struct {
         created: bool,
@@ -733,6 +743,133 @@ const Daemon = struct {
         return master_fd;
     }
 
+    fn isSessionAvailable(self: *Daemon, dir: std.fs.Dir) bool {
+        if (ipc.connectSession(self.socket_path)) |fd| {
+            posix.close(fd);
+            if (self.command != null) {
+                std.log.warn(
+                    "session already exists, ignoring command session={s}",
+                    .{self.session_name},
+                );
+            }
+        } else |err| switch (err) {
+            // Daemon is definitively gone: safe to replace.
+            error.ConnectionRefused => {
+                socket.cleanupStaleSocket(dir, self.session_name);
+                return false;
+            },
+            // Connect failed for an unusual reason. The check is only to
+            // decide create-vs-attach; the socket file exists, so proceed
+            // to attach rather than fail or orphan.
+            else => {
+                std.log.warn(
+                    "connect failed ({s}), proceeding to attach session={s}",
+                    .{ @errorName(err), self.session_name },
+                );
+            },
+        }
+
+        return true;
+    }
+
+    fn createNewSession(self: *Daemon, dir: std.fs.Dir) !EnsureSessionResult {
+        std.log.info("creating session={s}", .{self.session_name});
+        const server_sock_fd = try socket.createSocket(self.socket_path);
+
+        // creates the daemon
+        const pid = try posix.fork();
+        if (pid == 0) {
+            // child (daemon)
+            // becomes the session leader and detaches process from its controlling terminal
+            _ = try posix.setsid();
+
+            log_system.deinit();
+
+            // Redirect stdin/stdout/stderr to /dev/null. The daemon
+            // communicates via its unix socket, not stdio. Without
+            // this, any pipe on FDs 0-2 (e.g. from bats' `run`
+            // keyword) stays open for the daemon's lifetime, causing
+            // the caller to hang waiting for EOF.
+            {
+                const devnull = std.posix.open(
+                    "/dev/null",
+                    .{ .ACCMODE = .RDWR },
+                    0,
+                ) catch |err| {
+                    std.log.warn("failed to open /dev/null: {s}", .{@errorName(err)});
+                    return err;
+                };
+                inline for (.{ posix.STDIN_FILENO, posix.STDOUT_FILENO, posix.STDERR_FILENO }) |fd| {
+                    _ = posix.dup2(devnull, fd) catch |err| {
+                        std.log.warn("dup2 /dev/null -> {d}: {s}", .{ fd, @errorName(err) });
+                        return err;
+                    };
+                }
+                if (devnull > 2) posix.close(devnull);
+            }
+
+            // Close file descriptors inherited from the parent that the
+            // daemon doesn't need. This prevents test harnesses (like
+            // bats) from hanging -- they wait for their internal FDs (3+)
+            // to close before exiting.
+            //
+            // Must run BEFORE log_system.init() otherwise the new log
+            // FD gets closed, and spawnPty() reuses that FD number for
+            // the PTY master, causing log writes to leak into the terminal.
+            //
+            // Skip server_sock_fd (needed for IPC) and dir.fd (needed to
+            // delete the socket file on shutdown).
+            {
+                const dir_fd = @as(i32, @intCast(dir.fd));
+                var fd: i32 = 3;
+                while (fd < 64) : (fd += 1) {
+                    if (fd == server_sock_fd or fd == dir_fd) continue;
+                    _ = std.c.close(fd);
+                }
+            }
+
+            const session_log_name = try std.fmt.allocPrint(
+                self.alloc,
+                "{s}.log",
+                .{self.session_name},
+            );
+            defer self.alloc.free(session_log_name);
+            const session_log_path = try std.fs.path.join(
+                self.alloc,
+                &.{ self.cfg.log_dir, session_log_name },
+            );
+            defer self.alloc.free(session_log_path);
+            try log_system.init(self.alloc, session_log_path, self.cfg.log_mode);
+
+            // If spawnPty fails, clean up here. Once it succeeds,
+            // the inner block's defer takes ownership of cleanup to
+            // avoid double-closing server_sock_fd on daemonLoop error.
+            const pty_fd = self.spawnPty() catch |err| {
+                posix.close(server_sock_fd);
+                dir.deleteFile(self.session_name) catch {};
+                return err;
+            };
+
+            defer {
+                self.handleKill();
+                self.deinit();
+                posix.close(pty_fd);
+                _ = posix.waitpid(self.pid, 0);
+                posix.close(server_sock_fd);
+                std.log.info("deleting socket file session={s}", .{self.session_name});
+                dir.deleteFile(self.session_name) catch |err| {
+                    std.log.warn("failed to delete socket file err={s}", .{@errorName(err)});
+                };
+            }
+
+            try daemonLoop(self, server_sock_fd, pty_fd);
+            return .{ .created = true, .is_daemon = true };
+        }
+        posix.close(server_sock_fd);
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+        return .{ .created = true, .is_daemon = false };
+    }
+
     /// ensureSession "upserts" a session by checking if the unix socket exists already.
     /// If not it creates one and spawns the daemon.
     fn ensureSession(self: *Daemon) !EnsureSessionResult {
@@ -740,136 +877,14 @@ const Daemon = struct {
         defer dir.close();
 
         const exists = try socket.sessionExists(dir, self.session_name);
-        var should_create = !exists;
-
-        if (exists) {
-            if (ipc.connectSession(self.socket_path)) |fd| {
-                posix.close(fd);
-                if (self.command != null) {
-                    std.log.warn(
-                        "session already exists, ignoring command session={s}",
-                        .{self.session_name},
-                    );
-                }
-            } else |err| switch (err) {
-                // Daemon is definitively gone: safe to replace.
-                error.ConnectionRefused => {
-                    socket.cleanupStaleSocket(dir, self.session_name);
-                    should_create = true;
-                },
-                // Connect failed for an unusual reason. The check is only to
-                // decide create-vs-attach; the socket file exists, so proceed
-                // to attach rather than fail or orphan.
-                else => {
-                    std.log.warn(
-                        "connect failed ({s}), proceeding to attach session={s}",
-                        .{ @errorName(err), self.session_name },
-                    );
-                },
-            }
-        }
+        const should_create = !(exists and self.isSessionAvailable(dir));
 
         if (should_create) {
-            std.log.info("creating session={s}", .{self.session_name});
-            const server_sock_fd = try socket.createSocket(self.socket_path);
-
-            // creates the daemon
-            const pid = try posix.fork();
-            if (pid == 0) { // child (daemon)
-                // becomes the session leader and detaches process from its controlling terminal
-                _ = try posix.setsid();
-
-                log_system.deinit();
-
-                // Redirect stdin/stdout/stderr to /dev/null. The daemon
-                // communicates via its unix socket, not stdio. Without
-                // this, any pipe on FDs 0-2 (e.g. from bats' `run`
-                // keyword) stays open for the daemon's lifetime, causing
-                // the caller to hang waiting for EOF.
-                {
-                    const devnull = std.posix.open(
-                        "/dev/null",
-                        .{ .ACCMODE = .RDWR },
-                        0,
-                    ) catch |err| {
-                        std.log.warn("failed to open /dev/null: {s}", .{@errorName(err)});
-                        return err;
-                    };
-                    inline for (.{ posix.STDIN_FILENO, posix.STDOUT_FILENO, posix.STDERR_FILENO }) |fd| {
-                        _ = posix.dup2(devnull, fd) catch |err| {
-                            std.log.warn("dup2 /dev/null -> {d}: {s}", .{ fd, @errorName(err) });
-                            return err;
-                        };
-                    }
-                    if (devnull > 2) posix.close(devnull);
-                }
-
-                // Close file descriptors inherited from the parent that the
-                // daemon doesn't need. This prevents test harnesses (like
-                // bats) from hanging -- they wait for their internal FDs (3+)
-                // to close before exiting.
-                //
-                // Must run BEFORE log_system.init() otherwise the new log
-                // FD gets closed, and spawnPty() reuses that FD number for
-                // the PTY master, causing log writes to leak into the terminal.
-                //
-                // Skip server_sock_fd (needed for IPC) and dir.fd (needed to
-                // delete the socket file on shutdown).
-                {
-                    const dir_fd = @as(i32, @intCast(dir.fd));
-                    var fd: i32 = 3;
-                    while (fd < 64) : (fd += 1) {
-                        if (fd == server_sock_fd or fd == dir_fd) continue;
-                        _ = std.c.close(fd);
-                    }
-                }
-
-                const session_log_name = try std.fmt.allocPrint(
-                    self.alloc,
-                    "{s}.log",
-                    .{self.session_name},
-                );
-                defer self.alloc.free(session_log_name);
-                const session_log_path = try std.fs.path.join(
-                    self.alloc,
-                    &.{ self.cfg.log_dir, session_log_name },
-                );
-                defer self.alloc.free(session_log_path);
-                try log_system.init(self.alloc, session_log_path, self.cfg.log_mode);
-
-                // If spawnPty fails, clean up here. Once it succeeds,
-                // the inner block's defer takes ownership of cleanup to
-                // avoid double-closing server_sock_fd on daemonLoop error.
-                const pty_fd = self.spawnPty() catch |err| {
-                    posix.close(server_sock_fd);
-                    dir.deleteFile(self.session_name) catch {};
-                    return err;
-                };
-
-                defer {
-                    self.handleKill();
-                    self.deinit();
-                    posix.close(pty_fd);
-                    _ = posix.waitpid(self.pid, 0);
-                    posix.close(server_sock_fd);
-                    std.log.info("deleting socket file session={s}", .{self.session_name});
-                    dir.deleteFile(self.session_name) catch |err| {
-                        std.log.warn("failed to delete socket file err={s}", .{@errorName(err)});
-                    };
-                }
-
-                try daemonLoop(self, server_sock_fd, pty_fd);
-                return .{ .created = true, .is_daemon = true };
-            }
-            posix.close(server_sock_fd);
-            std.Thread.sleep(10 * std.time.ns_per_ms);
-            return .{ .created = true, .is_daemon = false };
+            return self.createNewSession(dir);
         }
 
         return .{ .created = false, .is_daemon = false };
     }
-
-    const PTY_WRITE_BUF_MAX = 256 * 1024;
 
     /// Queue bytes for the PTY's stdin. Flushed by daemonLoop on POLLOUT.
     /// Drops the payload if the buffer is over cap -- same failure mode as
@@ -911,21 +926,22 @@ const Daemon = struct {
 
     pub fn handleSwitch(self: *Daemon, session_name: []const u8) !void {
         for (self.clients.items) |client| {
-            if (self.leader_client_fd == client.socket_fd) {
-                ipc.appendMessage(
-                    self.alloc,
-                    &client.write_buf,
-                    .Switch,
-                    session_name,
-                ) catch |err| {
-                    std.log.warn(
-                        "failed to buffer terminal state for client err={s}",
-                        .{@errorName(err)},
-                    );
-                };
-                client.has_pending_output = true;
-                return;
+            if (self.leader_client_fd != client.socket_fd) {
+                continue;
             }
+            ipc.appendMessage(
+                self.alloc,
+                &client.write_buf,
+                .Switch,
+                session_name,
+            ) catch |err| {
+                std.log.warn(
+                    "failed to buffer terminal state for client err={s}",
+                    .{@errorName(err)},
+                );
+            };
+            client.has_pending_output = true;
+            return;
         }
         return error.NoLeaderFound;
     }
