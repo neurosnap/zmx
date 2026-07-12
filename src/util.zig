@@ -478,39 +478,66 @@ fn parseDecimal(buf: []const u8, pos: *usize) ?u32 {
     return value;
 }
 
-/// Detect if the payload contains user input that should be printed to the screen or
-/// is a key combination like up-arrow, backspace, enter, ctrl+f, etc.
-pub fn isUserInput(payload: []const u8) bool {
+/// How the daemon should treat input arriving from a non-leader client.
+pub const InputClass = enum {
+    /// Terminal chatter (query responses, focus reports, mouse motion):
+    /// neither forwarded nor leader-switching.
+    ignore,
+    /// Intentional typing: switches leader and is forwarded to the pty.
+    keyboard,
+    /// Intentional pointer input (button press or wheel): switches leader
+    /// but is swallowed — its coordinates were aimed at a screen laid out
+    /// for the previous leader's size (click-to-focus).
+    pointer,
+};
+
+/// Classify input from a non-leader client: printable text and key
+/// combinations (up-arrow, backspace, enter, ctrl+f, etc.) are .keyboard,
+/// deliberate pointer gestures (SGR button press or wheel) are .pointer,
+/// anything a terminal emits on the user's behalf is .ignore.
+pub fn classifyInput(payload: []const u8) InputClass {
     var parser = ghostty_vt.Parser.init();
     for (payload) |c| {
         const actions = parser.next(c);
         for (actions) |action_opt| {
             const action = action_opt orelse continue;
             switch (action) {
-                .print => return true, // printable characters
+                .print => return .keyboard, // printable characters
                 .csi_dispatch => |csi| {
                     // kitty keyboard: CSI ... u or CSI ... ~
                     // legacy modified keys: CSI 27 ; ... ~
                     // arrow/function keys with modifiers: CSI 1 ; <mod> A-D
-                    if (csi.final == 'u' or csi.final == '~') return true;
+                    if (csi.final == 'u' or csi.final == '~') return .keyboard;
                     // modified arrow keys (e.g., Ctrl+F sends CSI 1;5C in legacy mode)
-                    if (csi.final >= 'A' and csi.final <= 'D' and csi.params.len > 1) return true;
-                    // mouse events: CSI M (basic) or CSI < (SGR extended) - EXCLUDE these
-                    // only intentional keyboard input should trigger leader switch
-                    if (csi.final == 'M' or csi.final == '<') return false;
+                    if (csi.final >= 'A' and csi.final <= 'D' and csi.params.len > 1) return .keyboard;
+                    // SGR mouse (CSI < b;x;y M/m): press and wheel are aimed
+                    // at the pane, so they claim leadership; motion (bit 32)
+                    // is ambient and release ('m') always follows a press
+                    if (csi.intermediates.len == 1 and csi.intermediates[0] == '<') {
+                        if (csi.final == 'M' and csi.params.len > 0) {
+                            const button = csi.params[0];
+                            const wheel = button & 64 != 0;
+                            const press = button & 3 != 3;
+                            if (button & 32 == 0 and (wheel or press)) return .pointer;
+                        }
+                        return .ignore;
+                    }
+                    // legacy X10 mouse (CSI M + three raw bytes): stop here so
+                    // the coordinate bytes can't be misread as printable input
+                    if (csi.final == 'M') return .ignore;
                     // focus events: CSI I (focus in) or CSI O (focus out) - EXCLUDE these
                     // these are automatic terminal events, not user typing
-                    if (csi.final == 'I' or csi.final == 'O') return false;
+                    if (csi.final == 'I' or csi.final == 'O') return .ignore;
                 },
                 .execute => |code| {
                     // looking for CR, LF, tab, and backspace
-                    if (code == 0x0D or code == 0x0A or code == 0x09 or code == 0x08) return true;
+                    if (code == 0x0D or code == 0x0A or code == 0x09 or code == 0x08) return .keyboard;
                 },
                 else => {},
             }
         }
     }
-    return false;
+    return .ignore;
 }
 
 pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Terminal) ?[]const u8 {
@@ -1311,148 +1338,162 @@ test "serializeTerminalState scrollback + size mismatch nested roundtrip" {
     try expectCursorAt(&client, inner_cursor_y, inner_cursor_x);
 }
 
-test "isUserInput: printable characters" {
+test "classifyInput: printable characters" {
     // Regular text should be detected as user input
-    try testing.expect(isUserInput("hello"));
-    try testing.expect(isUserInput("Hello World!"));
-    try testing.expect(isUserInput("12345"));
-    try testing.expect(isUserInput("!@#$%^&*()"));
+    try testing.expectEqual(InputClass.keyboard, classifyInput("hello"));
+    try testing.expectEqual(InputClass.keyboard, classifyInput("Hello World!"));
+    try testing.expectEqual(InputClass.keyboard, classifyInput("12345"));
+    try testing.expectEqual(InputClass.keyboard, classifyInput("!@#$%^&*()"));
 }
 
-test "isUserInput: whitespace characters" {
+test "classifyInput: whitespace characters" {
     // Space character is printable
-    try testing.expect(isUserInput(" "));
-    try testing.expect(isUserInput("   "));
+    try testing.expectEqual(InputClass.keyboard, classifyInput(" "));
+    try testing.expectEqual(InputClass.keyboard, classifyInput("   "));
 }
 
-test "isUserInput: line feed (LF)" {
+test "classifyInput: line feed (LF)" {
     // LF triggers .execute action
-    try testing.expect(isUserInput("\n"));
-    try testing.expect(isUserInput("test\n"));
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\n"));
+    try testing.expectEqual(InputClass.keyboard, classifyInput("test\n"));
 }
 
-test "isUserInput: carriage return (CR)" {
+test "classifyInput: carriage return (CR)" {
     // CR triggers .execute action
-    try testing.expect(isUserInput("\r"));
-    try testing.expect(isUserInput("test\r"));
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\r"));
+    try testing.expectEqual(InputClass.keyboard, classifyInput("test\r"));
 }
 
-test "isUserInput: tab" {
+test "classifyInput: tab" {
     // Tab triggers .execute action
-    try testing.expect(isUserInput("\t"));
-    try testing.expect(isUserInput("col1\tcol2"));
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\t"));
+    try testing.expectEqual(InputClass.keyboard, classifyInput("col1\tcol2"));
 }
 
-test "isUserInput: backspace" {
+test "classifyInput: backspace" {
     // Backspace triggers .execute action
-    try testing.expect(isUserInput("\x08"));
-    try testing.expect(isUserInput("test\x08"));
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\x08"));
+    try testing.expectEqual(InputClass.keyboard, classifyInput("test\x08"));
 }
 
-test "isUserInput: arrow keys (CSI ~)" {
+test "classifyInput: arrow keys (CSI ~)" {
     // Arrow keys use CSI with ~ - these have params
-    try testing.expect(isUserInput("\x1b[3~")); // delete
-    try testing.expect(isUserInput("\x1b[5~")); // page up
-    try testing.expect(isUserInput("\x1b[6~")); // page down
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\x1b[3~")); // delete
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\x1b[5~")); // page up
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\x1b[6~")); // page down
 }
 
-test "isUserInput: modified arrow keys with CSI u" {
+test "classifyInput: modified arrow keys with CSI u" {
     // Modified arrow keys with CSI ... u
-    try testing.expect(isUserInput("\x1bOA")); // up with modifier
-    try testing.expect(isUserInput("\x1bOB")); // down with modifier
-    try testing.expect(isUserInput("\x1bOC")); // right with modifier
-    try testing.expect(isUserInput("\x1bOD")); // left with modifier
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\x1bOA")); // up with modifier
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\x1bOB")); // down with modifier
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\x1bOC")); // right with modifier
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\x1bOD")); // left with modifier
 }
 
-test "isUserInput: up arrow legacy" {
+test "classifyInput: up arrow legacy" {
     // Legacy up arrow: CSI A (with params for kitty-style)
-    try testing.expect(isUserInput("\x1b[1;1A")); // kitty-style legacy
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\x1b[1;1A")); // kitty-style legacy
 }
 
-test "isUserInput: up arrow kitty" {
+test "classifyInput: up arrow kitty" {
     // Kitty keyboard up arrow: CSI 1;1;1A (no colon format supported by parser)
-    try testing.expect(isUserInput("\x1b[1;1;1A")); // kitty up arrow
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\x1b[1;1;1A")); // kitty up arrow
 }
 
-test "isUserInput: arrow keys with modifier params CSI A-D" {
+test "classifyInput: arrow keys with modifier params CSI A-D" {
     // Modified arrow keys like Ctrl+Up: CSI 1;5A
-    try testing.expect(isUserInput("\x1b[1;5A")); // Ctrl+Up
-    try testing.expect(isUserInput("\x1b[1;5B")); // Ctrl+Down
-    try testing.expect(isUserInput("\x1b[1;5C")); // Ctrl+Right
-    try testing.expect(isUserInput("\x1b[1;5D")); // Ctrl+Left
-    try testing.expect(isUserInput("\x1b[1;3A")); // Alt+Up
-    try testing.expect(isUserInput("\x1b[1;3B")); // Alt+Down
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\x1b[1;5A")); // Ctrl+Up
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\x1b[1;5B")); // Ctrl+Down
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\x1b[1;5C")); // Ctrl+Right
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\x1b[1;5D")); // Ctrl+Left
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\x1b[1;3A")); // Alt+Up
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\x1b[1;3B")); // Alt+Down
 }
 
-test "isUserInput: function keys with modifiers CSI 27 ; ~" {
+test "classifyInput: function keys with modifiers CSI 27 ; ~" {
     // Legacy modified keys: CSI 27 ; ... ~
-    try testing.expect(isUserInput("\x1b[15;2~")); // F4 with modifier
-    try testing.expect(isUserInput("\x1b[17;2~")); // F5 with modifier
-    try testing.expect(isUserInput("\x1b[18;2~")); // F6 with modifier
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\x1b[15;2~")); // F4 with modifier
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\x1b[17;2~")); // F5 with modifier
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\x1b[18;2~")); // F6 with modifier
 }
 
-test "isUserInput: enter key" {
+test "classifyInput: enter key" {
     // Enter is LF (0x0A)
-    try testing.expect(isUserInput("\x0A"));
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\x0A"));
 }
 
-test "isUserInput: mixed content" {
+test "classifyInput: mixed content" {
     // Mix of printable and control sequences
-    try testing.expect(isUserInput("hello\nworld"));
-    try testing.expect(isUserInput("\x1b[3~\x1b[6~")); // multiple CSI ~ sequences
-    try testing.expect(isUserInput("abc\x1b[3~def")); // text with CSI ~
+    try testing.expectEqual(InputClass.keyboard, classifyInput("hello\nworld"));
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\x1b[3~\x1b[6~")); // multiple CSI ~ sequences
+    try testing.expectEqual(InputClass.keyboard, classifyInput("abc\x1b[3~def")); // text with CSI ~
 }
 
-test "isUserInput: non-user input (escape sequences only)" {
+test "classifyInput: non-user input (escape sequences only)" {
     // Cursor movement without user input
-    try testing.expect(!isUserInput("\x1b[2;1H")); // CSI H cursor home
+    try testing.expectEqual(InputClass.ignore, classifyInput("\x1b[2;1H")); // CSI H cursor home
     // SGR color set (no printing)
-    try testing.expect(!isUserInput("\x1b[0m"));
+    try testing.expectEqual(InputClass.ignore, classifyInput("\x1b[0m"));
     // Cursor position report query
-    try testing.expect(!isUserInput("\x1b[6n"));
+    try testing.expectEqual(InputClass.ignore, classifyInput("\x1b[6n"));
 }
 
-test "isUserInput: empty string" {
-    try testing.expect(!isUserInput(""));
+test "classifyInput: SGR attribute does not mask trailing keyboard input" {
+    // CSI 0 m is a graphics reset, not a mouse event — text after it counts
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\x1b[0mhello"));
 }
 
-test "isUserInput: only whitespace controls" {
+test "classifyInput: empty string" {
+    try testing.expectEqual(InputClass.ignore, classifyInput(""));
+}
+
+test "classifyInput: only whitespace controls" {
     // Multiple control chars should return true
-    try testing.expect(isUserInput("\n\r\t"));
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\n\r\t"));
 }
 
-test "isUserInput: kitty keyboard sequences" {
+test "classifyInput: kitty keyboard sequences" {
     // Kitty keyboard protocol uses CSI u
-    try testing.expect(isUserInput("\x1b[11;2u")); // F1 with modifier
-    try testing.expect(isUserInput("\x1b[12;2u")); // F2 with modifier
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\x1b[11;2u")); // F1 with modifier
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\x1b[12;2u")); // F2 with modifier
 }
 
-test "isUserInput: mouse events (CSI M) excluded" {
-    // Basic mouse tracking (SGR disabled): CSI M Cb Cx Cy
-    // Mouse events should NOT trigger leader switch
-    try testing.expect(!isUserInput("\x1b[M@ 0 0")); // button 0, pos 0,0
-    try testing.expect(!isUserInput("\x1b[M@ 1 1")); // button 1, pos 1,1
+test "classifyInput: legacy X10 mouse (CSI M) ignored" {
+    // Basic mouse tracking (SGR disabled): CSI M Cb Cx Cy — the raw
+    // coordinate bytes must not be misread as printable input either
+    try testing.expectEqual(InputClass.ignore, classifyInput("\x1b[M@ 0 0")); // button 0, pos 0,0
+    try testing.expectEqual(InputClass.ignore, classifyInput("\x1b[M@ 1 1")); // button 1, pos 1,1
 }
 
-test "isUserInput: mouse events SGR mode CSI < excluded" {
-    // SGR extended mouse tracking: CSI < Cb;Cx;Y M
-    // Mouse events should NOT trigger leader switch
-    try testing.expect(!isUserInput("\x1b[<0;1;1M")); // button release
-    try testing.expect(!isUserInput("\x1b[<64;1;1M")); // button press
+test "classifyInput: SGR button press and wheel claim leadership" {
+    try testing.expectEqual(InputClass.pointer, classifyInput("\x1b[<0;1;1M")); // left press
+    try testing.expectEqual(InputClass.pointer, classifyInput("\x1b[<2;10;5M")); // right press
+    try testing.expectEqual(InputClass.pointer, classifyInput("\x1b[<16;1;1M")); // ctrl+left press
+    try testing.expectEqual(InputClass.pointer, classifyInput("\x1b[<64;1;1M")); // wheel up
+    try testing.expectEqual(InputClass.pointer, classifyInput("\x1b[<65;1;1M")); // wheel down
+    try testing.expectEqual(InputClass.pointer, classifyInput("\x1b[<69;1;1M")); // shift+wheel down
 }
 
-test "isUserInput: focus events excluded" {
+test "classifyInput: SGR motion and release stay ignored" {
+    try testing.expectEqual(InputClass.ignore, classifyInput("\x1b[<32;2;2M")); // left drag motion
+    try testing.expectEqual(InputClass.ignore, classifyInput("\x1b[<35;2;2M")); // any-motion hover
+    try testing.expectEqual(InputClass.ignore, classifyInput("\x1b[<0;1;1m")); // left release
+    try testing.expectEqual(InputClass.ignore, classifyInput("\x1b[<96;2;2M")); // wheel + motion bit
+}
+
+test "classifyInput: focus events excluded" {
     // Focus in/out are automatic terminal events, not user typing
-    try testing.expect(!isUserInput("\x1b[I")); // focus in
-    try testing.expect(!isUserInput("\x1b[O")); // focus out
+    try testing.expectEqual(InputClass.ignore, classifyInput("\x1b[I")); // focus in
+    try testing.expectEqual(InputClass.ignore, classifyInput("\x1b[O")); // focus out
 }
 
-test "isUserInput: bracketed paste included" {
+test "classifyInput: bracketed paste included" {
     // Bracketed paste start/end are user-initiated paste operations
-    try testing.expect(isUserInput("\x1b[200~")); // paste start
-    try testing.expect(isUserInput("\x1b[201~")); // paste end
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\x1b[200~")); // paste start
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\x1b[201~")); // paste end
     // Content between start/end is also user input
-    try testing.expect(isUserInput("\x1b[200~hello\x1b[201~"));
+    try testing.expectEqual(InputClass.keyboard, classifyInput("\x1b[200~hello\x1b[201~"));
 }
 
 test "stripAnsi: plain text passes through" {

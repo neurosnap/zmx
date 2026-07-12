@@ -902,10 +902,15 @@ const Daemon = struct {
             return;
         }
 
-        // check if leader needs to be updated by detecting any user input
-        if (util.isUserInput(payload)) {
-            try self.setLeader(client);
-            self.queuePtyInput(payload);
+        // check if leader needs to be updated by detecting intentional input
+        switch (util.classifyInput(payload)) {
+            .keyboard => {
+                try self.setLeader(client);
+                self.queuePtyInput(payload);
+            },
+            // claims leadership but is swallowed (see InputClass.pointer)
+            .pointer => try self.setLeader(client),
+            .ignore => {},
         }
     }
 
