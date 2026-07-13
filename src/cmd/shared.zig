@@ -1,7 +1,14 @@
 const std = @import("std");
+const Cfg = @import("../Cfg.zig").Cfg;
 const log = @import("../log.zig");
+const ipc = @import("../ipc.zig");
+const socket = @import("../socket.zig");
 
 pub var log_system = log.LogSystem{};
+
+pub const io_buf_size = 4096;
+pub const initial_poll_capacity = 8;
+pub const initial_client_capacity = 10;
 
 pub const O_NONBLOCK: usize = 1 << @bitOffsetOf(std.posix.O, "NONBLOCK");
 
@@ -58,4 +65,49 @@ pub fn printUsage(cmd_name: []const u8, usage: []const u8) !void {
     var w = std.fs.File.stderr().writer(&buf);
     try w.interface.print("Usage: zmx {s} {s}\n", .{ cmd_name, usage });
     try w.interface.flush();
+}
+
+pub fn fetchHistory(alloc: std.mem.Allocator, cfg: *Cfg, session_name: []const u8) ![]const u8 {
+    const socket_path = try socket.getSocketPathChecked(alloc, cfg.socket_dir, session_name);
+    defer alloc.free(socket_path);
+
+    var dir = try std.fs.openDirAbsolute(cfg.socket_dir, .{});
+    defer dir.close();
+
+    if (!try socket.sessionExists(dir, session_name)) return error.SessionNotFound;
+
+    const fd = ipc.connectSession(socket_path) catch |err| {
+        if (err == error.ConnectionRefused) socket.cleanupStaleSocket(dir, session_name);
+        return err;
+    };
+    defer std.posix.close(fd);
+
+    const payload = [_]u8{0}; // HistoryFormat.plain
+    ipc.send(fd, .History, &payload) catch |err| switch (err) {
+        error.BrokenPipe, error.ConnectionResetByPeer => return error.SessionUnresponsive,
+        else => return err,
+    };
+
+    var sb = try ipc.SocketBuffer.init(alloc);
+    defer sb.deinit();
+
+    var result = std.ArrayList(u8).initCapacity(alloc, ipc.socket_buffer_size) catch return error.OutOfMemory;
+    errdefer result.deinit(alloc);
+
+    while (true) {
+        var poll_fds = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
+        const poll_result = std.posix.poll(&poll_fds, ipc.history_poll_timeout_ms) catch return error.Timeout;
+        if (poll_result == 0) return error.Timeout;
+
+        const n = sb.read(fd) catch return error.ReadFailed;
+        if (n == 0) break;
+
+        while (sb.next()) |msg| {
+            if (msg.header.tag == .History) {
+                try result.appendSlice(alloc, msg.payload);
+                return result.toOwnedSlice(alloc);
+            }
+        }
+    }
+    return error.NoHistoryResponse;
 }

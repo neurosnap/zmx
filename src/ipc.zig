@@ -50,8 +50,12 @@ pub fn getTerminalSize(fd: i32) Resize {
     return .{ .rows = 24, .cols = 160 };
 }
 
+pub const socket_buffer_size = 4096;
+pub const client_write_buf_size = 65536;
 pub const MAX_CMD_LEN = 256;
 pub const MAX_CWD_LEN = 256;
+pub const probe_timeout_ms = 1000;
+pub const history_poll_timeout_ms = 5000;
 
 /// Frozen wire shape. Do NOT add fields — new stats go in new `Tag` values
 /// so old daemons (whose `_` arm ignores unknown tags) stay reachable.
@@ -139,7 +143,7 @@ pub const SocketBuffer = struct {
 
     pub fn init(alloc: std.mem.Allocator) !SocketBuffer {
         return .{
-            .buf = try std.ArrayList(u8).initCapacity(alloc, 4096),
+            .buf = try std.ArrayList(u8).initCapacity(alloc, socket_buffer_size),
             .alloc = alloc,
             .head = 0,
         };
@@ -165,7 +169,7 @@ pub const SocketBuffer = struct {
             self.head = 0;
         }
 
-        var tmp: [4096]u8 = undefined;
+        var tmp: [socket_buffer_size]u8 = undefined;
         const n = try posix.read(fd, &tmp);
         if (n > 0) {
             try self.buf.appendSlice(self.alloc, tmp[0..n]);
@@ -219,14 +223,13 @@ pub fn probeSession(
     alloc: std.mem.Allocator,
     socket_path: []const u8,
 ) SessionProbeError!SessionProbeResult {
-    const timeout_ms = 1000;
     const fd = try connectSession(socket_path);
     errdefer posix.close(fd);
 
     send(fd, .Info, "") catch return error.Unexpected;
 
     var poll_fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
-    const poll_result = posix.poll(&poll_fds, timeout_ms) catch return error.Unexpected;
+    const poll_result = posix.poll(&poll_fds, probe_timeout_ms) catch return error.Unexpected;
     if (poll_result == 0) {
         return error.Timeout;
     }

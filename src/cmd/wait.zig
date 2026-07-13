@@ -4,19 +4,22 @@ const SessionMatch = @import("root.zig").SessionMatch;
 const parseSessionArg = @import("root.zig").parseSessionArg;
 const shared = @import("shared.zig");
 const util = @import("../util.zig");
-const ipc = @import("../ipc.zig");
-const socket = @import("../socket.zig");
+
+const STATUS_PRINT_INTERVAL_SECS = 5;
+const MAX_ZERO_MATCH_ITERATIONS = 3;
+const POLL_SLEEP_MS = 1000;
+const HISTORY_PREVIEW_LINES = 20;
 
 fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_buffer: [shared.io_buf_size]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    var stderr_buffer: [1024]u8 = undefined;
+    var stderr_buffer: [shared.io_buf_size]u8 = undefined;
     var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
     const stderr = &stderr_writer.interface;
 
@@ -52,7 +55,7 @@ fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
             }
             if (session.task_ended_at == 0) {
                 const now = std.time.timestamp();
-                if (now - last_print >= 5) {
+                if (now - last_print >= STATUS_PRINT_INTERVAL_SECS) {
                     try stdout.print("[{d}] waiting task={s}\n", .{ now, session.name });
                     try stdout.flush();
                     last_print = now;
@@ -85,7 +88,7 @@ fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
 
         if (max_seen == 0) {
             zero_match_iters += 1;
-            if (zero_match_iters >= 3) {
+            if (zero_match_iters >= MAX_ZERO_MATCH_ITERATIONS) {
                 try stderr.print("error: no matching sessions found\n", .{});
                 try stderr.flush();
                 std.process.exit(2);
@@ -93,7 +96,7 @@ fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
         }
 
         prev_done = done;
-        std.Thread.sleep(1000 * std.time.ns_per_ms);
+        std.Thread.sleep(POLL_SLEEP_MS * std.time.ns_per_ms);
     }
 
     if (agg_exit_code == 0) {
@@ -118,17 +121,16 @@ fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
             try stdout.print("---\n", .{});
             try stdout.print("[{d}] failed task={s} exit_status={d}\n", .{ session.task_ended_at.?, session.name, session.task_exit_code.? });
 
-            const history_lines: usize = 20;
-            const history_text = fetchHistory(alloc, cfg, session.name) catch null;
+            const history_text = shared.fetchHistory(alloc, cfg, session.name) catch null;
             if (history_text) |text| {
                 defer alloc.free(text);
-                try stdout.print("\nLast {d} lines of {s} history:\n", .{ history_lines, session.name });
+                try stdout.print("\nLast {d} lines of {s} history:\n", .{ HISTORY_PREVIEW_LINES, session.name });
 
                 var total_lines: usize = 0;
                 var it = std.mem.splitScalar(u8, text, '\n');
                 while (it.next()) |_| total_lines += 1;
 
-                const skip = if (total_lines > history_lines) total_lines - history_lines else 0;
+                const skip = if (total_lines > HISTORY_PREVIEW_LINES) total_lines - HISTORY_PREVIEW_LINES else 0;
                 var current: usize = 0;
                 it = std.mem.splitScalar(u8, text, '\n');
                 while (it.next()) |line| {
@@ -144,59 +146,6 @@ fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
     }
 
     std.process.exit(agg_exit_code);
-}
-
-fn fetchHistory(alloc: std.mem.Allocator, cfg: *Cfg, session_name: []const u8) ![]const u8 {
-    const socket_path = socket.getSocketPath(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
-        error.NameTooLong => {
-            socket.printSessionNameTooLong(session_name, cfg.socket_dir);
-            return error.NameTooLong;
-        },
-        error.OutOfMemory => return err,
-    };
-    defer alloc.free(socket_path);
-
-    var dir = try std.fs.openDirAbsolute(cfg.socket_dir, .{});
-    defer dir.close();
-
-    const exists = try socket.sessionExists(dir, session_name);
-    if (!exists) return error.SessionNotFound;
-
-    const fd = ipc.connectSession(socket_path) catch |err| {
-        if (err == error.ConnectionRefused) socket.cleanupStaleSocket(dir, session_name);
-        return err;
-    };
-    defer std.posix.close(fd);
-
-    const format_byte: u8 = @intFromEnum(util.HistoryFormat.plain);
-    const payload = [_]u8{format_byte};
-    ipc.send(fd, .History, &payload) catch |err| switch (err) {
-        error.BrokenPipe, error.ConnectionResetByPeer => return error.SessionUnresponsive,
-        else => return err,
-    };
-
-    var sb = try ipc.SocketBuffer.init(alloc);
-    defer sb.deinit();
-
-    var result = std.ArrayList(u8).initCapacity(alloc, 4096) catch return error.OutOfMemory;
-    errdefer result.deinit(alloc);
-
-    while (true) {
-        var poll_fds = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
-        const poll_result = std.posix.poll(&poll_fds, 5000) catch return error.Timeout;
-        if (poll_result == 0) return error.Timeout;
-
-        const n = sb.read(fd) catch return error.ReadFailed;
-        if (n == 0) break;
-
-        while (sb.next()) |msg| {
-            if (msg.header.tag == .History) {
-                try result.appendSlice(alloc, msg.payload);
-                return result.toOwnedSlice(alloc);
-            }
-        }
-    }
-    return error.NoHistoryResponse;
 }
 
 pub fn cmdWait(alloc: std.mem.Allocator, cfg: *Cfg, args: *std.process.ArgIterator) !void {

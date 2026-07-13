@@ -5,18 +5,16 @@ const shared = @import("shared.zig");
 const ipc = @import("../ipc.zig");
 const cross = @import("../cross.zig");
 const socket = @import("../socket.zig");
-const ClientMod = @import("../Client.zig");
 const daemon_mod = @import("daemon.zig");
 const client_loop = @import("client.zig");
 
-const Client = ClientMod.Client;
 const Daemon = daemon_mod.Daemon;
 
 fn switchSesh(self: *Daemon, current_sesh: []const u8) !void {
     const next_session = self.session_name;
-    const socket_path = socket.getSocketPath(self.alloc, self.cfg.socket_dir, current_sesh) catch |err| switch (err) {
-        error.NameTooLong => return socket.printSessionNameTooLong(current_sesh, self.cfg.socket_dir),
-        error.OutOfMemory => return err,
+    const socket_path = socket.getSocketPathChecked(self.alloc, self.cfg.socket_dir, current_sesh) catch |err| switch (err) {
+        error.NameTooLong => return,
+        error.OutOfMemory => |e| return e,
     };
     defer self.alloc.free(socket_path);
 
@@ -25,7 +23,7 @@ fn switchSesh(self: *Daemon, current_sesh: []const u8) !void {
 
     const exists = try socket.sessionExists(dir, current_sesh);
     if (!exists) {
-        var buf: [4096]u8 = undefined;
+        var buf: [shared.io_buf_size]u8 = undefined;
         var w = std.fs.File.stderr().writer(&buf);
         w.interface.print("error: session \"{s}\" does not exist\n", .{current_sesh}) catch {};
         w.interface.flush() catch {};
@@ -87,24 +85,7 @@ fn attachImpl(daemon: *Daemon) !void {
             if (looper.session_name) |session_name| {
                 var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
                 const cwd = std.posix.getcwd(&cwd_buf) catch "";
-                const target_path = socket.getSocketPath(daemon.alloc, daemon.cfg.socket_dir, session_name) catch |err| switch (err) {
-                    error.NameTooLong => return socket.printSessionNameTooLong(session_name, daemon.cfg.socket_dir),
-                    error.OutOfMemory => return err,
-                };
-
-                const clients = try std.ArrayList(*Client).initCapacity(daemon.alloc, 10);
-                var target_daemon = Daemon{
-                    .running = true,
-                    .cfg = daemon.cfg,
-                    .alloc = daemon.alloc,
-                    .clients = clients,
-                    .session_name = session_name,
-                    .socket_path = target_path,
-                    .pid = undefined,
-                    .cwd = cwd,
-                    .created_at = @intCast(std.time.timestamp()),
-                    .leader_client_fd = null,
-                };
+                var target_daemon = try Daemon.init(daemon.alloc, daemon.cfg, session_name, null, cwd);
                 return attachImpl(&target_daemon);
             }
         },
@@ -118,7 +99,6 @@ pub fn cmdAttach(alloc: std.mem.Allocator, cfg: *Cfg, args: *std.process.ArgIter
     defer command_args.deinit(alloc);
     while (args.next()) |arg| try command_args.append(alloc, arg);
 
-    const clients = try std.ArrayList(*Client).initCapacity(alloc, 10);
     const command: ?[][]const u8 = if (command_args.items.len > 0) command_args.items else null;
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -126,23 +106,7 @@ pub fn cmdAttach(alloc: std.mem.Allocator, cfg: *Cfg, args: *std.process.ArgIter
 
     const sesh = try socket.getSeshName(alloc, session_name);
     defer alloc.free(sesh);
-    var d = Daemon{
-        .running = true,
-        .cfg = cfg,
-        .alloc = alloc,
-        .clients = clients,
-        .session_name = sesh,
-        .socket_path = undefined,
-        .pid = undefined,
-        .command = command,
-        .cwd = cwd,
-        .created_at = @intCast(std.time.timestamp()),
-        .leader_client_fd = null,
-    };
-    d.socket_path = socket.getSocketPath(alloc, cfg.socket_dir, sesh) catch |err| switch (err) {
-        error.NameTooLong => return socket.printSessionNameTooLong(sesh, cfg.socket_dir),
-        error.OutOfMemory => return err,
-    };
+    var d = try Daemon.init(alloc, cfg, sesh, command, cwd);
     std.log.info("socket path={s}", .{d.socket_path});
     return attachImpl(&d);
 }

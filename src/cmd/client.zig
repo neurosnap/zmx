@@ -55,7 +55,7 @@ fn handleStdinEvent(
     const inp_flags = posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL;
     if (revents & inp_flags == 0) return null;
 
-    var buf: [4096]u8 = undefined;
+    var buf: [shared.io_buf_size]u8 = undefined;
     const n_opt: ?usize = posix.read(posix.STDIN_FILENO, &buf) catch |err| {
         if (err == error.WouldBlock) return null;
         return err;
@@ -154,13 +154,13 @@ pub fn clientLoop(client_sock_fd: i32) !ClientResult {
     const stdin_orig_flags = try shared.setNonblocking(posix.STDIN_FILENO);
     defer _ = posix.fcntl(posix.STDIN_FILENO, posix.F.SETFL, stdin_orig_flags) catch {};
 
-    var sock_write_buf = try std.ArrayList(u8).initCapacity(alloc, 4096);
+    var sock_write_buf = try std.ArrayList(u8).initCapacity(alloc, shared.io_buf_size);
     defer sock_write_buf.deinit(alloc);
 
-    var stdout_buf = try std.ArrayList(u8).initCapacity(alloc, 4096);
+    var stdout_buf = try std.ArrayList(u8).initCapacity(alloc, shared.io_buf_size);
     defer stdout_buf.deinit(alloc);
 
-    var poll_fds = try std.ArrayList(posix.pollfd).initCapacity(alloc, 4);
+    var poll_fds = try std.ArrayList(posix.pollfd).initCapacity(alloc, shared.initial_poll_capacity);
     defer poll_fds.deinit(alloc);
 
     var read_buf = try ipc.SocketBuffer.init(alloc);

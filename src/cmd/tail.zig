@@ -6,6 +6,7 @@ const shared = @import("shared.zig");
 const util = @import("../util.zig");
 const ipc = @import("../ipc.zig");
 const socket = @import("../socket.zig");
+const root = @import("root.zig");
 const posix = std.posix;
 
 fn buildPollList(
@@ -76,13 +77,13 @@ pub fn tail(client_socket_fds: std.ArrayList(i32), detached: bool, is_run_cmd: b
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    var poll_fds = try std.ArrayList(posix.pollfd).initCapacity(alloc, 4);
+    var poll_fds = try std.ArrayList(posix.pollfd).initCapacity(alloc, shared.initial_poll_capacity);
     defer poll_fds.deinit(alloc);
 
     var read_buf = try ipc.SocketBuffer.init(alloc);
     defer read_buf.deinit();
 
-    var stdout_buf = try std.ArrayList(u8).initCapacity(alloc, 4096);
+    var stdout_buf = try std.ArrayList(u8).initCapacity(alloc, shared.io_buf_size);
     defer stdout_buf.deinit(alloc);
 
     var is_first_line = true;
@@ -147,31 +148,25 @@ pub fn cmdTail(alloc: std.mem.Allocator, cfg: *Cfg, args: *std.process.ArgIterat
         resolved_names.deinit(alloc);
     }
 
-    var any_prefix = false;
+    var prefix_matchers: std.ArrayList(SessionMatch) = .empty;
+    defer prefix_matchers.deinit(alloc);
     for (matchers.items) |m| {
-        if (m.is_prefix) {
-            any_prefix = true;
-            break;
-        }
+        if (m.is_prefix) try prefix_matchers.append(alloc, m);
     }
 
-    if (any_prefix) {
+    if (prefix_matchers.items.len > 0) {
         var sessions = try util.get_session_entries(alloc, cfg.socket_dir);
         defer {
-            for (sessions.items) |session| session.deinit(alloc);
+            for (sessions.items) |s| s.deinit(alloc);
             sessions.deinit(alloc);
         }
-        for (sessions.items) |session| {
-            for (matchers.items) |m| {
-                if (m.matches(session.name)) {
-                    try resolved_names.append(alloc, try alloc.dupe(u8, session.name));
-                    break;
-                }
-            }
-        }
+        const matched = try root.collectMatchingSessions(alloc, sessions.items, prefix_matchers.items);
+        defer alloc.free(matched);
+        for (matched) |name| try resolved_names.append(alloc, name);
     }
     for (matchers.items) |m| {
-        if (!m.is_prefix) try resolved_names.append(alloc, try alloc.dupe(u8, m.name));
+        if (m.is_prefix) continue;
+        try resolved_names.append(alloc, try alloc.dupe(u8, m.name));
     }
 
     var client_socket_fds = try std.ArrayList(i32).initCapacity(alloc, resolved_names.items.len);
@@ -180,9 +175,9 @@ pub fn cmdTail(alloc: std.mem.Allocator, cfg: *Cfg, args: *std.process.ArgIterat
         client_socket_fds.deinit(alloc);
     }
     for (resolved_names.items) |session_name| {
-        const socket_path = socket.getSocketPath(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
-            error.NameTooLong => return socket.printSessionNameTooLong(session_name, cfg.socket_dir),
-            error.OutOfMemory => return err,
+        const socket_path = socket.getSocketPathChecked(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
+            error.NameTooLong => return,
+            error.OutOfMemory => |e| return e,
         };
         try client_socket_fds.append(alloc, try socket.sessionConnect(socket_path));
     }

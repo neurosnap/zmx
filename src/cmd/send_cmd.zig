@@ -1,11 +1,12 @@
 const std = @import("std");
 const Cfg = @import("../Cfg.zig").Cfg;
+const shared = @import("shared.zig");
 const ipc = @import("../ipc.zig");
 const socket = @import("../socket.zig");
 
 pub fn send(cfg: *Cfg, session_name: []const u8, socket_path: []const u8, text_parts: [][]const u8, tag: ipc.Tag) !void {
     const alloc = std.heap.c_allocator;
-    var buf: [4096]u8 = undefined;
+    var buf: [shared.io_buf_size]u8 = undefined;
     var w = std.fs.File.stdout().writer(&buf);
 
     var payload = std.ArrayList(u8).empty;
@@ -20,7 +21,7 @@ pub fn send(cfg: *Cfg, session_name: []const u8, socket_path: []const u8, text_p
         const stdin_fd = std.posix.STDIN_FILENO;
         if (!std.posix.isatty(stdin_fd)) {
             while (true) {
-                var tmp: [4096]u8 = undefined;
+                var tmp: [shared.io_buf_size]u8 = undefined;
                 const n = std.posix.read(stdin_fd, &tmp) catch |err| {
                     if (err == error.WouldBlock) break;
                     return err;

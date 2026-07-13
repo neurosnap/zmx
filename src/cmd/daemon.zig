@@ -46,6 +46,27 @@ pub const Daemon = struct {
     pty_write_buf: std.ArrayList(u8) = .empty,
 
     const PTY_WRITE_BUF_MAX = 256 * 1024;
+    const KILL_SLEEP_MS = 500;
+    const FD_CLEANUP_LIMIT = 64;
+    const DAEMON_INIT_POLL_CAPACITY = 8;
+
+    pub fn init(alloc: std.mem.Allocator, cfg: *Cfg, session_name: []const u8, command: ?[]const []const u8, cwd: []const u8) !Daemon {
+        const socket_path = try socket.getSocketPathChecked(alloc, cfg.socket_dir, session_name);
+        const clients = try std.ArrayList(*Client).initCapacity(alloc, shared.initial_client_capacity);
+        return .{
+            .cfg = cfg,
+            .alloc = alloc,
+            .clients = clients,
+            .session_name = session_name,
+            .socket_path = socket_path,
+            .pid = undefined,
+            .command = command,
+            .cwd = cwd,
+            .created_at = @intCast(std.time.timestamp()),
+            .running = true,
+            .leader_client_fd = null,
+        };
+    }
 
     pub fn deinit(self: *Daemon) void {
         self.clients.deinit(self.alloc);
@@ -191,7 +212,7 @@ pub const Daemon = struct {
             {
                 const dir_fd = @as(i32, @intCast(dir.fd));
                 var fd: i32 = 3;
-                while (fd < 64) : (fd += 1) {
+                while (fd < FD_CLEANUP_LIMIT) : (fd += 1) {
                     if (fd == server_sock_fd or fd == dir_fd) continue;
                     _ = std.c.close(fd);
                 }
@@ -355,7 +376,7 @@ pub const Daemon = struct {
         posix.kill(-self.pid, posix.SIG.HUP) catch |err| {
             std.log.warn("failed to send SIGHUP to pty child err={s}", .{@errorName(err)});
         };
-        std.Thread.sleep(500 * std.time.ns_per_ms);
+        std.Thread.sleep(KILL_SLEEP_MS * std.time.ns_per_ms);
         posix.kill(-self.pid, posix.SIG.KILL) catch |err| {
             std.log.warn("failed to send SIGKILL to pty child err={s}", .{@errorName(err)});
         };
@@ -526,7 +547,7 @@ fn handlePtyRead(daemon: *Daemon, pty_fd: i32, vt_stream: *ghostty_vt.TerminalSt
     const inp_flags = posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL;
     if (revents & inp_flags == 0) return false;
 
-    var buf: [4096]u8 = undefined;
+    var buf: [shared.io_buf_size]u8 = undefined;
     const n_opt: ?usize = posix.read(pty_fd, &buf) catch |err| {
         if (err == error.WouldBlock) return false;
         return true;
@@ -607,7 +628,7 @@ fn acceptClient(daemon: *Daemon, server_sock_fd: i32, revents: i16) !bool {
         .read_buf = try ipc.SocketBuffer.init(daemon.alloc),
         .write_buf = undefined,
     };
-    client.write_buf = try std.ArrayList(u8).initCapacity(client.alloc, 65536);
+    client.write_buf = try std.ArrayList(u8).initCapacity(client.alloc, ipc.client_write_buf_size);
     try daemon.clients.append(daemon.alloc, client);
     std.log.info("client connected fd={d} total={d}", .{ client_fd, daemon.clients.items.len });
     return false;
@@ -684,7 +705,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) void {
     shared.openSignalPipe() catch return;
     shared.installWakeHandler(posix.SIG.TERM);
 
-    var poll_fds = std.ArrayList(posix.pollfd).initCapacity(daemon.alloc, 8) catch return;
+    var poll_fds = std.ArrayList(posix.pollfd).initCapacity(daemon.alloc, Daemon.DAEMON_INIT_POLL_CAPACITY) catch return;
     defer poll_fds.deinit(daemon.alloc);
 
     const init_size = ipc.getTerminalSize(pty_fd);

@@ -10,7 +10,7 @@ fn list(cfg: *Cfg, short: bool) !void {
     const alloc = gpa.allocator();
 
     const current_session = socket.getSeshNameFromEnv();
-    var buf: [4096]u8 = undefined;
+    var buf: [shared.io_buf_size]u8 = undefined;
     var stdout = std.fs.File.stdout().writer(&buf);
 
     var sessions = try util.get_session_entries(alloc, cfg.socket_dir);

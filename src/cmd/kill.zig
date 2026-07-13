@@ -2,6 +2,7 @@ const std = @import("std");
 const Cfg = @import("../Cfg.zig").Cfg;
 const SessionMatch = @import("root.zig").SessionMatch;
 const parseSessionArg = @import("root.zig").parseSessionArg;
+const collectMatchingSessions = @import("root.zig").collectMatchingSessions;
 const shared = @import("shared.zig");
 const util = @import("../util.zig");
 const ipc = @import("../ipc.zig");
@@ -12,9 +13,9 @@ fn kill(cfg: *Cfg, session_name: []const u8, force: bool) !void {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    const socket_path = socket.getSocketPath(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
-        error.NameTooLong => return socket.printSessionNameTooLong(session_name, cfg.socket_dir),
-        error.OutOfMemory => return err,
+    const socket_path = socket.getSocketPathChecked(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
+        error.NameTooLong => return,
+        error.OutOfMemory => |e| return e,
     };
     defer alloc.free(socket_path);
 
@@ -23,7 +24,7 @@ fn kill(cfg: *Cfg, session_name: []const u8, force: bool) !void {
 
     const exists = try socket.sessionExists(dir, session_name);
     if (!exists) {
-        var buf: [4096]u8 = undefined;
+        var buf: [shared.io_buf_size]u8 = undefined;
         var w = std.fs.File.stderr().writer(&buf);
         w.interface.print("error: session \"{s}\" does not exist\n", .{session_name}) catch {};
         w.interface.flush() catch {};
@@ -31,7 +32,7 @@ fn kill(cfg: *Cfg, session_name: []const u8, force: bool) !void {
     }
     const fd = ipc.connectSession(socket_path) catch |err| {
         std.log.err("session unresponsive: {s}", .{@errorName(err)});
-        var buf: [4096]u8 = undefined;
+        var buf: [shared.io_buf_size]u8 = undefined;
         var w = std.fs.File.stdout().writer(&buf);
         if (force or err == error.ConnectionRefused) {
             socket.cleanupStaleSocket(dir, session_name);
@@ -52,14 +53,14 @@ fn kill(cfg: *Cfg, session_name: []const u8, force: bool) !void {
         else => return err,
     };
 
-    var buf: [100]u8 = undefined;
+    var buf: [shared.io_buf_size]u8 = undefined;
     var w = std.fs.File.stdout().writer(&buf);
     try w.interface.print("killed session {s}\n", .{session_name});
     try w.interface.flush();
 }
 
 pub fn cmdKill(alloc: std.mem.Allocator, cfg: *Cfg, args: *std.process.ArgIterator) !void {
-    var stderr_buffer: [1024]u8 = undefined;
+    var stderr_buffer: [shared.io_buf_size]u8 = undefined;
     var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
     const stderr = &stderr_writer.interface;
 
@@ -84,14 +85,15 @@ pub fn cmdKill(alloc: std.mem.Allocator, cfg: *Cfg, args: *std.process.ArgIterat
         for (sessions.items) |session| session.deinit(alloc);
         sessions.deinit(alloc);
     }
-    for (sessions.items) |session| {
-        for (matchers.items) |m| {
-            if (!m.matches(session.name)) continue;
-            kill(cfg, session.name, force) catch |err| {
-                try stderr.print("failed to kill session={s}: {s}\n", .{ session.name, @errorName(err) });
-                try stderr.flush();
-            };
-            break;
-        }
+    const matched = try collectMatchingSessions(alloc, sessions.items, matchers.items);
+    defer {
+        for (matched) |name| alloc.free(name);
+        alloc.free(matched);
+    }
+    for (matched) |name| {
+        kill(cfg, name, force) catch |err| {
+            try stderr.print("failed to kill session={s}: {s}\n", .{ name, @errorName(err) });
+            try stderr.flush();
+        };
     }
 }

@@ -36,7 +36,7 @@ pub fn get_session_entries(
     defer dir.close();
     var iter = dir.iterate();
 
-    var sessions = try std.ArrayList(SessionEntry).initCapacity(alloc, 30);
+    var sessions = try std.ArrayList(SessionEntry).initCapacity(alloc, socket.initial_session_capacity);
 
     while (try iter.next()) |entry| {
         const exists = socket.sessionExists(dir, entry.name) catch continue;
@@ -387,10 +387,14 @@ pub fn stripAnsi(alloc: std.mem.Allocator, data: []const u8) ![]const u8 {
     return result.toOwnedSlice(alloc);
 }
 
+const ctrl_backslash_key = 0x5c;
+const ctrl_modifier_bits = 0b100;
+const intentional_modifier_mask = 0b00111111;
+
 /// Detects Kitty keyboard protocol escape sequence for Ctrl+\
 pub fn isCtrlBackslash(buf: []const u8) bool {
     if (buf.len == 0) return false;
-    return buf[0] == 0x1C or isKeyPressed(buf, 0x5c, 0b100);
+    return buf[0] == 0x1C or isKeyPressed(buf, ctrl_backslash_key, ctrl_modifier_bits);
 }
 
 /// Detects vt100 or kitty keyboard protocol escape sequence for up arrow.
@@ -441,8 +445,8 @@ fn keypressWithMod(buf: []const u8, expected_key: u32, expected_mods: u32) bool 
     // 5. Only accept intentional modifiers. Lock modifiers
     //    (caps_lock=0b1000000, num_lock=0b10000000) are tolerated because
     //    they are ambient state, not deliberate key combinations.
-    const intentional_mods = mod_raw & 0b00111111;
-    if (expected_mods > 0 and expected_mods != intentional_mods) return false;
+    const mods = mod_raw & intentional_modifier_mask;
+    if (expected_mods > 0 and expected_mods != mods) return false;
 
     // 6. Parse optional event type after ':'.
     if (pos < buf.len and buf[pos] == ':') {

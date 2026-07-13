@@ -1,6 +1,7 @@
 const std = @import("std");
 const Cfg = @import("../Cfg.zig").Cfg;
 const shared = @import("shared.zig");
+const util = @import("../util.zig");
 
 const cmd_list = @import("list.zig");
 const cmd_detach = @import("detach.zig");
@@ -8,7 +9,7 @@ const cmd_kill = @import("kill.zig");
 const cmd_history = @import("history.zig");
 const cmd_wait = @import("wait.zig");
 const cmd_send = @import("send.zig");
-const cmd_print = @import("print.zig");
+const cmd_print = @import("send.zig");
 const cmd_tail = @import("tail.zig");
 const cmd_attach = @import("attach.zig");
 const cmd_run = @import("run.zig");
@@ -50,7 +51,7 @@ fn completionsWrapper(alloc: std.mem.Allocator, cfg: *Cfg, args: *std.process.Ar
     const arg = args.next() orelse return;
     if (shared.isHelp(arg)) return shared.printUsage("completions", "<shell>");
     const shell = completions.Shell.fromString(arg) orelse return;
-    var buf: [4096]u8 = undefined;
+    var buf: [shared.io_buf_size]u8 = undefined;
     var w = std.fs.File.stdout().writer(&buf);
     try w.interface.writeAll(switch (shell) {
         .bash => completions.bashScript(ALL_COMMANDS),
@@ -223,4 +224,24 @@ pub fn parseSessionArg(alloc: std.mem.Allocator, arg: []const u8) !SessionMatch 
         return .{ .name = try alloc.dupe(u8, arg[0 .. arg.len - 1]), .is_prefix = true };
     }
     return .{ .name = try alloc.dupe(u8, arg), .is_prefix = false };
+}
+
+pub fn collectMatchingSessions(alloc: std.mem.Allocator, sessions: []util.SessionEntry, matchers: []const SessionMatch) ![][]const u8 {
+    var matched: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (matched.items) |name| alloc.free(name);
+        matched.deinit(alloc);
+    }
+    for (sessions) |session| {
+        for (matchers) |m| {
+            if (!m.matches(session.name)) continue;
+            try matched.append(alloc, try alloc.dupe(u8, session.name));
+            break;
+        }
+    }
+    for (matchers) |m| {
+        if (m.is_prefix) continue;
+        try matched.append(alloc, try alloc.dupe(u8, m.name));
+    }
+    return try matched.toOwnedSlice(alloc);
 }

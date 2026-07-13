@@ -5,16 +5,14 @@ const shared = @import("shared.zig");
 const ipc = @import("../ipc.zig");
 const socket = @import("../socket.zig");
 const util = @import("../util.zig");
-const ClientMod = @import("../Client.zig");
 const daemon_mod = @import("daemon.zig");
 const tail = @import("tail.zig");
 
-const Client = ClientMod.Client;
 const Daemon = daemon_mod.Daemon;
 
 fn run(daemon: *Daemon, detached: bool, command_args: [][]const u8) !void {
     const alloc = daemon.alloc;
-    var buf: [4096]u8 = undefined;
+    var buf: [shared.io_buf_size]u8 = undefined;
     var w = std.fs.File.stdout().writer(&buf);
 
     var cmd_to_send: ?[]const u8 = null;
@@ -51,11 +49,11 @@ fn run(daemon: *Daemon, detached: bool, command_args: [][]const u8) !void {
     } else {
         const stdin_fd = posix.STDIN_FILENO;
         if (!std.posix.isatty(stdin_fd)) {
-            var stdin_buf = try std.ArrayList(u8).initCapacity(alloc, 4096);
+            var stdin_buf = try std.ArrayList(u8).initCapacity(alloc, shared.io_buf_size);
             defer stdin_buf.deinit(alloc);
 
             while (true) {
-                var tmp: [4096]u8 = undefined;
+                var tmp: [shared.io_buf_size]u8 = undefined;
                 const n = posix.read(stdin_fd, &tmp) catch |err| {
                     if (err == error.WouldBlock) break;
                     return err;
@@ -112,31 +110,13 @@ pub fn cmdRun(alloc: std.mem.Allocator, cfg: *Cfg, args: *std.process.ArgIterato
         }
         try cmd_args_raw.append(alloc, arg);
     }
-    const clients = try std.ArrayList(*Client).initCapacity(alloc, 10);
-
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd = std.posix.getcwd(&cwd_buf) catch "";
 
     const sesh = try socket.getSeshName(alloc, session_name);
     defer alloc.free(sesh);
-    var d = Daemon{
-        .running = true,
-        .cfg = cfg,
-        .alloc = alloc,
-        .clients = clients,
-        .session_name = sesh,
-        .socket_path = undefined,
-        .pid = undefined,
-        .command = null,
-        .cwd = cwd,
-        .created_at = @intCast(std.time.timestamp()),
-        .is_task_mode = true,
-        .leader_client_fd = null,
-    };
-    d.socket_path = socket.getSocketPath(alloc, cfg.socket_dir, sesh) catch |err| switch (err) {
-        error.NameTooLong => return socket.printSessionNameTooLong(sesh, cfg.socket_dir),
-        error.OutOfMemory => return err,
-    };
+    var d = try Daemon.init(alloc, cfg, sesh, null, cwd);
+    d.is_task_mode = true;
     std.log.info("socket path={s}", .{d.socket_path});
     return run(&d, detached, cmd_args_raw.items);
 }

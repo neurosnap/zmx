@@ -5,13 +5,11 @@ const shared = @import("shared.zig");
 const ipc = @import("../ipc.zig");
 const socket = @import("../socket.zig");
 const daemon_mod = @import("daemon.zig");
-const ClientMod = @import("../Client.zig");
 
-const Client = ClientMod.Client;
 const Daemon = daemon_mod.Daemon;
 
 fn writeFile(daemon: *Daemon, file_path: []const u8) !void {
-    var buf: [4096]u8 = undefined;
+    var buf: [shared.io_buf_size]u8 = undefined;
     var w = std.fs.File.stdout().writer(&buf);
     const sesh_result = try daemon.ensureSession();
     if (sesh_result.is_daemon) return;
@@ -21,11 +19,11 @@ fn writeFile(daemon: *Daemon, file_path: []const u8) !void {
         try w.interface.flush();
     }
     const stdin_fd = posix.STDIN_FILENO;
-    var stdin_buf = try std.ArrayList(u8).initCapacity(daemon.alloc, 4096);
+    var stdin_buf = try std.ArrayList(u8).initCapacity(daemon.alloc, shared.io_buf_size);
     defer stdin_buf.deinit(daemon.alloc);
 
     while (true) {
-        var tmp: [4096]u8 = undefined;
+        var tmp: [shared.io_buf_size]u8 = undefined;
         const n = posix.read(stdin_fd, &tmp) catch |err| {
             if (err == error.WouldBlock) break;
             return err;
@@ -34,9 +32,9 @@ fn writeFile(daemon: *Daemon, file_path: []const u8) !void {
         try stdin_buf.appendSlice(daemon.alloc, tmp[0..n]);
     }
 
-    const socket_path = socket.getSocketPath(daemon.alloc, daemon.cfg.socket_dir, daemon.session_name) catch |err| switch (err) {
-        error.NameTooLong => return socket.printSessionNameTooLong(daemon.session_name, daemon.cfg.socket_dir),
-        error.OutOfMemory => return err,
+    const socket_path = socket.getSocketPathChecked(daemon.alloc, daemon.cfg.socket_dir, daemon.session_name) catch |err| switch (err) {
+        error.NameTooLong => return,
+        error.OutOfMemory => |e| return e,
     };
     var dir = try std.fs.openDirAbsolute(daemon.cfg.socket_dir, .{});
     defer dir.close();
@@ -94,27 +92,10 @@ pub fn cmdWrite(alloc: std.mem.Allocator, cfg: *Cfg, args: *std.process.ArgItera
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd = std.posix.getcwd(&cwd_buf) catch "";
-    const clients = try std.ArrayList(*Client).initCapacity(alloc, 10);
     const sesh = try socket.getSeshName(alloc, session_name);
     defer alloc.free(sesh);
-    var d = Daemon{
-        .running = true,
-        .cfg = cfg,
-        .alloc = alloc,
-        .clients = clients,
-        .session_name = sesh,
-        .socket_path = undefined,
-        .pid = undefined,
-        .command = null,
-        .cwd = cwd,
-        .created_at = @intCast(std.time.timestamp()),
-        .is_task_mode = true,
-        .leader_client_fd = null,
-    };
-    d.socket_path = socket.getSocketPath(alloc, cfg.socket_dir, sesh) catch |err| switch (err) {
-        error.NameTooLong => return socket.printSessionNameTooLong(sesh, cfg.socket_dir),
-        error.OutOfMemory => return err,
-    };
+    var d = try Daemon.init(alloc, cfg, sesh, null, cwd);
+    d.is_task_mode = true;
     std.log.info("socket path={s}", .{d.socket_path});
     try writeFile(&d, file_path);
 }

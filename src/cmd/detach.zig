@@ -16,9 +16,9 @@ fn detachAll(cfg: *Cfg) !void {
     var dir = try std.fs.openDirAbsolute(cfg.socket_dir, .{});
     defer dir.close();
 
-    const socket_path = socket.getSocketPath(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
-        error.NameTooLong => return socket.printSessionNameTooLong(session_name, cfg.socket_dir),
-        error.OutOfMemory => return err,
+    const socket_path = socket.getSocketPathChecked(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
+        error.NameTooLong => return,
+        error.OutOfMemory => |e| return e,
     };
     defer alloc.free(socket_path);
     const fd = ipc.connectSession(socket_path) catch |err| {
