@@ -1,2 +1,3 @@
 [tools]
+bats = "latest"
 zig = "0.15.2"
