@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
-# Tests for stdin piped to `zmx run` sessions.
+# Tests for stdin piped to `nmux run` sessions.
 #
-# Verifies that `zmx run` sessions always use bash (not the user's $SHELL),
+# Verifies that `nmux run` sessions always use bash (not the user's $SHELL),
 # so piping commands via stdin works without quoting issues regardless of
 # the user's default shell.
 
@@ -12,13 +12,13 @@ load test_helper
 # ============================================================================
 
 @test "run: session uses bash regardless of SHELL env" {
-  run timeout 10 env SHELL=/usr/bin/fish "$ZMX" run test-shell-check echo 'hello'
+  run timeout 10 env SHELL=/usr/bin/fish "$NMUX" run test-shell-check echo 'hello'
   [ "$status" -eq 0 ]
 
   sleep 0.3
-  run "$ZMX" history test-shell-check
+  run "$NMUX" history test-shell-check
   # Task marker uses $? (bash syntax), not $status (fish syntax)
-  [[ "$output" == *'ZMX_TASK_COMPLETED:'* ]]
+  [[ "$output" == *'NMUX_TASK_COMPLETED:'* ]]
   [[ "$output" == *'$?'* ]]
 }
 
@@ -27,20 +27,20 @@ load test_helper
 # ============================================================================
 
 @test "run: stdin pipe executes command" {
-  run bash -c 'printf "echo stdin-marker-abc123\n" | timeout 10 "$0" run test-stdin-basic' "$ZMX"
+  run bash -c 'printf "echo stdin-marker-abc123\n" | timeout 10 "$0" run test-stdin-basic' "$NMUX"
   [ "$status" -eq 0 ]
 
   sleep 0.3
-  run "$ZMX" history test-stdin-basic
+  run "$NMUX" history test-stdin-basic
   [[ "$output" == *"stdin-marker-abc123"* ]]
 }
 
 @test "run: stdin with special characters passes through unmangled" {
-  run bash -c 'printf "echo '\''hello \$USER \$(whoami) \\\"double\\\" ; # comment'\''\n" | timeout 10 "$0" run test-stdin-special' "$ZMX"
+  run bash -c 'printf "echo '\''hello \$USER \$(whoami) \\\"double\\\" ; # comment'\''\n" | timeout 10 "$0" run test-stdin-special' "$NMUX"
   [ "$status" -eq 0 ]
 
   sleep 0.3
-  run "$ZMX" history test-stdin-special
+  run "$NMUX" history test-stdin-special
   [[ "$output" == *'$USER'* ]]
   [[ "$output" == *'$(whoami)'* ]]
 }
@@ -48,11 +48,11 @@ load test_helper
 @test "run: multiline stdin script executes all lines" {
   local script
   script=$(printf 'echo line-one-aaa\necho line-two-bbb\necho line-three-ccc\n')
-  run bash -c 'printf "%s" "$1" | timeout 10 "$0" run test-stdin-multi' "$ZMX" "$script"
+  run bash -c 'printf "%s" "$1" | timeout 10 "$0" run test-stdin-multi' "$NMUX" "$script"
   [ "$status" -eq 0 ]
 
   sleep 0.5
-  run "$ZMX" history test-stdin-multi
+  run "$NMUX" history test-stdin-multi
   [[ "$output" == *"line-one-aaa"* ]]
   [[ "$output" == *"line-two-bbb"* ]]
   [[ "$output" == *"line-three-ccc"* ]]
@@ -63,19 +63,19 @@ load test_helper
   # the task marker is sent on its own line.
   local script
   script=$(printf "cat <<'EOF'\nThis has \"double\" and 'single' quotes\nand \$variables that should not expand\nEOF\n")
-  run bash -c 'printf "%s" "$1" | timeout 10 "$0" run test-stdin-heredoc' "$ZMX" "$script"
+  run bash -c 'printf "%s" "$1" | timeout 10 "$0" run test-stdin-heredoc' "$NMUX" "$script"
   [ "$status" -eq 0 ]
 
   sleep 0.5
-  run "$ZMX" history test-stdin-heredoc
+  run "$NMUX" history test-stdin-heredoc
   [[ "$output" == *'$variables that should not expand'* ]]
 }
 
 @test "run: args-only still works" {
-  run timeout 10 env SHELL=/bin/bash "$ZMX" run test-args-only echo args-only-marker-999
+  run timeout 10 env SHELL=/bin/bash "$NMUX" run test-args-only echo args-only-marker-999
   [ "$status" -eq 0 ]
 
   sleep 0.3
-  run "$ZMX" history test-args-only
+  run "$NMUX" history test-args-only
   [[ "$output" == *"args-only-marker-999"* ]]
 }

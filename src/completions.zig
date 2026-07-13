@@ -30,7 +30,7 @@ pub fn bashScript(comptime cmds: anytype) []const u8 {
             caseBody = caseBody ++ caseHeader;
             if (m.next_arg == .sessions) {
                 const tmp_case_body =
-                    \\      local sessions=$(zmx list --short 2>/dev/null | tr '\\n' ' ')
+                    \\      local sessions=$(nmux list --short 2>/dev/null | tr '\\n' ' ')
                     \\      COMPREPLY=($(compgen -W \"$sessions\" -- \"$cur\"))
                     \\      ;;
                     \\
@@ -57,7 +57,7 @@ pub fn bashScript(comptime cmds: anytype) []const u8 {
             }
         }
         break :blk @as([]const u8, fmt.comptimePrint(
-            \\_zmx_completions() {{
+            \\_nmux_completions() {{
             \\  local cur prev words cword
             \\  COMPREPLY=()
             \\  cur="${{COMP_WORDS[COMP_CWORD]}}"
@@ -76,7 +76,7 @@ pub fn bashScript(comptime cmds: anytype) []const u8 {
             \\  esac
             \\}}
             \\
-            \\complete -o bashdefault -o default -F _zmx_completions zmx
+            \\complete -o bashdefault -o default -F _nmux_completions nmux
         , .{ .commands_list = cmdList, .case_body = caseBody }));
     };
 }
@@ -101,7 +101,7 @@ pub fn zshScript(comptime cmds: anytype) []const u8 {
             cases = cases ++ caseHeader;
             if (m.next_arg == .sessions) {
                 cases = cases ++
-                    \\          _zmx_sessions
+                    \\          _nmux_sessions
                     \\          ;;
                     \\
                 ;
@@ -125,8 +125,8 @@ pub fn zshScript(comptime cmds: anytype) []const u8 {
             }
         }
         break :blk @as([]const u8, fmt.comptimePrint(
-            \\#compdef zmx
-            \\_zmx() {{
+            \\#compdef nmux
+            \\_nmux() {{
             \\  local context state state_descr line
             \\  typeset -A opt_args
             \\
@@ -155,10 +155,10 @@ pub fn zshScript(comptime cmds: anytype) []const u8 {
             \\  esac
             \\}}
             \\
-            \\_zmx_sessions() {{
+            \\_nmux_sessions() {{
             \\  local -a sessions
             \\
-            \\  local local_sessions=$(zmx list --short 2>/dev/null)
+            \\  local local_sessions=$(nmux list --short 2>/dev/null)
             \\  if [[ -n "$local_sessions" ]]; then
             \\    sessions+=(${{(f)local_sessions}})
             \\  fi
@@ -166,7 +166,7 @@ pub fn zshScript(comptime cmds: anytype) []const u8 {
             \\  _describe 'local session' sessions
             \\}}
             \\
-            \\compdef _zmx zmx
+            \\compdef _nmux nmux
         , .{ .command_entries = entries, .cases_body = cases }));
     };
 }
@@ -177,13 +177,13 @@ pub fn fishScript(comptime cmds: anytype) []const u8 {
         var argCompl: []const u8 = "";
         var flagCompl: []const u8 = "";
         for (cmds) |m| {
-            cmdCompl = cmdCompl ++ "complete -c zmx -n \"__fish_is_nth_token 1\" -a " ++ m.name ++ " -d '" ++ m.help_line;
+            cmdCompl = cmdCompl ++ "complete -c nmux -n \"__fish_is_nth_token 1\" -a " ++ m.name ++ " -d '" ++ m.help_line;
             cmdCompl = cmdCompl ++
                 \\'
                 \\
             ;
             for (m.aliases) |alias| {
-                cmdCompl = cmdCompl ++ "complete -c zmx -n \"__fish_is_nth_token 1\" -a " ++ alias ++ " -d '" ++ m.help_line;
+                cmdCompl = cmdCompl ++ "complete -c nmux -n \"__fish_is_nth_token 1\" -a " ++ alias ++ " -d '" ++ m.help_line;
                 cmdCompl = cmdCompl ++
                     \\'
                     \\
@@ -192,13 +192,13 @@ pub fn fishScript(comptime cmds: anytype) []const u8 {
         }
         for (cmds) |m| {
             if (m.next_arg == .sessions) {
-                argCompl = argCompl ++ "complete -c zmx -n \"__fish_is_nth_token 2; and __fish_seen_subcommand_from " ++ m.name ++ "\" -a '(zmx list --short 2>/dev/null)' -d 'Session name'";
+                argCompl = argCompl ++ "complete -c nmux -n \"__fish_is_nth_token 2; and __fish_seen_subcommand_from " ++ m.name ++ "\" -a '(nmux list --short 2>/dev/null)' -d 'Session name'";
                 argCompl = argCompl ++
                     \\'
                     \\
                 ;
             } else if (m.next_arg == .shells) {
-                argCompl = argCompl ++ "complete -c zmx -n \"__fish_is_nth_token 2; and __fish_seen_subcommand_from " ++ m.name ++ "\" -a 'bash zsh fish nu' -d Shell";
+                argCompl = argCompl ++ "complete -c nmux -n \"__fish_is_nth_token 2; and __fish_seen_subcommand_from " ++ m.name ++ "\" -a 'bash zsh fish nu' -d Shell";
                 argCompl = argCompl ++
                     \\
                     \\
@@ -208,7 +208,7 @@ pub fn fishScript(comptime cmds: anytype) []const u8 {
         for (cmds) |m| {
             if (m.flags.len == 0) continue;
             for (m.flags) |flag| {
-                flagCompl = flagCompl ++ "complete -c zmx -n \"__fish_seen_subcommand_from " ++ m.name ++ "\" -a '" ++ flag.name ++ "' -d '" ++ flag.description;
+                flagCompl = flagCompl ++ "complete -c nmux -n \"__fish_seen_subcommand_from " ++ m.name ++ "\" -a '" ++ flag.name ++ "' -d '" ++ flag.description;
                 flagCompl = flagCompl ++
                     \\'
                     \\
@@ -216,7 +216,7 @@ pub fn fishScript(comptime cmds: anytype) []const u8 {
             }
         }
         break :blk @as([]const u8, fmt.comptimePrint(
-            \\complete -c zmx -f
+            \\complete -c nmux -f
             \\{[command_completions]s}
             \\{[arg_completions]s}
             \\{[flag_completions]s}
@@ -228,19 +228,19 @@ pub fn nuScript(comptime cmds: anytype) []const u8 {
     return comptime blk: {
         var externs: []const u8 = "";
         for (cmds) |m| {
-            externs = externs ++ "export extern \"zmx " ++ m.name;
+            externs = externs ++ "export extern \"nmux " ++ m.name;
             externs = externs ++
                 \\" [
                 \\
             ;
             if (m.next_arg == .sessions) {
-                externs = externs ++ "    name: string@\"nu-complete zmx sessions\"";
+                externs = externs ++ "    name: string@\"nu-complete nmux sessions\"";
                 externs = externs ++
                     \\
                     \\
                 ;
             } else if (m.next_arg == .shells) {
-                externs = externs ++ "    shell: string@\"nu-complete zmx complete\"";
+                externs = externs ++ "    shell: string@\"nu-complete nmux complete\"";
                 externs = externs ++
                     \\
                     \\
@@ -261,11 +261,11 @@ pub fn nuScript(comptime cmds: anytype) []const u8 {
             ;
         }
         break :blk @as([]const u8, fmt.comptimePrint(
-            \\def "nu-complete zmx sessions" [] {{
-            \\    zmx list --short | lines
+            \\def "nu-complete nmux sessions" [] {{
+            \\    nmux list --short | lines
             \\}}
             \\
-            \\def "nu-complete zmx complete" [] {{
+            \\def "nu-complete nmux complete" [] {{
             \\    [bash fish nu zsh]
             \\}}
             \\

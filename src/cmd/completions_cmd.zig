@@ -1,5 +1,5 @@
 const std = @import("std");
-const Cfg = @import("../Cfg.zig").Cfg;
+const Cfg = @import("../cfg.zig").Cfg;
 const completions = @import("../completions.zig");
 const cmdDefType = @import("root.zig").CmdDef;
 const shared = @import("shared.zig");

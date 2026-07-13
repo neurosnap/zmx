@@ -1,5 +1,5 @@
 const std = @import("std");
-const Cfg = @import("../Cfg.zig").Cfg;
+const Cfg = @import("../cfg.zig").Cfg;
 const SessionMatch = @import("root.zig").SessionMatch;
 const parseSessionArg = @import("root.zig").parseSessionArg;
 const shared = @import("shared.zig");

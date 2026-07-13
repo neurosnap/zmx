@@ -7,8 +7,8 @@ const cross = @import("../cross.zig");
 const util = @import("../util.zig");
 const log = @import("../log.zig");
 const socket = @import("../socket.zig");
-const ClientMod = @import("../Client.zig");
-const Cfg = @import("../Cfg.zig").Cfg;
+const ClientMod = @import("../client.zig");
+const Cfg = @import("../cfg.zig").Cfg;
 const shared = @import("shared.zig");
 
 const Client = ClientMod.Client;
@@ -118,7 +118,7 @@ pub const Daemon = struct {
         };
         posix.sigaction(posix.SIG.PIPE, &dfl, null);
 
-        const session_env = try std.fmt.allocPrintSentinel(alloc, "ZMX_SESSION={s}", .{self.session_name}, 0);
+        const session_env = try std.fmt.allocPrintSentinel(alloc, "NMUX_SESSION={s}", .{self.session_name}, 0);
         _ = cross.c.putenv(session_env.ptr);
 
         if (self.command) |cmd_args| {
@@ -218,7 +218,7 @@ pub const Daemon = struct {
                 }
             }
 
-            const log_path = std.fs.path.join(std.heap.c_allocator, &.{ self.cfg.log_dir, "zmx.log" }) catch |err| {
+            const log_path = std.fs.path.join(std.heap.c_allocator, &.{ self.cfg.log_dir, "nmux.log" }) catch |err| {
                 std.log.warn("failed to join log path: {s}", .{@errorName(err)});
                 return err;
             };
@@ -447,8 +447,8 @@ pub const Daemon = struct {
 
         const cmd = payload;
 
-        const single_line_marker = "; echo ZMX_TASK_COMPLETED:$?\r";
-        const heredoc_marker = "\r\necho ZMX_TASK_COMPLETED:$?\r";
+        const single_line_marker = "; echo NMUX_TASK_COMPLETED:$?\r";
+        const heredoc_marker = "\r\necho NMUX_TASK_COMPLETED:$?\r";
         const uses_heredoc = std.mem.indexOf(u8, cmd, "<<") != null;
 
         if (cmd.len > 0 and cmd[cmd.len - 1] == '\r') {

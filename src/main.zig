@@ -1,6 +1,6 @@
 const std = @import("std");
 const build_options = @import("build_options");
-const CfgMod = @import("Cfg.zig");
+const CfgMod = @import("cfg.zig");
 const cmd = @import("cmd/root.zig");
 const shared = @import("cmd/shared.zig");
 
@@ -10,11 +10,11 @@ pub const version = build_options.version;
 pub const ghostty_version = build_options.ghostty_version;
 
 pub const std_options: std.Options = .{
-    .logFn = zmxLogFn,
+    .logFn = nmuxLogFn,
     .log_level = .debug,
 };
 
-fn zmxLogFn(
+fn nmuxLogFn(
     comptime level: std.log.Level,
     comptime scope: @Type(.enum_literal),
     comptime format: []const u8,
@@ -34,7 +34,7 @@ pub fn main() !void {
     var cfg = try Cfg.init(alloc);
     defer cfg.deinit(alloc);
 
-    const log_path = try std.fs.path.join(alloc, &.{ cfg.log_dir, "zmx.log" });
+    const log_path = try std.fs.path.join(alloc, &.{ cfg.log_dir, "nmux.log" });
     defer alloc.free(log_path);
     try shared.log_system.init(alloc, log_path, cfg.log_mode);
     defer shared.log_system.deinit();

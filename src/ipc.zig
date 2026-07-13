@@ -59,7 +59,7 @@ pub const history_poll_timeout_ms = 5000;
 
 /// Frozen wire shape. Do NOT add fields — new stats go in new `Tag` values
 /// so old daemons (whose `_` arm ignores unknown tags) stay reachable.
-/// Changing `@sizeOf(Info)` breaks `zmx list` against running daemons.
+/// Changing `@sizeOf(Info)` breaks `nmux list` against running daemons.
 pub const Info = extern struct {
     clients_len: u64,
     pid: i32,
@@ -255,7 +255,7 @@ pub fn probeSession(
 //  WIRE PROTOCOL FREEZE — read before "fixing" any test below.
 //
 //  Changing these constants does not fix the test; it breaks every
-//  running daemon for every user until they `pkill -f zmx`.
+//  running daemon for every user until they `pkill -f nmux`.
 //
 //  Need a new field?   → add a new `Tag` value (next free integer).
 //  Need to remove one? → don't. Reserve the integer, stop sending it.

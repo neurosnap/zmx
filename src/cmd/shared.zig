@@ -1,5 +1,5 @@
 const std = @import("std");
-const Cfg = @import("../Cfg.zig").Cfg;
+const Cfg = @import("../cfg.zig").Cfg;
 const log = @import("../log.zig");
 const ipc = @import("../ipc.zig");
 const socket = @import("../socket.zig");
@@ -61,7 +61,7 @@ pub fn setNonblocking(fd: i32) !usize {
 }
 
 pub fn printUsage(cmd_name: []const u8, usage: []const u8) !void {
-    try printErr("Usage: zmx {s} {s}\n", .{ cmd_name, usage });
+    try printErr("Usage: nmux {s} {s}\n", .{ cmd_name, usage });
 }
 
 fn writeToFd(fd: i32, bytes: []const u8) std.posix.WriteError!usize {

@@ -1,5 +1,5 @@
 const std = @import("std");
-const Cfg = @import("../Cfg.zig").Cfg;
+const Cfg = @import("../cfg.zig").Cfg;
 const shared = @import("shared.zig");
 const socket = @import("../socket.zig");
 const ipc = @import("../ipc.zig");

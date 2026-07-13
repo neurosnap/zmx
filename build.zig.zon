@@ -1,7 +1,7 @@
 .{
-    .name = .zmx,
+    .name = .nmux,
     .version = "0.6.0",
-    .fingerprint = 0x28aad87005052b4e, // Changing this has security and trust implications.
+    .fingerprint = 0xb62473e278927166, // Changing this has security and trust implications.
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
         .ghostty = .{

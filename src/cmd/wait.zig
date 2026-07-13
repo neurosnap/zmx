@@ -1,5 +1,5 @@
 const std = @import("std");
-const Cfg = @import("../Cfg.zig").Cfg;
+const Cfg = @import("../cfg.zig").Cfg;
 const SessionMatch = @import("root.zig").SessionMatch;
 const parseSessionArg = @import("root.zig").parseSessionArg;
 const shared = @import("shared.zig");
@@ -126,7 +126,7 @@ fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
                     current += 1;
                 }
             }
-            try shared.printOut("\nSee the logs:\nzmx history {s}\nzmx attach {s}\n", .{ session.name, session.name });
+            try shared.printOut("\nSee the logs:\nnmux history {s}\nnmux attach {s}\n", .{ session.name, session.name });
         }
     }
 

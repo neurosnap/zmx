@@ -1,5 +1,5 @@
 const std = @import("std");
-const Cfg = @import("../Cfg.zig").Cfg;
+const Cfg = @import("../cfg.zig").Cfg;
 const shared = @import("shared.zig");
 const ipc = @import("../ipc.zig");
 const socket = @import("../socket.zig");
@@ -10,7 +10,7 @@ fn detachAll(cfg: *Cfg) !void {
     const alloc = gpa.allocator();
     const session_name = socket.getSeshNameFromEnv();
     if (session_name.len == 0) {
-        std.log.err("ZMX_SESSION env var not found: are you inside a zmx session?", .{});
+        std.log.err("NMUX_SESSION env var not found: are you inside a nmux session?", .{});
         return;
     }
 

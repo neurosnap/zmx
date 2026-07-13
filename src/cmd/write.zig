@@ -1,6 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
-const Cfg = @import("../Cfg.zig").Cfg;
+const Cfg = @import("../cfg.zig").Cfg;
 const shared = @import("shared.zig");
 const ipc = @import("../ipc.zig");
 const socket = @import("../socket.zig");

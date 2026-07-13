@@ -13,12 +13,12 @@ pub const Cfg = struct {
         const log_dir = try std.fmt.allocPrint(alloc, "{s}/logs", .{socket_dir});
         errdefer alloc.free(log_dir);
 
-        const dir_mode = if (std.posix.getenv("ZMX_DIR_MODE")) |m|
+        const dir_mode = if (std.posix.getenv("NMUX_DIR_MODE")) |m|
             std.fmt.parseInt(u32, m, 8) catch 0o750
         else
             0o750;
 
-        const log_mode = if (std.posix.getenv("ZMX_LOG_MODE")) |m|
+        const log_mode = if (std.posix.getenv("NMUX_LOG_MODE")) |m|
             std.fmt.parseInt(u32, m, 8) catch 0o640
         else
             0o640;
@@ -39,12 +39,12 @@ pub const Cfg = struct {
         const tmpdir = std.mem.trimRight(u8, posix.getenv("TMPDIR") orelse "/tmp", "/");
         const uid = posix.getuid();
 
-        const socket_dir: []const u8 = if (posix.getenv("ZMX_DIR")) |zmxdir|
-            try alloc.dupe(u8, zmxdir)
+        const socket_dir: []const u8 = if (posix.getenv("NMUX_DIR")) |nmuxdir|
+            try alloc.dupe(u8, nmuxdir)
         else if (posix.getenv("XDG_RUNTIME_DIR")) |xdg_runtime|
-            try std.fmt.allocPrint(alloc, "{s}/zmx", .{xdg_runtime})
+            try std.fmt.allocPrint(alloc, "{s}/nmux", .{xdg_runtime})
         else
-            try std.fmt.allocPrint(alloc, "{s}/zmx-{d}", .{ tmpdir, uid });
+            try std.fmt.allocPrint(alloc, "{s}/nmux-{d}", .{ tmpdir, uid });
         errdefer alloc.free(socket_dir);
 
         return socket_dir;
@@ -80,8 +80,8 @@ test "Cfg.init uses default modes when env vars are not set" {
     const cross = @import("cross.zig");
     const alloc = std.testing.allocator;
 
-    _ = cross.c.unsetenv("ZMX_DIR_MODE");
-    _ = cross.c.unsetenv("ZMX_LOG_MODE");
+    _ = cross.c.unsetenv("NMUX_DIR_MODE");
+    _ = cross.c.unsetenv("NMUX_LOG_MODE");
 
     var cfg = try Cfg.init(alloc);
     defer cfg.deinit(alloc);
@@ -94,11 +94,11 @@ test "Cfg.init uses custom modes from env vars" {
     const cross = @import("cross.zig");
     const alloc = std.testing.allocator;
 
-    _ = cross.c.setenv("ZMX_DIR_MODE", "770", 1);
-    _ = cross.c.setenv("ZMX_LOG_MODE", "660", 1);
+    _ = cross.c.setenv("NMUX_DIR_MODE", "770", 1);
+    _ = cross.c.setenv("NMUX_LOG_MODE", "660", 1);
     defer {
-        _ = cross.c.unsetenv("ZMX_DIR_MODE");
-        _ = cross.c.unsetenv("ZMX_LOG_MODE");
+        _ = cross.c.unsetenv("NMUX_DIR_MODE");
+        _ = cross.c.unsetenv("NMUX_LOG_MODE");
     }
 
     var cfg = try Cfg.init(alloc);

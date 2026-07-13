@@ -148,12 +148,12 @@ const DA2_RESPONSE = "\x1b[>1;10;0c";
 
 pub fn respondToDeviceAttributes(alloc: std.mem.Allocator, buf: *std.ArrayList(u8), data: []const u8) void {
     // Scan for DA queries in PTY output and respond on behalf of the terminal.
-    // This handles the case where no client is attached (e.g. zmx run)
+    // This handles the case where no client is attached (e.g. nmux run)
     // and the shell (e.g. fish) sends a DA query that would otherwise go unanswered.
     //
     // Responses are queued into the daemon's pty_write_buf (not written
     // directly) so they don't interleave with any already-buffered input —
-    // e.g. a large `zmx run` payload still draining after the client
+    // e.g. a large `nmux run` payload still draining after the client
     // disconnected.
     //
     // DA1 query: ESC [ c  or  ESC [ 0 c
@@ -189,13 +189,13 @@ const OSC_133_A = "\x1b]133;A";
 
 /// Rewrite OSC 133;A sequences to include `redraw=0`, which tells the outer
 /// terminal not to clear prompt lines on resize. This is necessary because
-/// zmx sits between the shell and the outer terminal: from the outer terminal's
-/// perspective, the foreground process (zmx client) cannot redraw prompts.
+/// nmux sits between the shell and the outer terminal: from the outer terminal's
+/// perspective, the foreground process (nmux client) cannot redraw prompts.
 /// Without this, the outer terminal clears the prompt on resize expecting the
-/// shell to redraw it, but the shell's redraw goes through zmx's IPC path with
+/// shell to redraw it, but the shell's redraw goes through nmux's IPC path with
 /// cursor coordinates relative to the inner PTY, causing a cursor desync that
 /// makes the prompt invisible.
-/// See: https://github.com/neurosnap/zmx/issues/111
+/// See: https://github.com/neurosnap/nmux/issues/111
 pub fn rewritePromptRedraw(alloc: std.mem.Allocator, data: []const u8) ?[]const u8 {
     // Fast-path: most PTY output has no escape sequences at all. A scalar
     // byte scan for ESC is cheaper than the full string indexOf below.
@@ -326,7 +326,7 @@ test "rewritePromptRedraw: embedded in larger output" {
 }
 
 pub fn findTaskExitMarker(output: []const u8) ?u8 {
-    const marker = "ZMX_TASK_COMPLETED:";
+    const marker = "NMUX_TASK_COMPLETED:";
 
     // Search for marker in output
     if (std.mem.indexOf(u8, output, marker)) |idx| {
@@ -537,7 +537,7 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
     const has_scrollback = !screen_top.eql(active_top);
 
     // Two-phase serialization to preserve scrollback without corrupting
-    // cursor positions. This matters for nested zmx sessions (zmx→SSH→zmx)
+    // cursor positions. This matters for nested nmux sessions (nmux→SSH→nmux)
     // where the outer daemon's ghostty-vt accumulates inner session scrollback.
     //
     // Phase 1: Emit scrollback content (plain text with styles, no terminal extras).
@@ -546,7 +546,7 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
     // The clear ensures visible content starts from a clean slate regardless of
     // how much scrollback preceded it. CUP cursor positioning is then correct.
     //
-    // See: https://github.com/neurosnap/zmx/issues/31
+    // See: https://github.com/neurosnap/nmux/issues/31
 
     // Phase 1: scrollback only (if any exists)
     if (has_scrollback) {
@@ -1176,8 +1176,8 @@ test "serializeTerminalState with scrollback preserves visible content" {
 }
 
 test "serializeTerminalState nested roundtrip preserves content" {
-    // Simulates: inner zmx → serialized state → outer ghostty-vt → serialized again → client
-    // This is the exact nested session scenario (zmx → SSH → zmx).
+    // Simulates: inner nmux → serialized state → outer ghostty-vt → serialized again → client
+    // This is the exact nested session scenario (nmux → SSH → nmux).
     const alloc = testing.allocator;
 
     // "Inner" terminal with scrollback + markers
