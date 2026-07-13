@@ -13,57 +13,35 @@ fn kill(cfg: *Cfg, session_name: []const u8, force: bool) !void {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    const socket_path = socket.getSocketPathChecked(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
-        error.NameTooLong => return,
-        error.OutOfMemory => |e| return e,
+    const conn = shared.connectToSessionChecked(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
+        error.SessionNotFound => {
+            shared.printErr("error: session \"{s}\" does not exist\n", .{session_name}) catch {};
+            return error.SessionNotFound;
+        },
+        error.ConnectionFailed => {
+            if (force) {
+                var dir = std.fs.openDirAbsolute(cfg.socket_dir, .{}) catch return;
+                defer dir.close();
+                socket.cleanupStaleSocket(dir, session_name);
+            }
+            if (force) {
+                try shared.printOut("cleaned up stale session {s}\n", .{session_name});
+            } else {
+                try shared.printOut("session {s} is unresponsive\ndaemon may be busy: try again, add `--force` flag, or kill the process directly\n", .{session_name});
+            }
+            return;
+        },
     };
-    defer alloc.free(socket_path);
-
-    var dir = try std.fs.openDirAbsolute(cfg.socket_dir, .{});
-    defer dir.close();
-
-    const exists = try socket.sessionExists(dir, session_name);
-    if (!exists) {
-        var buf: [shared.io_buf_size]u8 = undefined;
-        var w = std.fs.File.stderr().writer(&buf);
-        w.interface.print("error: session \"{s}\" does not exist\n", .{session_name}) catch {};
-        w.interface.flush() catch {};
-        return error.SessionNotFound;
-    }
-    const fd = ipc.connectSession(socket_path) catch |err| {
-        std.log.err("session unresponsive: {s}", .{@errorName(err)});
-        var buf: [shared.io_buf_size]u8 = undefined;
-        var w = std.fs.File.stdout().writer(&buf);
-        if (force or err == error.ConnectionRefused) {
-            socket.cleanupStaleSocket(dir, session_name);
-            w.interface.print("cleaned up stale session {s}\n", .{session_name}) catch {};
-        } else {
-            w.interface.print(
-                "session {s} is unresponsive ({s})\ndaemon may be busy: try again, add `--force` flag, or kill the process directly\n",
-                .{ session_name, @errorName(err) },
-            ) catch {};
-        }
-        w.interface.flush() catch {};
-        return;
-    };
-
-    defer std.posix.close(fd);
-    ipc.send(fd, .Kill, "") catch |err| switch (err) {
+    defer conn.deinit();
+    ipc.send(conn.fd, .Kill, "") catch |err| switch (err) {
         error.BrokenPipe, error.ConnectionResetByPeer => return,
         else => return err,
     };
 
-    var buf: [shared.io_buf_size]u8 = undefined;
-    var w = std.fs.File.stdout().writer(&buf);
-    try w.interface.print("killed session {s}\n", .{session_name});
-    try w.interface.flush();
+    try shared.printOut("killed session {s}\n", .{session_name});
 }
 
 pub fn cmdKill(alloc: std.mem.Allocator, cfg: *Cfg, args: *std.process.ArgIterator) !void {
-    var stderr_buffer: [shared.io_buf_size]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
-    const stderr = &stderr_writer.interface;
-
     var matchers: std.ArrayList(SessionMatch) = .empty;
     defer {
         for (matchers.items) |m| alloc.free(m.name);
@@ -92,8 +70,7 @@ pub fn cmdKill(alloc: std.mem.Allocator, cfg: *Cfg, args: *std.process.ArgIterat
     }
     for (matched) |name| {
         kill(cfg, name, force) catch |err| {
-            try stderr.print("failed to kill session={s}: {s}\n", .{ name, @errorName(err) });
-            try stderr.flush();
+            shared.printErr("failed to kill session={s}: {s}\n", .{ name, @errorName(err) }) catch {};
         };
     }
 }

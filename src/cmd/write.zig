@@ -9,14 +9,11 @@ const daemon_mod = @import("daemon.zig");
 const Daemon = daemon_mod.Daemon;
 
 fn writeFile(daemon: *Daemon, file_path: []const u8) !void {
-    var buf: [shared.io_buf_size]u8 = undefined;
-    var w = std.fs.File.stdout().writer(&buf);
     const sesh_result = try daemon.ensureSession();
     if (sesh_result.is_daemon) return;
 
     if (sesh_result.created) {
-        try w.interface.print("session \"{s}\" created\n", .{daemon.session_name});
-        try w.interface.flush();
+        try shared.printOut("session \"{s}\" created\n", .{daemon.session_name});
     }
     const stdin_fd = posix.STDIN_FILENO;
     var stdin_buf = try std.ArrayList(u8).initCapacity(daemon.alloc, shared.io_buf_size);
@@ -36,18 +33,9 @@ fn writeFile(daemon: *Daemon, file_path: []const u8) !void {
         error.NameTooLong => return,
         error.OutOfMemory => |e| return e,
     };
-    var dir = try std.fs.openDirAbsolute(daemon.cfg.socket_dir, .{});
-    defer dir.close();
 
-    const result = ipc.probeSession(daemon.alloc, socket_path) catch |err| {
-        std.log.err("session unresponsive: {s}", .{@errorName(err)});
-        if (err == error.ConnectionRefused) {
-            socket.cleanupStaleSocket(dir, daemon.session_name);
-            w.interface.print("cleaned up stale session {s}\n", .{daemon.session_name}) catch {};
-        } else {
-            w.interface.print("session {s} is unresponsive ({s})\ndaemon may be busy: try again\n", .{ daemon.session_name, @errorName(err) }) catch {};
-        }
-        w.interface.flush() catch {};
+    const result = shared.probeSessionChecked(daemon.alloc, daemon.cfg.socket_dir, daemon.session_name, socket_path) catch {
+        shared.printOut("session {s} is unresponsive\ndaemon may be busy: try again\n", .{daemon.session_name}) catch {};
         return;
     };
 
@@ -73,8 +61,7 @@ fn writeFile(daemon: *Daemon, file_path: []const u8) !void {
 
     while (sb.next()) |msg| {
         if (msg.header.tag == .Ack) {
-            try w.interface.print("file created {s}\n", .{file_path});
-            try w.interface.flush();
+            try shared.printOut("file created {s}\n", .{file_path});
             return;
         }
     }

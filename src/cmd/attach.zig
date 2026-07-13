@@ -12,31 +12,16 @@ const Daemon = daemon_mod.Daemon;
 
 fn switchSesh(self: *Daemon, current_sesh: []const u8) !void {
     const next_session = self.session_name;
-    const socket_path = socket.getSocketPathChecked(self.alloc, self.cfg.socket_dir, current_sesh) catch |err| switch (err) {
-        error.NameTooLong => return,
-        error.OutOfMemory => |e| return e,
+    const conn = shared.connectToSessionChecked(self.alloc, self.cfg.socket_dir, current_sesh) catch |err| switch (err) {
+        error.SessionNotFound => {
+            shared.printErr("error: session \"{s}\" does not exist\n", .{current_sesh}) catch {};
+            return error.SessionNotFound;
+        },
+        error.ConnectionFailed => return,
     };
-    defer self.alloc.free(socket_path);
+    defer conn.deinit();
 
-    var dir = try std.fs.openDirAbsolute(self.cfg.socket_dir, .{});
-    defer dir.close();
-
-    const exists = try socket.sessionExists(dir, current_sesh);
-    if (!exists) {
-        var buf: [shared.io_buf_size]u8 = undefined;
-        var w = std.fs.File.stderr().writer(&buf);
-        w.interface.print("error: session \"{s}\" does not exist\n", .{current_sesh}) catch {};
-        w.interface.flush() catch {};
-        return error.SessionNotFound;
-    }
-    const fd = ipc.connectSession(socket_path) catch |err| {
-        std.log.err("session unresponsive: {s}", .{@errorName(err)});
-        if (err == error.ConnectionRefused) socket.cleanupStaleSocket(dir, current_sesh);
-        return;
-    };
-    defer posix.close(fd);
-
-    ipc.send(fd, .Switch, next_session) catch |err| switch (err) {
+    ipc.send(conn.fd, .Switch, next_session) catch |err| switch (err) {
         error.BrokenPipe, error.ConnectionResetByPeer => return,
         else => return err,
     };

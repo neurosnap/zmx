@@ -23,10 +23,7 @@ fn list(cfg: *Cfg, short: bool) !void {
 
     if (sessions.items.len == 0) {
         if (short) return;
-        var errbuf: [4096]u8 = undefined;
-        var stderr = std.fs.File.stderr().writer(&errbuf);
-        try stderr.interface.print("no sessions found in {s}\n", .{cfg.socket_dir});
-        try stderr.interface.flush();
+        try shared.printErr("no sessions found in {s}\n", .{cfg.socket_dir});
         return;
     }
 

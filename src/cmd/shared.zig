@@ -61,29 +61,103 @@ pub fn setNonblocking(fd: i32) !usize {
 }
 
 pub fn printUsage(cmd_name: []const u8, usage: []const u8) !void {
-    var buf: [256]u8 = undefined;
-    var w = std.fs.File.stderr().writer(&buf);
-    try w.interface.print("Usage: zmx {s} {s}\n", .{ cmd_name, usage });
-    try w.interface.flush();
+    try printErr("Usage: zmx {s} {s}\n", .{ cmd_name, usage });
 }
 
-pub fn fetchHistory(alloc: std.mem.Allocator, cfg: *Cfg, session_name: []const u8) ![]const u8 {
-    const socket_path = try socket.getSocketPathChecked(alloc, cfg.socket_dir, session_name);
-    defer alloc.free(socket_path);
+fn writeToFd(fd: i32, bytes: []const u8) std.posix.WriteError!usize {
+    return std.posix.write(fd, bytes);
+}
 
-    var dir = try std.fs.openDirAbsolute(cfg.socket_dir, .{});
+pub fn printOut(comptime fmt: []const u8, args: anytype) !void {
+    var buf: [io_buf_size]u8 = undefined;
+    var gw = std.io.GenericWriter(i32, std.posix.WriteError, writeToFd){ .context = std.posix.STDOUT_FILENO };
+    var adapter = gw.adaptToNewApi(buf[0..]);
+    try adapter.new_interface.print(fmt, args);
+    try adapter.new_interface.flush();
+}
+
+pub fn printErr(comptime fmt: []const u8, args: anytype) !void {
+    var buf: [io_buf_size]u8 = undefined;
+    var gw = std.io.GenericWriter(i32, std.posix.WriteError, writeToFd){ .context = std.posix.STDERR_FILENO };
+    var adapter = gw.adaptToNewApi(buf[0..]);
+    try adapter.new_interface.print(fmt, args);
+    try adapter.new_interface.flush();
+}
+
+pub const ConnectError = error{
+    SessionNotFound,
+    ConnectionFailed,
+};
+
+pub const SessionConnection = struct {
+    fd: i32,
+    socket_path: []const u8,
+    alloc: std.mem.Allocator,
+
+    pub fn deinit(self: *const SessionConnection) void {
+        std.posix.close(self.fd);
+        self.alloc.free(self.socket_path);
+    }
+};
+
+pub fn connectToSessionChecked(
+    alloc: std.mem.Allocator,
+    socket_dir: []const u8,
+    session_name: []const u8,
+) ConnectError!SessionConnection {
+    const socket_path = socket.getSocketPathChecked(alloc, socket_dir, session_name) catch |err| {
+        if (err != error.NameTooLong)
+            std.log.err("failed to connect session={s}: {s}", .{ session_name, @errorName(err) });
+        return error.ConnectionFailed;
+    };
+    errdefer alloc.free(socket_path);
+
+    var dir = std.fs.openDirAbsolute(socket_dir, .{}) catch |err| {
+        std.log.err("failed to open socket dir: {s}", .{@errorName(err)});
+        return error.ConnectionFailed;
+    };
     defer dir.close();
 
-    if (!try socket.sessionExists(dir, session_name)) return error.SessionNotFound;
+    const exists = socket.sessionExists(dir, session_name) catch |err| {
+        std.log.err("failed to check session: {s}", .{@errorName(err)});
+        return error.ConnectionFailed;
+    };
+    if (!exists) return error.SessionNotFound;
 
     const fd = ipc.connectSession(socket_path) catch |err| {
         if (err == error.ConnectionRefused) socket.cleanupStaleSocket(dir, session_name);
-        return err;
+        std.log.err("session unresponsive: {s}", .{@errorName(err)});
+        return error.ConnectionFailed;
     };
-    defer std.posix.close(fd);
+
+    return .{ .fd = fd, .socket_path = socket_path, .alloc = alloc };
+}
+
+pub fn probeSessionChecked(
+    alloc: std.mem.Allocator,
+    socket_dir: []const u8,
+    session_name: []const u8,
+    socket_path: []const u8,
+) error{ConnectionFailed}!ipc.SessionProbeResult {
+    var dir = std.fs.openDirAbsolute(socket_dir, .{}) catch |err| {
+        std.log.err("failed to open socket dir: {s}", .{@errorName(err)});
+        return error.ConnectionFailed;
+    };
+    defer dir.close();
+
+    return ipc.probeSession(alloc, socket_path) catch |err| {
+        if (err == error.ConnectionRefused) socket.cleanupStaleSocket(dir, session_name);
+        std.log.err("session unresponsive: {s}", .{@errorName(err)});
+        return error.ConnectionFailed;
+    };
+}
+
+pub fn fetchHistory(alloc: std.mem.Allocator, cfg: *Cfg, session_name: []const u8) ![]const u8 {
+    const conn = try connectToSessionChecked(alloc, cfg.socket_dir, session_name);
+    defer conn.deinit();
 
     const payload = [_]u8{0}; // HistoryFormat.plain
-    ipc.send(fd, .History, &payload) catch |err| switch (err) {
+    ipc.send(conn.fd, .History, &payload) catch |err| switch (err) {
         error.BrokenPipe, error.ConnectionResetByPeer => return error.SessionUnresponsive,
         else => return err,
     };
@@ -95,11 +169,11 @@ pub fn fetchHistory(alloc: std.mem.Allocator, cfg: *Cfg, session_name: []const u
     errdefer result.deinit(alloc);
 
     while (true) {
-        var poll_fds = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
+        var poll_fds = [_]std.posix.pollfd{.{ .fd = conn.fd, .events = std.posix.POLL.IN, .revents = 0 }};
         const poll_result = std.posix.poll(&poll_fds, ipc.history_poll_timeout_ms) catch return error.Timeout;
         if (poll_result == 0) return error.Timeout;
 
-        const n = sb.read(fd) catch return error.ReadFailed;
+        const n = sb.read(conn.fd) catch return error.ReadFailed;
         if (n == 0) break;
 
         while (sb.next()) |msg| {

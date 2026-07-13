@@ -5,15 +5,12 @@ const cmdDefType = @import("root.zig").CmdDef;
 const shared = @import("shared.zig");
 
 fn printCompletions(shell: completions.Shell, all_commands: []const cmdDefType) !void {
-    var buf: [4096]u8 = undefined;
-    var w = std.fs.File.stdout().writer(&buf);
-    try w.interface.writeAll(switch (shell) {
+    try shared.printOut("{s}", .{switch (shell) {
         .bash => completions.bashScript(all_commands),
         .zsh => completions.zshScript(all_commands),
         .fish => completions.fishScript(all_commands),
         .nu => completions.nuScript(all_commands),
-    });
-    try w.interface.flush();
+    }});
 }
 
 pub fn cmdCompletions(alloc: std.mem.Allocator, cfg: *Cfg, args: *std.process.ArgIterator, all_commands: []const cmdDefType) !void {

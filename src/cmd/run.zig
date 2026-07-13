@@ -12,8 +12,6 @@ const Daemon = daemon_mod.Daemon;
 
 fn run(daemon: *Daemon, detached: bool, command_args: [][]const u8) !void {
     const alloc = daemon.alloc;
-    var buf: [shared.io_buf_size]u8 = undefined;
-    var w = std.fs.File.stdout().writer(&buf);
 
     var cmd_to_send: ?[]const u8 = null;
     var allocated_cmd: ?[]u8 = null;
@@ -23,8 +21,7 @@ fn run(daemon: *Daemon, detached: bool, command_args: [][]const u8) !void {
     if (result.is_daemon) return;
 
     if (result.created) {
-        try w.interface.print("session \"{s}\" created\n", .{daemon.session_name});
-        try w.interface.flush();
+        try shared.printOut("session \"{s}\" created\n", .{daemon.session_name});
     }
 
     if (command_args.len > 0) {

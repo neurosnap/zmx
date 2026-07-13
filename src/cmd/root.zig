@@ -51,15 +51,12 @@ fn completionsWrapper(alloc: std.mem.Allocator, cfg: *Cfg, args: *std.process.Ar
     const arg = args.next() orelse return;
     if (shared.isHelp(arg)) return shared.printUsage("completions", "<shell>");
     const shell = completions.Shell.fromString(arg) orelse return;
-    var buf: [shared.io_buf_size]u8 = undefined;
-    var w = std.fs.File.stdout().writer(&buf);
-    try w.interface.writeAll(switch (shell) {
+    try shared.printOut("{s}", .{switch (shell) {
         .bash => completions.bashScript(ALL_COMMANDS),
         .zsh => completions.zshScript(ALL_COMMANDS),
         .fish => completions.fishScript(ALL_COMMANDS),
         .nu => completions.nuScript(ALL_COMMANDS),
-    });
-    try w.interface.flush();
+    }});
 }
 
 pub const ALL_COMMANDS: []const CmdDef = &[_]CmdDef{

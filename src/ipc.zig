@@ -214,7 +214,7 @@ const SessionProbeError = error{
     InfoSizeMismatch,
 };
 
-const SessionProbeResult = struct {
+pub const SessionProbeResult = struct {
     fd: i32,
     info: Info,
 };

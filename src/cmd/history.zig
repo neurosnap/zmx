@@ -10,32 +10,17 @@ fn history(cfg: *Cfg, session_name: []const u8, format: util.HistoryFormat) !voi
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    const socket_path = socket.getSocketPathChecked(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
-        error.NameTooLong => return,
-        error.OutOfMemory => |e| return e,
+    const conn = shared.connectToSessionChecked(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
+        error.SessionNotFound => {
+            shared.printErr("error: session \"{s}\" does not exist\n", .{session_name}) catch {};
+            return error.SessionNotFound;
+        },
+        error.ConnectionFailed => return,
     };
-    defer alloc.free(socket_path);
-
-    var dir = try std.fs.openDirAbsolute(cfg.socket_dir, .{});
-    defer dir.close();
-
-    const exists = try socket.sessionExists(dir, session_name);
-    if (!exists) {
-        var buf: [shared.io_buf_size]u8 = undefined;
-        var w = std.fs.File.stderr().writer(&buf);
-        w.interface.print("error: session \"{s}\" does not exist\n", .{session_name}) catch {};
-        w.interface.flush() catch {};
-        return error.SessionNotFound;
-    }
-    const fd = ipc.connectSession(socket_path) catch |err| {
-        std.log.err("session unresponsive: {s}", .{@errorName(err)});
-        if (err == error.ConnectionRefused) socket.cleanupStaleSocket(dir, session_name);
-        return;
-    };
-    defer std.posix.close(fd);
+    defer conn.deinit();
 
     const format_byte = [_]u8{@intFromEnum(format)};
-    ipc.send(fd, .History, &format_byte) catch |err| switch (err) {
+    ipc.send(conn.fd, .History, &format_byte) catch |err| switch (err) {
         error.BrokenPipe, error.ConnectionResetByPeer => return,
         else => return err,
     };
@@ -44,14 +29,14 @@ fn history(cfg: *Cfg, session_name: []const u8, format: util.HistoryFormat) !voi
     defer sb.deinit();
 
     while (true) {
-        var poll_fds = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
+        var poll_fds = [_]std.posix.pollfd{.{ .fd = conn.fd, .events = std.posix.POLL.IN, .revents = 0 }};
         const poll_result = std.posix.poll(&poll_fds, ipc.history_poll_timeout_ms) catch return;
         if (poll_result == 0) {
             std.log.err("timeout waiting for history response", .{});
             return;
         }
 
-        const n = sb.read(fd) catch return;
+        const n = sb.read(conn.fd) catch return;
         if (n == 0) return;
 
         while (sb.next()) |msg| {

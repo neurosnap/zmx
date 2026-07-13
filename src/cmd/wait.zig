@@ -15,14 +15,6 @@ fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    var stdout_buffer: [shared.io_buf_size]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-    const stdout = &stdout_writer.interface;
-
-    var stderr_buffer: [shared.io_buf_size]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
-    const stderr = &stderr_writer.interface;
-
     var max_seen: i32 = 0;
     var zero_match_iters: u32 = 0;
 
@@ -47,8 +39,7 @@ fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
 
             total += 1;
             if (session.is_error) {
-                try stderr.print("[{d}] task unreachable: {s} ({s})\n", .{ std.time.timestamp(), session.name, session.error_name orelse "unknown" });
-                try stderr.flush();
+                try shared.printErr("[{d}] task unreachable: {s} ({s})\n", .{ std.time.timestamp(), session.name, session.error_name orelse "unknown" });
                 agg_exit_code = 1;
                 done += 1;
                 continue;
@@ -56,15 +47,13 @@ fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
             if (session.task_ended_at == 0) {
                 const now = std.time.timestamp();
                 if (now - last_print >= STATUS_PRINT_INTERVAL_SECS) {
-                    try stdout.print("[{d}] waiting task={s}\n", .{ now, session.name });
-                    try stdout.flush();
+                    try shared.printOut("[{d}] waiting task={s}\n", .{ now, session.name });
                     last_print = now;
                 }
                 continue;
             }
             if (done >= prev_done) {
-                try stdout.print("[{d}] completed task={s} exit_code={d}\n", .{ session.task_ended_at.?, session.name, session.task_exit_code.? });
-                try stdout.flush();
+                try shared.printOut("[{d}] completed task={s} exit_code={d}\n", .{ session.task_ended_at.?, session.name, session.task_exit_code.? });
             }
             if (session.task_exit_code != 0) {
                 agg_exit_code = session.task_exit_code orelse 0;
@@ -78,8 +67,7 @@ fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
         sessions.deinit(alloc);
 
         if (total < max_seen) {
-            try stderr.print("error: {d} session(s) disappeared before completing\n", .{max_seen - total});
-            try stderr.flush();
+            try shared.printErr("error: {d} session(s) disappeared before completing\n", .{max_seen - total});
             std.process.exit(1);
         }
         max_seen = total;
@@ -89,8 +77,7 @@ fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
         if (max_seen == 0) {
             zero_match_iters += 1;
             if (zero_match_iters >= MAX_ZERO_MATCH_ITERATIONS) {
-                try stderr.print("error: no matching sessions found\n", .{});
-                try stderr.flush();
+                try shared.printErr("error: no matching sessions found\n", .{});
                 std.process.exit(2);
             }
         }
@@ -100,11 +87,10 @@ fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
     }
 
     if (agg_exit_code == 0) {
-        try stdout.print("task(s) completed!\n", .{});
+        try shared.printOut("task(s) completed!\n", .{});
     } else {
-        try stdout.print("task(s) failed!\n", .{});
+        try shared.printOut("task(s) failed!\n", .{});
     }
-    try stdout.flush();
 
     // Reprint detailed failure info for failed sessions
     const sessions2 = try util.get_session_entries(alloc, cfg.socket_dir);
@@ -118,13 +104,13 @@ fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
         }
         if (!found) continue;
         if (session.task_exit_code.? > 0) {
-            try stdout.print("---\n", .{});
-            try stdout.print("[{d}] failed task={s} exit_status={d}\n", .{ session.task_ended_at.?, session.name, session.task_exit_code.? });
+            try shared.printOut("---\n", .{});
+            try shared.printOut("[{d}] failed task={s} exit_status={d}\n", .{ session.task_ended_at.?, session.name, session.task_exit_code.? });
 
             const history_text = shared.fetchHistory(alloc, cfg, session.name) catch null;
             if (history_text) |text| {
                 defer alloc.free(text);
-                try stdout.print("\nLast {d} lines of {s} history:\n", .{ HISTORY_PREVIEW_LINES, session.name });
+                try shared.printOut("\nLast {d} lines of {s} history:\n", .{ HISTORY_PREVIEW_LINES, session.name });
 
                 var total_lines: usize = 0;
                 var it = std.mem.splitScalar(u8, text, '\n');
@@ -135,13 +121,12 @@ fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
                 it = std.mem.splitScalar(u8, text, '\n');
                 while (it.next()) |line| {
                     if (current >= skip) {
-                        try stdout.print("{s}\n", .{line});
+                        try shared.printOut("{s}\n", .{line});
                     }
                     current += 1;
                 }
             }
-            try stdout.print("\nSee the logs:\nzmx history {s}\nzmx attach {s}\n", .{ session.name, session.name });
-            try stdout.flush();
+            try shared.printOut("\nSee the logs:\nzmx history {s}\nzmx attach {s}\n", .{ session.name, session.name });
         }
     }
 

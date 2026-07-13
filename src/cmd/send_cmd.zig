@@ -2,12 +2,9 @@ const std = @import("std");
 const Cfg = @import("../Cfg.zig").Cfg;
 const shared = @import("shared.zig");
 const ipc = @import("../ipc.zig");
-const socket = @import("../socket.zig");
 
 pub fn send(cfg: *Cfg, session_name: []const u8, socket_path: []const u8, text_parts: [][]const u8, tag: ipc.Tag) !void {
     const alloc = std.heap.c_allocator;
-    var buf: [shared.io_buf_size]u8 = undefined;
-    var w = std.fs.File.stdout().writer(&buf);
 
     var payload = std.ArrayList(u8).empty;
     defer payload.deinit(alloc);
@@ -37,18 +34,8 @@ pub fn send(cfg: *Cfg, session_name: []const u8, socket_path: []const u8, text_p
 
     if (payload.items.len == 0) return error.TextRequired;
 
-    var dir = try std.fs.openDirAbsolute(cfg.socket_dir, .{});
-    defer dir.close();
-
-    const probe_result = ipc.probeSession(alloc, socket_path) catch |err| {
-        std.log.err("session unresponsive: {s}", .{@errorName(err)});
-        if (err == error.ConnectionRefused) {
-            socket.cleanupStaleSocket(dir, session_name);
-            try w.interface.print("cleaned up stale session {s}\n", .{session_name});
-        } else {
-            try w.interface.print("session {s} is unresponsive ({s})\ndaemon may be busy: try again\n", .{ session_name, @errorName(err) });
-        }
-        try w.interface.flush();
+    const probe_result = shared.probeSessionChecked(alloc, cfg.socket_dir, session_name, socket_path) catch {
+        try shared.printOut("session {s} is unresponsive\ndaemon may be busy: try again\n", .{session_name});
         return;
     };
     defer std.posix.close(probe_result.fd);
