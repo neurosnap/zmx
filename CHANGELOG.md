@@ -4,14 +4,14 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
-## v0.7.0 - 2026-05-29
-
 ### Fixed
 
 - `zmx run` will now detect heredocs and add the completion marker to a newline
+- Race between `zmx kill X; zmx run X`
 
 ### Changed
 
+- *BREAKING* We now store logs inside of `XDG_STATE_DIR`
 - *BREAKING* `zmx run` when creating session it runs `bash` instead of `$SHELL`
   - There are just too many edge cases with tracking exit status in other shells which makes `zmx run` much less useful for task management.
   - This means when using `zmx run` the target shell must have support for `$?` exit code tracking
