@@ -1455,7 +1455,11 @@ fn tail(client_socket_fds: std.ArrayList(i32), detached: bool, is_run_cmd: bool)
                     return err;
                 };
                 if (n == 0) {
-                    // Server closed connection
+                    // Server closed connection. If we got task completion,
+                    // return the exit code. Otherwise fall back to 0.
+                    if (task_complete_code) |exit_code| {
+                        return exit_code;
+                    }
                     return 0;
                 }
 
@@ -1472,6 +1476,16 @@ fn tail(client_socket_fds: std.ArrayList(i32), detached: bool, is_run_cmd: bool)
                         },
                         .Output => {
                             if (msg.payload.len > 0) {
+                                // Fallback: scan output for task exit marker in case
+                                // .TaskComplete was lost (e.g. daemon exited before
+                                // flushing). This ensures we detect completion even
+                                // when the IPC message doesn't arrive.
+                                if (task_complete_code == null and is_run_cmd) {
+                                    if (util.findTaskExitMarker(msg.payload)) |ec| {
+                                        task_complete_code = ec;
+                                    }
+                                }
+
                                 // Strip the first line (command echo) for run mode.
                                 var payload = msg.payload;
                                 if (!detached and is_run_cmd and is_first_line) {
@@ -1508,14 +1522,27 @@ fn tail(client_socket_fds: std.ArrayList(i32), detached: bool, is_run_cmd: bool)
             }
         }
 
+        // Check for task completion after processing socket messages.
+        // This must be outside the stdout write block because .TaskComplete
+        // can arrive after all output has already been flushed, leaving
+        // stdout_buf empty. Without this check, tail() would poll forever.
+        if (task_complete_code) |exit_code| {
+            // Flush any remaining output before returning
+            flush_loop: while (stdout_buf.items.len > 0) {
+                const n = posix.write(posix.STDOUT_FILENO, stdout_buf.items) catch |err| {
+                    if (err == error.WouldBlock) break :flush_loop;
+                    return err;
+                };
+                try stdout_buf.replaceRange(alloc, 0, n, &[_]u8{});
+            }
+            return exit_code;
+        }
+
         if (stdout_buf.items.len > 0) {
             const n = posix.write(posix.STDOUT_FILENO, stdout_buf.items) catch |err| blk: {
                 if (err == error.WouldBlock) break :blk 0;
                 return err;
             };
-            if (task_complete_code) |exit_code| {
-                return exit_code;
-            }
             if (n > 0) {
                 try stdout_buf.replaceRange(alloc, 0, n, &[_]u8{});
             }
@@ -2627,7 +2654,10 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                 if (n == 0) {
                     // EOF: Shell exited
                     std.log.info("shell exited pty_fd={d}", .{pty_fd});
-                    break :daemon_loop;
+                    // Let the rest of this poll iteration complete so client
+                    // write buffers are flushed via the normal POLLOUT path.
+                    // On the next iteration, daemon.running will be false.
+                    daemon.running = false;
                 } else {
                     // Feed PTY output to terminal emulator for state tracking
                     vt_stream.nextSlice(buf[0..n]);

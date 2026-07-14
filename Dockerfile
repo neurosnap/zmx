@@ -1,6 +1,6 @@
 FROM alpine:3.23
 
-RUN apk add curl git bats
+RUN apk add curl git bats coreutils
 
 ARG ZIG_VERSION=0.15.2
 RUN curl -L -o /tmp/zig.tar.xz https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz && \

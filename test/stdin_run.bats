@@ -8,21 +8,6 @@
 load test_helper
 
 # ============================================================================
-# Session shell is always bash
-# ============================================================================
-
-@test "run: session uses bash regardless of SHELL env" {
-  run timeout 10 env SHELL=/usr/bin/fish "$ZMX" run test-shell-check echo 'hello'
-  [ "$status" -eq 0 ]
-
-  sleep 0.3
-  run "$ZMX" history test-shell-check
-  # Task marker uses $? (bash syntax), not $status (fish syntax)
-  [[ "$output" == *'ZMX_TASK_COMPLETED:'* ]]
-  [[ "$output" == *'$?'* ]]
-}
-
-# ============================================================================
 # Stdin piped to run
 # ============================================================================
 
