@@ -62,12 +62,12 @@ load test_helper
   [[ "$output" == *"read-only built-in field"* ]]
 }
 
-@test "unset: removes specific label" {
+@test "set with empty value removes label" {
   "$ZMX" run test-unset -d sleep 30
   wait_for_session test-unset
 
   run "$ZMX" set test-unset a=1 b=2
-  run "$ZMX" unset test-unset a
+  run "$ZMX" set test-unset a=
 
   run "$ZMX" get test-unset
   [ "$status" -eq 0 ]
@@ -159,6 +159,56 @@ load test_helper
   [ "$status" -eq 0 ]
   [[ "$output" == *"test-bpfx"* ]]
 }
+
+# ============================================================================
+# Label inheritance
+# ============================================================================
+
+@test "inherit: child session inherits parent labels by default" {
+  "$ZMX" run test-parent -d sleep 30
+  wait_for_session test-parent
+  "$ZMX" set test-parent project=zmx env=dev
+
+  # Create a child session from inside the parent's env
+  ZMX_SESSION=test-parent "$ZMX" run test-child -d sleep 30
+  wait_for_session test-child
+
+  run "$ZMX" get test-child
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"project=zmx"* ]]
+  [[ "$output" == *"env=dev"* ]]
+}
+
+@test "inherit: ZMX_INHERIT_LABELS= disables inheritance" {
+  "$ZMX" run test-parent2 -d sleep 30
+  wait_for_session test-parent2
+  "$ZMX" set test-parent2 project=zmx env=dev
+
+  ZMX_SESSION=test-parent2 ZMX_INHERIT_LABELS= "$ZMX" run test-noinherit -d sleep 30
+  wait_for_session test-noinherit
+
+  run "$ZMX" get test-noinherit
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"project=zmx"* ]]
+  [[ "$output" != *"env=dev"* ]]
+}
+
+
+@test "inherit: ZMX_INHERIT_LABELS=key filters to allowlist" {
+  "$ZMX" run test-parent3 -d sleep 30
+  wait_for_session test-parent3
+  "$ZMX" set test-parent3 project=zmx env=dev team=core
+
+  ZMX_SESSION=test-parent3 ZMX_INHERIT_LABELS=project,team "$ZMX" run test-filtered -d sleep 30
+  wait_for_session test-filtered
+
+  run "$ZMX" get test-filtered
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"project=zmx"* ]]
+  [[ "$output" == *"team=core"* ]]
+  [[ "$output" != *"env=dev"* ]]
+}
+
 
 @test "list --where: no match returns empty" {
   "$ZMX" run test-nomatch -d sleep 30

@@ -100,38 +100,12 @@ fn parseLabelSetArgs(alloc: std.mem.Allocator, args: *std.process.ArgIterator) !
     return .{ .session_name = session_name, .pairs = pairs };
 }
 
-fn parseLabelKeyArgs(alloc: std.mem.Allocator, args: *std.process.ArgIterator) !struct {
-    session_name: ?[]const u8,
-    keys: std.ArrayList([]const u8),
-} {
-    var session_name: ?[]const u8 = null;
-    var keys: std.ArrayList([]const u8) = .empty;
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) return error.InvalidArgument;
-        if (session_name == null and std.mem.indexOfScalar(u8, arg, '=' ) == null and keys.items.len == 0) {
-            session_name = arg;
-        } else {
-            try keys.append(alloc, arg);
-        }
-    }
-    return .{ .session_name = session_name, .keys = keys };
-}
-
 fn serializeLabelSet(alloc: std.mem.Allocator, pairs: []const LabelKeyValue) ![]u8 {
     var out = std.ArrayList(u8).empty;
     for (pairs) |pair| {
         try out.appendSlice(alloc, pair.key);
         try out.append(alloc, '=');
         try out.appendSlice(alloc, pair.value);
-        try out.append(alloc, '\n');
-    }
-    return out.toOwnedSlice(alloc);
-}
-
-fn serializeLabelKeys(alloc: std.mem.Allocator, keys: []const []const u8) ![]u8 {
-    var out = std.ArrayList(u8).empty;
-    for (keys) |key| {
-        try out.appendSlice(alloc, key);
         try out.append(alloc, '\n');
     }
     return out.toOwnedSlice(alloc);
@@ -212,8 +186,8 @@ pub fn main() !void {
         }
         return list(&cfg, short, where_filters.items);
     } else if (std.mem.eql(u8, cmd, "get") or std.mem.eql(u8, cmd, "g")) {
-        var parsed = parseLabelKeyArgs(alloc, &args) catch return help();
-        defer parsed.keys.deinit(alloc);
+        var parsed = parseLabelSetArgs(alloc, &args) catch return help();
+        defer parsed.pairs.deinit(alloc);
         const sesh = resolveSessionOrEnv(alloc, parsed.session_name) catch return;
         defer alloc.free(sesh);
         return labelGet(&cfg, sesh);
@@ -224,15 +198,9 @@ pub fn main() !void {
         const sesh = resolveSessionOrEnv(alloc, parsed.session_name) catch return;
         defer alloc.free(sesh);
         return labelSet(&cfg, sesh, parsed.pairs.items);
-    } else if (std.mem.eql(u8, cmd, "unset") or std.mem.eql(u8, cmd, "un")) {
-        var parsed = parseLabelKeyArgs(alloc, &args) catch return help();
-        defer parsed.keys.deinit(alloc);
-        if (parsed.keys.items.len == 0) return help();
-        const sesh = resolveSessionOrEnv(alloc, parsed.session_name) catch return;
-        defer alloc.free(sesh);
-        return labelUnset(&cfg, sesh, parsed.keys.items);
     } else if (std.mem.eql(u8, cmd, "clear") or std.mem.eql(u8, cmd, "cl")) {
-        const parsed = parseLabelKeyArgs(alloc, &args) catch return help();
+        var parsed = parseLabelSetArgs(alloc, &args) catch return help();
+        defer parsed.pairs.deinit(alloc);
         const sesh = resolveSessionOrEnv(alloc, parsed.session_name) catch return;
         defer alloc.free(sesh);
         return labelClear(&cfg, sesh);
@@ -304,6 +272,7 @@ pub fn main() !void {
             error.OutOfMemory => return err,
         };
         std.log.info("socket path={s}", .{daemon.socket_path});
+        inheritParentLabels(&daemon);
         return attach(&daemon);
     } else if (std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "r")) {
         const session_name = args.next() orelse "";
@@ -317,9 +286,9 @@ pub fn main() !void {
         while (args.next()) |arg| {
             if (std.mem.startsWith(u8, arg, "-d")) {
                 detached = true;
-                continue;
+            } else {
+                try cmd_args_raw.append(alloc, arg);
             }
-            try cmd_args_raw.append(alloc, arg);
         }
         const clients = try std.ArrayList(*Client).initCapacity(alloc, 10);
 
@@ -347,6 +316,7 @@ pub fn main() !void {
             error.OutOfMemory => return err,
         };
         std.log.info("socket path={s}", .{daemon.socket_path});
+        inheritParentLabels(&daemon);
         return run(&daemon, detached, cmd_args_raw.items);
     } else if (std.mem.eql(u8, cmd, "send") or std.mem.eql(u8, cmd, "s")) {
         const session_name = args.next() orelse "";
@@ -571,6 +541,7 @@ pub fn main() !void {
             error.OutOfMemory => return err,
         };
         std.log.info("socket path={s}", .{daemon.socket_path});
+        inheritParentLabels(&daemon);
         try writeFile(&daemon, file_path);
     } else {
         return help();
@@ -849,6 +820,15 @@ const Daemon = struct {
             if (key.len == 0) continue;
             if (isReservedKey(key)) continue;
 
+            // ponytail: empty value = remove the key
+            if (value.len == 0) {
+                if (self.labels.fetchRemove(key)) |existing| {
+                    self.alloc.free(existing.key);
+                    self.alloc.free(existing.value);
+                }
+                continue;
+            }
+
             const owned_key = try self.alloc.dupe(u8, key);
             errdefer self.alloc.free(owned_key);
             const owned_value = try self.alloc.dupe(u8, value);
@@ -858,19 +838,6 @@ const Daemon = struct {
                 // key pointer stays. So free the new (unused) key and the
                 // old value.
                 self.alloc.free(owned_key);
-                self.alloc.free(existing.value);
-            }
-        }
-        try ipc.appendMessage(self.alloc, &client.write_buf, .Ack, "");
-        client.has_pending_output = true;
-    }
-
-    fn handleLabelUnset(self: *Daemon, client: *Client, payload: []const u8) !void {
-        var lines = std.mem.tokenizeScalar(u8, payload, '\n');
-        while (lines.next()) |line| {
-            if (line.len == 0) continue;
-            if (self.labels.fetchRemove(line)) |existing| {
-                self.alloc.free(existing.key);
                 self.alloc.free(existing.value);
             }
         }
@@ -1544,8 +1511,7 @@ fn help() !void {
         \\  [d]etach                                 Detach all clients (ctrl+\\ for current client)
         \\  [l]ist|ls [--short|--where k=v]           List active sessions
         \\  [g]et <name>                              Get session labels
-        \\  set|z <name> k=v ...                       Set session labels
-        \\  [un]set <name> key ...                    Remove session labels
+        \\  set|z <name> k=v ...                       Set session labels (k= to remove)
         \\  [cl]ear <name>                            Clear all session labels
         \\  [k]ill <name>... [--force]               Kill session and all attached clients
         \\  [hi]story <name> [--vt|--html]           Output session scrollback
@@ -1649,6 +1615,7 @@ fn help() !void {
         \\  TMPDIR               Socket directory (priority 3)
         \\  ZMX_SESSION          Session name (injected automatically)
         \\  ZMX_SESSION_PREFIX   Prefix added to all session names
+        \\  ZMX_INHERIT_LABELS   Label inheritance filter (unset=all, empty=none, "a,b"=allowlist)
         \\  ZMX_DIR_MODE         Sets mode for socket and log directories (octal, defaults to 0750)
         \\  ZMX_LOG_MODE         Sets mode for log files (octal, defaults to 0640)
         \\
@@ -2200,6 +2167,60 @@ fn printLabelError(session_name: []const u8, err: anyerror) noreturn {
     std.process.exit(1);
 }
 
+/// ponytail: inherit labels from parent session into a newly created daemon.
+/// Uses $ZMX_SESSION if set, silently skips otherwise.
+/// ZMX_INHERIT_LABELS controls filtering:
+///   unset        → inherit all
+///   empty string → inherit nothing
+///   "a,b"        → inherit only keys a and b
+fn inheritParentLabels(daemon: *Daemon) void {
+    const parent_name = std.posix.getenv("ZMX_SESSION") orelse return;
+    if (parent_name.len == 0) return;
+
+    // Empty value = opt out entirely. Non-empty = comma-separated allowlist.
+    const filter_env = std.posix.getenv("ZMX_INHERIT_LABELS");
+    if (filter_env) |f| {
+        if (f.len == 0) return;
+    }
+
+    const parent_socket = socket.getSocketPath(daemon.alloc, daemon.cfg.socket_dir, parent_name) catch return;
+    defer daemon.alloc.free(parent_socket);
+
+    const result = ipc.probeSessionWithLabels(daemon.alloc, parent_socket, true) catch return;
+    posix.close(result.fd);
+    const label_data = result.labels orelse return;
+    defer daemon.alloc.free(label_data);
+
+    var lines = std.mem.tokenizeScalar(u8, label_data, '\n');
+    while (lines.next()) |line| {
+        const sep = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+        const key = line[0..sep];
+
+        // If filter is set, skip keys not in the allowlist.
+        if (filter_env) |f| {
+            var it = std.mem.tokenizeScalar(u8, f, ',');
+            var found = false;
+            while (it.next()) |allowed| {
+                if (std.mem.eql(u8, allowed, key)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) continue;
+        }
+
+        const owned_key = daemon.alloc.dupe(u8, key) catch continue;
+        const owned_val = daemon.alloc.dupe(u8, line[sep + 1 ..]) catch {
+            daemon.alloc.free(owned_key);
+            continue;
+        };
+        daemon.labels.put(daemon.alloc, owned_key, owned_val) catch {
+            daemon.alloc.free(owned_key);
+            daemon.alloc.free(owned_val);
+        };
+    }
+}
+
 fn labelGet(cfg: *Cfg, session_name: []const u8) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -2256,24 +2277,6 @@ fn labelSet(cfg: *Cfg, session_name: []const u8, pairs: []const LabelKeyValue) !
     const payload = try serializeLabelSet(alloc, pairs);
     defer alloc.free(payload);
     _ = ipc.roundTripForTag(alloc, socket_path, .LabelSet, payload, .Ack) catch |err| {
-        printLabelError(session_name, err);
-    };
-}
-
-fn labelUnset(cfg: *Cfg, session_name: []const u8, keys: []const []const u8) !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const alloc = gpa.allocator();
-
-    const socket_path = socket.getSocketPath(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
-        error.NameTooLong => return socket.printSessionNameTooLong(session_name, cfg.socket_dir),
-        error.OutOfMemory => return err,
-    };
-    defer alloc.free(socket_path);
-
-    const payload = try serializeLabelKeys(alloc, keys);
-    defer alloc.free(payload);
-    _ = ipc.roundTripForTag(alloc, socket_path, .LabelUnset, payload, .Ack) catch |err| {
         printLabelError(session_name, err);
     };
 }
@@ -3206,7 +3209,6 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                         .Info => try daemon.handleInfo(client),
                         .LabelGet => try daemon.handleLabelGet(client),
                         .LabelSet => try daemon.handleLabelSet(client, msg.payload),
-                        .LabelUnset => try daemon.handleLabelUnset(client, msg.payload),
                         .LabelClear => try daemon.handleLabelClear(client),
                         .History => try daemon.handleHistory(client, &term, msg.payload),
                         .Run => try daemon.handleRun(client, msg.payload),

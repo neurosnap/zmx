@@ -32,7 +32,7 @@ const bash_completions =
     \\  cur="${COMP_WORDS[COMP_CWORD]}"
     \\  prev="${COMP_WORDS[COMP_CWORD-1]}"
     \\
-    \\  local commands="attach run send detach list completions kill history get set unset clear version help"
+    \\  local commands="attach run send detach list completions kill history get set clear version help"
     \\
     \\  if [[ $COMP_CWORD -eq 1 ]]; then
     \\    COMPREPLY=($(compgen -W "$commands" -- "$cur"))
@@ -40,7 +40,7 @@ const bash_completions =
     \\  fi
     \\
     \\  case "$prev" in
-    \\    attach|run|send|kill|history|get|set|unset|clear)
+    \\    attach|run|send|kill|history|get|set|clear)
     \\      local sessions=$(zmx list --short 2>/dev/null | tr '\n' ' ')
     \\      COMPREPLY=($(compgen -W "$sessions" -- "$cur"))
     \\      ;;
@@ -84,7 +84,6 @@ const zsh_completions =
     \\        'history:Output session scrollback'
     \\        'get:Get session labels'
     \\        'set:Set session labels'
-    \\        'unset:Remove session labels'
     \\        'clear:Clear all session labels'
     \\        'version:Show version'
     \\        'help:Show help message'
@@ -93,7 +92,7 @@ const zsh_completions =
     \\      ;;
     \\    args)
     \\      case $words[2] in
-    \\        attach|a|kill|k|run|r|send|s|history|hi|get|g|set|se|unset|un|clear|cl)
+    \\        attach|a|kill|k|run|r|send|s|history|hi|get|g|set|se|clear|cl)
     \\          _zmx_sessions
     \\          ;;
     \\        completions|c)
@@ -146,12 +145,11 @@ const fish_completions =
     \\complete -c zmx -n "__fish_is_nth_token 1" -a version -d 'Show version'
     \\complete -c zmx -n "__fish_is_nth_token 1" -a get -d 'Get session labels'
     \\complete -c zmx -n "__fish_is_nth_token 1" -a set -d 'Set session labels'
-    \\complete -c zmx -n "__fish_is_nth_token 1" -a unset -d 'Remove session labels'
     \\complete -c zmx -n "__fish_is_nth_token 1" -a clear -d 'Clear all session labels'
     \\complete -c zmx -n "__fish_is_nth_token 1" -a help -d 'Show help message'
     \\
     \\# Complete session names and shells
-    \\complete -c zmx -n "__fish_is_nth_token 2; and __fish_seen_subcommand_from a attach r run s send wr write hi history g get se set un unset cl clear" -a '(zmx list --short 2>/dev/null)' -d 'Session name'
+    \\complete -c zmx -n "__fish_is_nth_token 2; and __fish_seen_subcommand_from a attach r run s send wr write hi history g get se set cl clear" -a '(zmx list --short 2>/dev/null)' -d 'Session name'
     \\complete -c zmx -n "not __fish_is_nth_token 1; and __fish_seen_subcommand_from k kill w wait t tail" -a '(zmx list --short 2>/dev/null)' -d 'Session name'
     \\
     \\complete -c zmx -n "__fish_is_nth_token 2; and __fish_seen_subcommand_from c completions" -a 'bash zsh fish' -d Shell
@@ -211,11 +209,6 @@ const nu_completions =
     \\export extern "zmx set" [
     \\    name?: string@"nu-complete zmx sessions"
     \\    ...pairs: string
-    \\]
-    \\
-    \\export extern "zmx unset" [
-    \\    name?: string@"nu-complete zmx sessions"
-    \\    ...keys: string
     \\]
     \\
     \\export extern "zmx clear" [
