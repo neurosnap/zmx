@@ -465,3 +465,4 @@ abduco provides session management (i.e. it allows programs to be run independen
 - [pi-zmx](https://github.com/deevus/pi-zmx) -- [pi](https://pi.dev) extension for zmx.
 - [zsm](https://github.com/mdsakalu/zmx-session-manager) -- TUI session manager for zmx. List, preview, filter, and kill sessions from an interactive terminal UI.
 - [zmosh](https://github.com/mmonad/zmosh) -- A fork of zmx that adds encrypted UDP auto-reconnect for remote sessions (like mosh).
+- [zmx-picker](https://github.com/EarthmanMuons/zmx-picker) -- fzf-based session picker and project launcher. Jump to a running zmx session or start one inside any of your git/jj repos.
