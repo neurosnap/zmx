@@ -1392,6 +1392,7 @@ fn help() !void {
         \\  ZMX_SESSION_PREFIX   Prefix added to all session names
         \\  ZMX_DIR_MODE         Sets mode for socket and log directories (octal, defaults to 0750)
         \\  ZMX_LOG_MODE         Sets mode for log files (octal, defaults to 0640)
+        \\  ZMX_NO_DETACH_KEY    Disables the ctrl+\ detach shortcut (set to any value)
         \\
     ;
     var buf: [8192]u8 = undefined;
@@ -2410,6 +2411,8 @@ fn clientLoop(client_sock_fd: i32) !ClientResult {
     _ = try posix.fcntl(stdin_fd, posix.F.SETFL, stdin_orig_flags | O_NONBLOCK);
     defer _ = posix.fcntl(stdin_fd, posix.F.SETFL, stdin_orig_flags) catch {};
 
+    const detach_key_disabled = util.isDetachKeyDisabled();
+
     while (true) {
         poll_fds.clearRetainingCapacity();
 
@@ -2460,7 +2463,7 @@ fn clientLoop(client_sock_fd: i32) !ClientResult {
             if (n_opt) |n| {
                 if (n > 0) {
                     // Check for detach sequences (ctrl+\ as first byte or Kitty escape sequence)
-                    if (util.isCtrlBackslash(buf[0..n])) {
+                    if (!detach_key_disabled and util.isCtrlBackslash(buf[0..n])) {
                         try ipc.appendMessage(alloc, &sock_write_buf, .Detach, "");
                     } else {
                         try ipc.appendMessage(alloc, &sock_write_buf, .Input, buf[0..n]);

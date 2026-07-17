@@ -3,6 +3,7 @@ const posix = std.posix;
 const ghostty_vt = @import("ghostty-vt");
 const ipc = @import("ipc.zig");
 const socket = @import("socket.zig");
+const cross = @import("cross.zig");
 const testing = std.testing;
 
 pub const SessionEntry = struct {
@@ -391,6 +392,13 @@ pub fn stripAnsi(alloc: std.mem.Allocator, data: []const u8) ![]const u8 {
 pub fn isCtrlBackslash(buf: []const u8) bool {
     if (buf.len == 0) return false;
     return buf[0] == 0x1C or isKeyPressed(buf, 0x5c, 0b100);
+}
+
+/// Returns true when the user has opted out of the ctrl+\ detach shortcut
+/// via ZMX_NO_DETACH_KEY, e.g. to free up ctrl+\ for an inner program
+/// like vim, which uses ctrl+\ ctrl+n to escape its own terminal mode.
+pub fn isDetachKeyDisabled() bool {
+    return posix.getenv("ZMX_NO_DETACH_KEY") != null;
 }
 
 /// Detects vt100 or kitty keyboard protocol escape sequence for up arrow.
@@ -1003,6 +1011,15 @@ test "isCtrlBackslash" {
 
     // Other CSI u sequences that happen to contain '92' elsewhere
     try expect(!isCtrlBackslash("\x1b[65;92u"));
+}
+
+test "isDetachKeyDisabled" {
+    _ = cross.c.unsetenv("ZMX_NO_DETACH_KEY");
+    try testing.expect(!isDetachKeyDisabled());
+
+    _ = cross.c.setenv("ZMX_NO_DETACH_KEY", "1", 1);
+    defer _ = cross.c.unsetenv("ZMX_NO_DETACH_KEY");
+    try testing.expect(isDetachKeyDisabled());
 }
 
 test "serializeTerminalState excludes synchronized output replay" {
