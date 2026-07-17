@@ -84,7 +84,7 @@ load test_helper
 @test "send: does not append CR by default" {
   "$ZMX" run test-send-raw -d echo ready
   wait_for_session test-send-raw
-  sleep 0.5
+  wait_for_output test-send-raw ready
 
   # Send text without \r — it should NOT execute as a command
   run "$ZMX" send test-send-raw "partial-text"
@@ -107,12 +107,12 @@ load test_helper
 @test "send: accepts piped stdin" {
   "$ZMX" run test-send-pipe -d echo ready
   wait_for_session test-send-pipe
-  sleep 0.5
+  wait_for_output test-send-pipe ready
 
   run bash -c 'printf "echo piped-marker-xyz789\r" | "$0" send test-send-pipe' "$ZMX"
   [ "$status" -eq 0 ]
 
-  sleep 0.5
+  wait_for_output test-send-pipe piped-marker-xyz789
   run "$ZMX" history test-send-pipe
   [[ "$output" == *"piped-marker-xyz789"* ]]
 }
@@ -198,7 +198,12 @@ load test_helper
   pid=$("$ZMX" list 2>/dev/null | grep test-force | sed 's/.*pid=\([0-9]*\).*/\1/')
   if [[ -n "$pid" ]]; then
     kill -9 "$pid" 2>/dev/null || true
-    sleep 0.5
+    # Wait for the OS to actually reap the process before relying on
+    # --force to see it as dead.
+    for _ in $(seq 1 50); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
   fi
 
   # Regular kill may fail on the dead session; --force cleans up
@@ -229,7 +234,7 @@ load test_helper
 @test "history: captures session output" {
   "$ZMX" run test-hist -d echo "bats-marker-xyzzy"
   wait_for_session test-hist
-  sleep 0.5  # give the command time to produce output
+  wait_for_output test-hist bats-marker-xyzzy
 
   run "$ZMX" history test-hist
   [ "$status" -eq 0 ]
@@ -243,7 +248,7 @@ load test_helper
 @test "wait: returns after session command completes" {
   "$ZMX" run test-wait -d echo done
   wait_for_session test-wait
-  sleep 1  # give the command time to finish
+  wait_for_output test-wait done
 
   # `wait` should return once the command finishes
   run timeout 10 "$ZMX" wait test-wait
@@ -274,12 +279,12 @@ load test_helper
 @test "print: text appears in history" {
   "$ZMX" run test-print-hist -d echo ready
   wait_for_session test-print-hist
-  sleep 0.3
+  wait_for_output test-print-hist ready
 
   # Caller is responsible for newlines; trailing \r\n ensures the text
   # lands on its own line before SIGWINCH triggers a prompt redraw.
   printf "\r\nbats-print-marker-abc123\r\n" | "$ZMX" print test-print-hist
-  sleep 0.3
+  wait_for_output test-print-hist bats-print-marker-abc123
 
   run "$ZMX" history test-print-hist
   [ "$status" -eq 0 ]

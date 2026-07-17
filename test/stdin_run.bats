@@ -15,7 +15,7 @@ load test_helper
   run bash -c 'printf "echo stdin-marker-abc123\n" | timeout 10 "$0" run test-stdin-basic' "$ZMX"
   [ "$status" -eq 0 ]
 
-  sleep 0.3
+  wait_for_output test-stdin-basic stdin-marker-abc123
   run "$ZMX" history test-stdin-basic
   [[ "$output" == *"stdin-marker-abc123"* ]]
 }
@@ -24,7 +24,7 @@ load test_helper
   run bash -c 'printf "echo '\''hello \$USER \$(whoami) \\\"double\\\" ; # comment'\''\n" | timeout 10 "$0" run test-stdin-special' "$ZMX"
   [ "$status" -eq 0 ]
 
-  sleep 0.3
+  wait_for_output test-stdin-special '$USER'
   run "$ZMX" history test-stdin-special
   [[ "$output" == *'$USER'* ]]
   [[ "$output" == *'$(whoami)'* ]]
@@ -36,7 +36,7 @@ load test_helper
   run bash -c 'printf "%s" "$1" | timeout 10 "$0" run test-stdin-multi' "$ZMX" "$script"
   [ "$status" -eq 0 ]
 
-  sleep 0.5
+  wait_for_output test-stdin-multi line-three-ccc
   run "$ZMX" history test-stdin-multi
   [[ "$output" == *"line-one-aaa"* ]]
   [[ "$output" == *"line-two-bbb"* ]]
@@ -51,7 +51,7 @@ load test_helper
   run bash -c 'printf "%s" "$1" | timeout 10 "$0" run test-stdin-heredoc' "$ZMX" "$script"
   [ "$status" -eq 0 ]
 
-  sleep 0.5
+  wait_for_output test-stdin-heredoc '$variables that should not expand'
   run "$ZMX" history test-stdin-heredoc
   [[ "$output" == *'$variables that should not expand'* ]]
 }
@@ -60,7 +60,7 @@ load test_helper
   run timeout 10 env SHELL=/bin/bash "$ZMX" run test-args-only echo args-only-marker-999
   [ "$status" -eq 0 ]
 
-  sleep 0.3
+  wait_for_output test-args-only args-only-marker-999
   run "$ZMX" history test-args-only
   [[ "$output" == *"args-only-marker-999"* ]]
 }

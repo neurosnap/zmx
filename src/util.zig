@@ -328,8 +328,14 @@ test "rewritePromptRedraw: embedded in larger output" {
 pub fn findTaskExitMarker(output: []const u8) ?u8 {
     const marker = "ZMX_TASK_COMPLETED:";
 
-    // Search for marker in output
-    if (std.mem.indexOf(u8, output, marker)) |idx| {
+    // The command line is echoed back by the PTY (canonical mode) before the
+    // shell evaluates it, so the *first* occurrence of the marker in the
+    // output is often the literal, unexpanded "ZMX_TASK_COMPLETED:$?" from
+    // the echo, not the real "ZMX_TASK_COMPLETED:<code>" written once the
+    // shell actually runs it. Keep scanning past unparseable occurrences
+    // instead of giving up on the first one.
+    var search_start: usize = 0;
+    while (std.mem.indexOfPos(u8, output, search_start, marker)) |idx| {
         const after_marker = output[idx + marker.len ..];
 
         // Find the exit code number and newline
@@ -344,8 +350,7 @@ pub fn findTaskExitMarker(output: []const u8) ?u8 {
         if (std.fmt.parseInt(u8, exit_code_str, 10)) |exit_code| {
             return exit_code;
         } else |_| {
-            std.log.warn("failed to parse task exit code from: {s}", .{exit_code_str});
-            return null;
+            search_start = idx + marker.len;
         }
     }
 

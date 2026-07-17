@@ -38,3 +38,19 @@ wait_for_session() {
   echo "Timed out waiting for session '$name'" >&2
   return 1
 }
+
+# Helper: wait for a marker to appear in a session's history (up to N seconds).
+# Use this instead of a fixed sleep whenever a test needs the daemon to have
+# processed and buffered PTY output before it checks/sends more.
+wait_for_output() {
+  local name="$1" marker="$2" timeout="${3:-5}" i=0
+  while (( i < timeout * 10 )); do
+    if "$ZMX" history "$name" 2>/dev/null | grep -qF "$marker"; then
+      return 0
+    fi
+    sleep 0.1
+    (( i++ )) || true
+  done
+  echo "Timed out waiting for output '$marker' in session '$name'" >&2
+  return 1
+}

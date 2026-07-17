@@ -2565,6 +2565,12 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
     var vt_stream = term.vtStream();
     defer vt_stream.deinit();
 
+    // Carries the tail of the previous PTY read so the task-exit marker
+    // search below can see across a read() boundary. Sized to comfortably
+    // hold "ZMX_TASK_COMPLETED:" (19 bytes) plus a u8 exit code and CRLF.
+    var marker_carry: [32]u8 = undefined;
+    var marker_carry_len: usize = 0;
+
     daemon_loop: while (daemon.running) {
         poll_fds.clearRetainingCapacity();
 
@@ -2675,9 +2681,17 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                         util.respondToDeviceAttributes(daemon.alloc, &daemon.pty_write_buf, buf[0..n]);
                     }
 
-                    // In run mode, scan output for exit code marker
+                    // In run mode, scan output for exit code marker. The marker
+                    // can straddle two PTY reads (more likely under a throttled
+                    // scheduler, e.g. containers), so prepend the tail carried
+                    // over from the previous read before searching.
                     if (daemon.is_task_mode and daemon.task_exit_code == null) {
-                        if (util.findTaskExitMarker(buf[0..n])) |exit_code| {
+                        var scan_buf: [marker_carry.len + buf.len]u8 = undefined;
+                        @memcpy(scan_buf[0..marker_carry_len], marker_carry[0..marker_carry_len]);
+                        @memcpy(scan_buf[marker_carry_len..][0..n], buf[0..n]);
+                        const scan_len = marker_carry_len + n;
+
+                        if (util.findTaskExitMarker(scan_buf[0..scan_len])) |exit_code| {
                             daemon.task_exit_code = exit_code;
                             daemon.task_ended_at = @intCast(std.time.timestamp());
 
@@ -2689,6 +2703,12 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                                 c.has_pending_output = true;
                             }
                         }
+
+                        marker_carry_len = @min(marker_carry.len, scan_len);
+                        @memcpy(
+                            marker_carry[0..marker_carry_len],
+                            scan_buf[scan_len - marker_carry_len .. scan_len],
+                        );
                     }
 
                     // Broadcast data to all clients.
