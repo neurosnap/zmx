@@ -1279,7 +1279,7 @@ test "serializeTerminalState size mismatch roundtrip" {
     defer term.deinit(alloc);
 
     // Resize to 24 rows (simulates outer terminal being smaller)
-    try term.resize(alloc, 80, 24);
+    try term.resize(alloc, ghostty_vt.Terminal.Resize{ .cols = 80, .rows = 24 });
 
     var client = try serializeRoundtrip(alloc, &term);
     defer client.deinit(alloc);
@@ -1309,7 +1309,7 @@ test "serializeTerminalState scrollback + size mismatch nested roundtrip" {
     }
 
     // Resize inner to 24 rows (outer terminal is smaller)
-    try inner.resize(alloc, 80, 24);
+    try inner.resize(alloc, ghostty_vt.Terminal.Resize{ .cols = 80, .rows = 24 });
 
     const inner_cursor_x = inner.screens.active.cursor.x;
     const inner_cursor_y = inner.screens.active.cursor.y;

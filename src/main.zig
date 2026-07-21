@@ -1126,7 +1126,11 @@ const Daemon = struct {
             const saved_prompt_redraw = term.flags.shell_redraws_prompt;
             term.flags.shell_redraws_prompt = .false;
             defer term.flags.shell_redraws_prompt = saved_prompt_redraw;
-            try term.resize(self.alloc, resize.cols, resize.rows);
+            const opts = ghostty_vt.Terminal.Resize{
+                .cols = resize.cols,
+                .rows = resize.rows,
+            };
+            try term.resize(self.alloc, opts);
 
             // Mark that we've had a client init, so subsequent clients get terminal state
             self.has_had_client = true;
@@ -1162,7 +1166,11 @@ const Daemon = struct {
         const saved_prompt_redraw = term.flags.shell_redraws_prompt;
         term.flags.shell_redraws_prompt = .false;
         defer term.flags.shell_redraws_prompt = saved_prompt_redraw;
-        try term.resize(self.alloc, resize.cols, resize.rows);
+        const opts = ghostty_vt.Terminal.Resize{
+            .cols = resize.cols,
+            .rows = resize.rows,
+        };
+        try term.resize(self.alloc, opts);
         std.log.debug("resize rows={d} cols={d}", .{ resize.rows, resize.cols });
     }
 
