@@ -15,7 +15,7 @@ zmx wait "*"
 
 zmx run upload-build docker build -t zmx-upload -f Dockerfile.upload .
 
-if [[ $PICI_BRANCH = "main" ]]; then
+if [[ $BRANCH = "main" ]]; then
   zmx run upload docker run --rm \
     -v "$(pwd)/README.md:/app/README.md:ro" \
     -v "$(pwd)/logo.png:/app/logo.png:ro" \
