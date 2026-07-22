@@ -22,15 +22,16 @@ pub const Tag = enum(u8) {
     LabelSet = 15,
     LabelClear = 16,
     LabelData = 17,
+    Send = 18,
     // Non-exhaustive: this enum comes off the wire via bytesToValue and
-    // @enumFromInt, so out-of-range values (14-255) are representable
+    // @enumFromInt, so out-of-range values are representable
     // rather than UB. Switches must handle `_` (unknown tag).
     _,
 };
 
 comptime {
     if (@typeInfo(Tag).@"enum".is_exhaustive) @compileError(
-        "ipc.Tag must stay non-exhaustive — old daemons rely on `_` to ignore unknown tags",
+        "ipc.Tag must stay non-exhaustive -- old daemons rely on `_` to ignore unknown tags",
     );
 }
 
@@ -57,7 +58,7 @@ pub fn getTerminalSize(fd: i32) Resize {
 pub const MAX_CMD_LEN = 256;
 pub const MAX_CWD_LEN = 256;
 
-/// Frozen wire shape. Do NOT add fields — new stats go in new `Tag` values
+/// Frozen wire shape. Do NOT add fields! New stats go in new `Tag` values
 /// so old daemons (whose `_` arm ignores unknown tags) stay reachable.
 /// Changing `@sizeOf(Info)` breaks `zmx list` against running daemons.
 pub const Info = extern struct {
@@ -306,6 +307,7 @@ test "Tag wire values are frozen" {
         .{ Tag.Run, 9 },       .{ Tag.Ack, 10 },          .{ Tag.Switch, 11 },
         .{ Tag.Write, 12 },    .{ Tag.TaskComplete, 13 }, .{ Tag.LabelGet, 14 },
         .{ Tag.LabelSet, 15 }, .{ Tag.LabelClear, 16 },   .{ Tag.LabelData, 17 },
+        .{ Tag.Send, 18 },
     }) |p| try std.testing.expectEqual(@as(u8, p[1]), @intFromEnum(p[0]));
 }
 
