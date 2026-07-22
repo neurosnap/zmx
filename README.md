@@ -282,6 +282,25 @@ if command -v zmx &> /dev/null && command -v fzf &> /dev/null && [[ -z "$ZMX_SES
 fi
 ```
 
+#### Alternative: gentle hint (server use)
+
+If you use zmx on a shared server and SSH in frequently for quick operations,
+auto-launching the picker on every connection may be too aggressive. Instead,
+show a one-line reminder when active sessions exist:
+
+```bash
+if command -v zmx &> /dev/null && [[ -z "$ZMX_SESSION" ]]; then
+  local count
+  count=$(zmx ls --short 2>/dev/null | wc -l)
+  if [[ "$count" -gt 0 ]]; then
+    echo "zmx: $count session(s) active — \`zmx-select\` to attach" >&2
+  fi
+fi
+```
+
+Choose the auto-launch pattern for dedicated dev machines, and the hint
+pattern for shared servers where you frequently run quick commands.
+
 </details>
 
 ## session prefix
