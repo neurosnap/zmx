@@ -45,6 +45,12 @@
 brew install neurosnap/tap/zmx
 ```
 
+### mise-en-place
+
+``` bash
+mise use zmx
+```
+
 ### packages (unofficial)
 
 - [Alpine Linux](https://pkgs.alpinelinux.org/package/edge/testing/x86_64/zmx)
