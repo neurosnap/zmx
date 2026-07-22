@@ -22,8 +22,9 @@ pub const Tag = enum(u8) {
     LabelSet = 15,
     LabelClear = 16,
     LabelData = 17,
+    Send = 18,
     // Non-exhaustive: this enum comes off the wire via bytesToValue and
-    // @enumFromInt, so out-of-range values (14-255) are representable
+    // @enumFromInt, so out-of-range values (19-255) are representable
     // rather than UB. Switches must handle `_` (unknown tag).
     _,
 };
@@ -306,6 +307,7 @@ test "Tag wire values are frozen" {
         .{ Tag.Run, 9 },       .{ Tag.Ack, 10 },          .{ Tag.Switch, 11 },
         .{ Tag.Write, 12 },    .{ Tag.TaskComplete, 13 }, .{ Tag.LabelGet, 14 },
         .{ Tag.LabelSet, 15 }, .{ Tag.LabelClear, 16 },   .{ Tag.LabelData, 17 },
+        .{ Tag.Send, 18 },
     }) |p| try std.testing.expectEqual(@as(u8, p[1]), @intFromEnum(p[0]));
 }
 

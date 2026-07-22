@@ -287,7 +287,7 @@ pub fn main() !void {
             error.NameTooLong => return socket.printSessionNameTooLong(sesh, cfg.socket_dir),
             error.OutOfMemory => return err,
         };
-        return send(&cfg, sesh, socket_path, text_parts.items, .Input);
+        return send(&cfg, sesh, socket_path, text_parts.items, .Send);
     } else if (std.mem.eql(u8, cmd, "print") or std.mem.eql(u8, cmd, "p")) {
         const session_name = args.next() orelse "";
         if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
@@ -1046,6 +1046,11 @@ const Daemon = struct {
         }
     }
 
+    /// Queue input from `zmx send` without changing interactive client leadership.
+    pub fn handleSend(self: *Daemon, payload: []const u8) void {
+        self.queuePtyInput(payload);
+    }
+
     pub fn handleSwitch(self: *Daemon, session_name: []const u8) !void {
         for (self.clients.items) |client| {
             if (self.leader_client_fd == client.socket_fd) {
@@ -1370,6 +1375,27 @@ const Daemon = struct {
         );
     }
 };
+
+test "send queues PTY input without changing leader" {
+    const alloc = std.testing.allocator;
+    var daemon = Daemon{
+        .cfg = undefined,
+        .alloc = alloc,
+        .clients = .empty,
+        .leader_client_fd = 42,
+        .session_name = "test",
+        .socket_path = "",
+        .running = true,
+        .pid = 0,
+        .created_at = 0,
+    };
+    defer daemon.pty_write_buf.deinit(alloc);
+
+    daemon.handleSend("hello");
+
+    try std.testing.expectEqual(@as(?i32, 42), daemon.leader_client_fd);
+    try std.testing.expectEqualStrings("hello", daemon.pty_write_buf.items);
+}
 
 fn printVersion(cfg: *Cfg) !void {
     var buf: [256]u8 = undefined;
@@ -3042,6 +3068,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                 while (client.read_buf.next()) |msg| {
                     switch (msg.header.tag) {
                         .Input => try daemon.handleInput(client, msg.payload),
+                        .Send => daemon.handleSend(msg.payload),
                         .Output => try daemon.handleOutput(msg.payload, &vt_stream),
                         .Init => try daemon.handleInit(client, pty_fd, &term, msg.payload),
                         .Switch => try daemon.handleSwitch(msg.payload),
