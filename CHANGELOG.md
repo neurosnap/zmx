@@ -18,6 +18,9 @@ Use spec: https://common-changelog.org/
 
 - `zmx run` will now detect heredocs and add the completion marker to a newline
 - Race between `zmx kill X; zmx run X`
+- Improved claim leader detection
+- Improved `ctrl+\` key detection
+- Support for linux kernel < 4.11 by avoiding statx calls
 
 ### Changed
 
