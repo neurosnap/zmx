@@ -51,6 +51,24 @@ brew install neurosnap/tap/zmx
 mise use zmx
 ```
 
+### NixOS / nixpkgs
+
+Run immediately without installation:
+
+```sh
+nix run github:NixOS/nixpkgs/nixpkgs-unstable#zmx
+# or build main yourself
+nix run github:neurosnap/zmx
+```
+
+Start a shell with zmx available while it runs:
+
+```sh
+nix shell github:NixOS/nixpkgs/nixpkgs-unstable#zmx
+# or built main yourself
+nix run github:neurosnap/zmx
+```
+
 ### packages (unofficial)
 
 - [Alpine Linux](https://pkgs.alpinelinux.org/package/edge/testing/x86_64/zmx)
