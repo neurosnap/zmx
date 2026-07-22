@@ -47,7 +47,7 @@ brew install neurosnap/tap/zmx
 
 ### mise-en-place
 
-``` bash
+```bash
 mise use zmx
 ```
 
@@ -284,9 +284,7 @@ fi
 
 #### Alternative: gentle hint (server use)
 
-If you use zmx on a shared server and SSH in frequently for quick operations,
-auto-launching the picker on every connection may be too aggressive. Instead,
-show a one-line reminder when active sessions exist:
+If you use zmx on a shared server and SSH in frequently for quick operations, auto-launching the picker on every connection may be too aggressive. Instead, show a one-line reminder when active sessions exist:
 
 ```bash
 if command -v zmx &> /dev/null && [[ -z "$ZMX_SESSION" ]]; then
@@ -298,8 +296,7 @@ if command -v zmx &> /dev/null && [[ -z "$ZMX_SESSION" ]]; then
 fi
 ```
 
-Choose the auto-launch pattern for dedicated dev machines, and the hint
-pattern for shared servers where you frequently run quick commands.
+Choose the auto-launch pattern for dedicated dev machines, and the hint pattern for shared servers where you frequently run quick commands.
 
 </details>
 
