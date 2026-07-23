@@ -4,6 +4,8 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
+## v0.7.0 - 2026-07-23
+
 ### Added
 
 - Label system for sessions:
