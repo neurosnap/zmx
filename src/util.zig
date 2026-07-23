@@ -33,17 +33,18 @@ pub const SessionEntry = struct {
 
 pub fn get_session_entries(
     alloc: std.mem.Allocator,
+    io: std.Io,
     socket_dir: []const u8,
 ) !std.ArrayList(SessionEntry) {
     std.log.info("get session entries socket_dir={s}", .{socket_dir});
-    var dir = try std.fs.openDirAbsolute(socket_dir, .{ .iterate = true });
-    defer dir.close();
+    var dir = try std.Io.Dir.openDirAbsolute(io, socket_dir, .{ .iterate = true });
+    defer dir.close(io);
     var iter = dir.iterate();
 
     var sessions = try std.ArrayList(SessionEntry).initCapacity(alloc, 30);
 
-    while (try iter.next()) |entry| {
-        const exists = socket.sessionExists(dir, entry.name) catch continue;
+    while (try iter.next(io)) |entry| {
+        const exists = socket.sessionExists(io, dir, entry.name) catch continue;
         if (exists) {
             const name = try alloc.dupe(u8, entry.name);
             errdefer alloc.free(name);
@@ -70,7 +71,7 @@ pub fn get_session_entries(
                 // daemon can miss the probe timeout; deleting its socket
                 // orphans it permanently.
                 if (err == error.ConnectionRefused) {
-                    socket.cleanupStaleSocket(dir, entry.name);
+                    socket.cleanupStaleSocket(io, dir, entry.name);
                 }
                 continue;
             };
@@ -404,7 +405,7 @@ pub fn stripAnsi(alloc: std.mem.Allocator, data: []const u8) ![]const u8 {
     return result.toOwnedSlice(alloc);
 }
 
-/// Detects Ctrl+\ across raw, Kitty CSI u, and xterm modifyOtherKeys encodings.
+/// Dcts Ctrl+\ across raw, Kitty CSI u, and xterm modifyOtherKeys encodings.
 pub fn isCtrlBackslash(buf: []const u8) bool {
     if (buf.len == 0) return false;
     return buf[0] == 0x1C or isKeyPressed(buf, 0x5c, 0b100) or isModifyOtherKey(buf, 0x5c, 0b100);
@@ -763,10 +764,6 @@ pub fn serializeTerminal(
         std.log.warn("failed to allocate terminal output err={s}", .{@errorName(err)});
         return null;
     };
-}
-
-pub fn detectShell() [:0]const u8 {
-    return std.posix.getenv("SHELL") orelse "/bin/sh";
 }
 
 /// Formats a session entry for list output (only the name when `short` is
@@ -1168,8 +1165,9 @@ test "isCtrlBackslash xterm modifyOtherKeys" {
 
 test "serializeTerminalState excludes synchronized output replay" {
     const alloc = testing.allocator;
+    const io = testing.io;
 
-    var term = try ghostty_vt.Terminal.init(alloc, .{
+    var term = try ghostty_vt.Terminal.init(io, alloc, .{
         .cols = 80,
         .rows = 24,
     });
@@ -1194,8 +1192,8 @@ test "serializeTerminalState excludes synchronized output replay" {
     try testing.expect(std.mem.indexOf(u8, output, "\x1b[?2026h") == null);
 }
 
-fn testCreateTerminal(alloc: std.mem.Allocator, cols: u16, rows: u16, vt_data: []const u8) !ghostty_vt.Terminal {
-    var term = try ghostty_vt.Terminal.init(alloc, .{
+fn testCreateTerminal(alloc: std.mem.Allocator, io: std.Io, cols: u16, rows: u16, vt_data: []const u8) !ghostty_vt.Terminal {
+    var term = try ghostty_vt.Terminal.init(io, alloc, .{
         .cols = cols,
         .rows = rows,
         .max_scrollback = 10_000_000,
@@ -1222,12 +1220,12 @@ fn expectCursorAt(term: *ghostty_vt.Terminal, row: usize, col: usize) !void {
     try testing.expectEqual(row, cursor.y);
 }
 
-fn serializeRoundtrip(alloc: std.mem.Allocator, source: *ghostty_vt.Terminal) !ghostty_vt.Terminal {
+fn serializeRoundtrip(alloc: std.mem.Allocator, io: std.Io, source: *ghostty_vt.Terminal) !ghostty_vt.Terminal {
     const serialized = serializeTerminalState(alloc, source) orelse
         return error.SerializationFailed;
     defer alloc.free(serialized);
 
-    var dest = try ghostty_vt.Terminal.init(alloc, .{
+    var dest = try ghostty_vt.Terminal.init(io, alloc, .{
         .cols = source.screens.active.pages.cols,
         .rows = source.screens.active.pages.rows,
         .max_scrollback = 10_000_000,
@@ -1256,15 +1254,16 @@ fn expectMarkerAtRow(alloc: std.mem.Allocator, term: *ghostty_vt.Terminal, marke
 
 test "serializeTerminalState roundtrip preserves cursor position" {
     const alloc = testing.allocator;
+    const io = testing.io;
 
-    var term = try testCreateTerminal(alloc, 80, 24, "\x1b[2J" ++ // clear
+    var term = try testCreateTerminal(alloc, io, 80, 24, "\x1b[2J" ++ // clear
         "\x1b[10;20H" // cursor at row 10, col 20 (1-indexed)
     );
     defer term.deinit(alloc);
 
     try expectCursorAt(&term, 9, 19); // 0-indexed
 
-    var client = try serializeRoundtrip(alloc, &term);
+    var client = try serializeRoundtrip(alloc, io, &term);
     defer client.deinit(alloc);
 
     try expectCursorAt(&client, 9, 19);
@@ -1272,8 +1271,9 @@ test "serializeTerminalState roundtrip preserves cursor position" {
 
 test "serializeTerminalState roundtrip preserves CUP-positioned markers" {
     const alloc = testing.allocator;
+    const io = testing.io;
 
-    var term = try testCreateTerminal(alloc, 80, 24, "\x1b[2J" ++
+    var term = try testCreateTerminal(alloc, io, 80, 24, "\x1b[2J" ++
         "\x1b[2;5HMARK_A" ++
         "\x1b[6;15HMARK_B" ++
         "\x1b[10;30HMARK_C" ++
@@ -1281,7 +1281,7 @@ test "serializeTerminalState roundtrip preserves CUP-positioned markers" {
         "\x1b[16;20H");
     defer term.deinit(alloc);
 
-    var client = try serializeRoundtrip(alloc, &term);
+    var client = try serializeRoundtrip(alloc, io, &term);
     defer client.deinit(alloc);
 
     try expectScreensMatch(alloc, &term, &client);
@@ -1294,8 +1294,9 @@ test "serializeTerminalState roundtrip preserves CUP-positioned markers" {
 
 test "serializeTerminalState with scrollback preserves visible content" {
     const alloc = testing.allocator;
+    const io = testing.io;
 
-    var term = try testCreateTerminal(alloc, 80, 24, "");
+    var term = try testCreateTerminal(alloc, io, 80, 24, "");
     defer term.deinit(alloc);
 
     var stream = term.vtStream();
@@ -1321,7 +1322,7 @@ test "serializeTerminalState with scrollback preserves visible content" {
     try testing.expect(has_scrollback);
 
     // Roundtrip: serialize → feed into fresh terminal
-    var client = try serializeRoundtrip(alloc, &term);
+    var client = try serializeRoundtrip(alloc, io, &term);
     defer client.deinit(alloc);
 
     // Visible content must match (this is the core cursor corruption test)
@@ -1336,9 +1337,10 @@ test "serializeTerminalState nested roundtrip preserves content" {
     // Simulates: inner zmx → serialized state → outer ghostty-vt → serialized again → client
     // This is the exact nested session scenario (zmx → SSH → zmx).
     const alloc = testing.allocator;
+    const io = testing.io;
 
     // "Inner" terminal with scrollback + markers
-    var inner = try testCreateTerminal(alloc, 80, 24, "");
+    var inner = try testCreateTerminal(alloc, io, 80, 24, "");
     defer inner.deinit(alloc);
 
     {
@@ -1365,7 +1367,7 @@ test "serializeTerminalState nested roundtrip preserves content" {
     defer alloc.free(inner_serialized);
 
     // "Outer" terminal processes inner's serialized output
-    var outer = try testCreateTerminal(alloc, 80, 24, "");
+    var outer = try testCreateTerminal(alloc, io, 80, 24, "");
     defer outer.deinit(alloc);
 
     {
@@ -1375,7 +1377,7 @@ test "serializeTerminalState nested roundtrip preserves content" {
     }
 
     // Serialize outer (simulates outer daemon re-attach after detach)
-    var client = try serializeRoundtrip(alloc, &outer);
+    var client = try serializeRoundtrip(alloc, io, &outer);
     defer client.deinit(alloc);
 
     // Client must see the same content as inner's visible screen
@@ -1387,15 +1389,16 @@ test "serializeTerminalState nested roundtrip preserves content" {
 
 test "serializeTerminalState alternate screen not leaked" {
     const alloc = testing.allocator;
+    const io = testing.io;
 
-    var term = try testCreateTerminal(alloc, 80, 24, "\x1b[?1049h" ++ // enter alt screen
+    var term = try testCreateTerminal(alloc, io, 80, 24, "\x1b[?1049h" ++ // enter alt screen
         "\x1b[2J\x1b[3;10HALT_MARK" ++ // write on alt screen
         "\x1b[?1049l" ++ // exit alt screen
         "\x1b[2J\x1b[2;5HMAIN_MARK\x1b[8;20H" // write on main screen
     );
     defer term.deinit(alloc);
 
-    var client = try serializeRoundtrip(alloc, &term);
+    var client = try serializeRoundtrip(alloc, io, &term);
     defer client.deinit(alloc);
 
     try expectScreensMatch(alloc, &term, &client);
@@ -1408,8 +1411,9 @@ test "serializeTerminalState alternate screen not leaked" {
 
 test "serializeTerminalState size mismatch roundtrip" {
     const alloc = testing.allocator;
+    const io = testing.io;
 
-    var term = try testCreateTerminal(alloc, 80, 30, "\x1b[2J" ++
+    var term = try testCreateTerminal(alloc, io, 80, 30, "\x1b[2J" ++
         "\x1b[3;10HSIZE_A" ++
         "\x1b[12;20HSIZE_B" ++
         "\x1b[20;40HSIZE_C" ++
@@ -1419,7 +1423,7 @@ test "serializeTerminalState size mismatch roundtrip" {
     // Resize to 24 rows (simulates outer terminal being smaller)
     try term.resize(alloc, ghostty_vt.Terminal.Resize{ .cols = 80, .rows = 24 });
 
-    var client = try serializeRoundtrip(alloc, &term);
+    var client = try serializeRoundtrip(alloc, io, &term);
     defer client.deinit(alloc);
 
     try expectScreensMatch(alloc, &term, &client);
@@ -1428,8 +1432,9 @@ test "serializeTerminalState size mismatch roundtrip" {
 
 test "serializeTerminalState scrollback + size mismatch nested roundtrip" {
     const alloc = testing.allocator;
+    const io = testing.io;
 
-    var inner = try testCreateTerminal(alloc, 80, 30, "");
+    var inner = try testCreateTerminal(alloc, io, 80, 30, "");
     defer inner.deinit(alloc);
 
     {
@@ -1457,7 +1462,7 @@ test "serializeTerminalState scrollback + size mismatch nested roundtrip" {
         return error.SerializationFailed;
     defer alloc.free(inner_ser);
 
-    var outer = try testCreateTerminal(alloc, 80, 24, "");
+    var outer = try testCreateTerminal(alloc, io, 80, 24, "");
     defer outer.deinit(alloc);
     {
         var outer_stream = outer.vtStream();
@@ -1465,7 +1470,7 @@ test "serializeTerminalState scrollback + size mismatch nested roundtrip" {
         outer_stream.nextSlice(inner_ser);
     }
 
-    var client = try serializeRoundtrip(alloc, &outer);
+    var client = try serializeRoundtrip(alloc, io, &outer);
     defer client.deinit(alloc);
 
     try expectScreensMatch(alloc, &inner, &client);

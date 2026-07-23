@@ -80,7 +80,7 @@ nix run github:neurosnap/zmx
 
 ### src
 
-- Requires zig `v0.15`
+- Requires zig `v0.16`
 - Clone the repo
 - Run build cmd
 

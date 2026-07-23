@@ -2,6 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 const cross = @import("cross.zig");
 const socket = @import("socket.zig");
+const lib_posix = @import("posix.zig");
 
 pub const Tag = enum(u8) {
     Input = 0,
@@ -115,7 +116,7 @@ pub fn appendMessage(
 fn writeAll(fd: i32, data: []const u8) !void {
     var index: usize = 0;
     while (index < data.len) {
-        const n = try posix.write(fd, data[index..]);
+        const n = try lib_posix.write(fd, data[index..]);
         if (n == 0) return error.DiskQuota;
         index += n;
     }
@@ -223,7 +224,7 @@ const SessionProbeResult = struct {
 
     pub fn deinit(self: *const SessionProbeResult) void {
         if (self.labels) |lbl| self.alloc.free(lbl);
-        posix.close(self.fd);
+        lib_posix.close(self.fd);
     }
 };
 
@@ -233,7 +234,7 @@ pub fn probeSession(
 ) SessionProbeError!SessionProbeResult {
     const timeout_ms = 1000;
     const fd = try connectSession(socket_path);
-    errdefer posix.close(fd);
+    errdefer lib_posix.close(fd);
 
     send(fd, .Info, "") catch return error.Unexpected;
     send(fd, .LabelGet, "") catch {};
@@ -320,7 +321,7 @@ pub fn roundTripForTag(
 ) SessionProbeError![]u8 {
     const timeout_ms = 1000;
     const fd = try connectSession(socket_path);
-    defer posix.close(fd);
+    defer lib_posix.close(fd);
 
     send(fd, request_tag, payload) catch return error.Unexpected;
 
