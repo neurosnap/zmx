@@ -8,9 +8,10 @@ BRANCH="${PICI_BRANCH:-tmp}"
 echo "running ci event=${EVENT} session=${ZMX_SESSION_PREFIX}"
 
 zmx run build docker build -t zig-zmx .
-zmx run fmt -d docker run --rm -t zig-zmx:latest zig fmt --check .
-zmx run test -d docker run --rm -t zig-zmx:latest zig build test
-zmx run integration -d docker run --rm -t zig-zmx:latest bats --jobs 1 test/*.bats
+zmx run fmt -d docker run --rm -v "$(pwd):/app" -t zig-zmx:latest zig fmt --check .
+zmx run test -d docker run --rm -v "$(pwd):/app" -t zig-zmx:latest zig build test
+zmx run bin -d docker run --rm -v "$(pwd):/app" -t zig-zmx:latest zig build
+zmx run integration -d docker run --rm -v "$(pwd):/app" -t zig-zmx:latest bats --jobs 1 test/*.bats
 zmx wait "*"
 
 zmx run upload-build docker build -t zmx-upload -f Dockerfile.upload .

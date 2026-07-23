@@ -13,8 +13,4 @@ ENV PATH=/usr/local/zig:$PATH
 
 WORKDIR /app
 
-COPY . /app/
-
-RUN zig build
-
-CMD ["zig", "build"]
+CMD ["zig"]
