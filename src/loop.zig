@@ -245,7 +245,18 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
     var marker_carry: [32]u8 = undefined;
     var marker_carry_len: usize = 0;
 
+    var had_terminal_client = daemon.hasTerminalClient();
+
     daemon_loop: while (daemon.running) {
+        // If the program asked for focus reports (DECSET 1004), send focus-out
+        // when the last attached client leaves and focus-in when one returns,
+        // as a terminal would when its window loses/gains focus.
+        const has_terminal_client = daemon.hasTerminalClient();
+        if (has_terminal_client != had_terminal_client and term.modes.get(.focus_event)) {
+            daemon.queuePtyInput(gpa, if (has_terminal_client) "\x1b[I" else "\x1b[O");
+        }
+        had_terminal_client = has_terminal_client;
+
         poll_fds.clearRetainingCapacity();
 
         try poll_fds.append(gpa, .{
@@ -347,10 +358,9 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
                     // When no real terminal client has attached yet, respond to
                     // terminal queries (e.g. DA1/DA2) on behalf of the terminal.
                     // This prevents fish from waiting 10s for unanswered queries.
-                    // `has_terminal_client` is only set when a client sends .Init
-                    // (a real zmx attach), not when a `zmx run` tail-only client
-                    // connects.
-                    if (!daemon.has_terminal_client and
+                    // Only clients that sent .Init (a real zmx attach) count,
+                    // not a `zmx run` tail-only client.
+                    if (!daemon.hasTerminalClient() and
                         daemon.pty_write_buf.items.len < Daemon.PTY_WRITE_BUF_MAX)
                     {
                         util.respondToDeviceAttributes(gpa, &daemon.pty_write_buf, buf[0..n]);
@@ -459,7 +469,7 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
                         .Input => try daemon.handleInput(gpa, client, msg.payload),
                         .Send => daemon.handleSend(gpa, msg.payload),
                         .Output => try daemon.handleOutput(gpa, msg.payload, &term, &vt_stream),
-                        .Init => try daemon.handleInit(gpa, client, pty_fd, &term, msg.payload),
+                        .Init => try daemon.handleInit(gpa, io, client, pty_fd, &term, msg.payload),
                         .Switch => try daemon.handleSwitch(gpa, msg.payload),
                         .Resize => try daemon.handleResize(gpa, client, pty_fd, &term, msg.payload),
                         .Detach => {
@@ -534,6 +544,7 @@ pub const Client = struct {
     alloc: std.mem.Allocator,
     socket_fd: i32,
     has_pending_output: bool = false,
+    is_terminal: bool = false, // sent .Init (a `zmx attach`), not a run/send/tail client
     read_buf: ipc.SocketBuffer,
     write_buf: std.ArrayList(u8),
     env_str: ?[]u8 = null,
@@ -587,7 +598,6 @@ pub const Daemon = struct {
     cwd_path_buf: [std.fs.max_path_bytes]u8 = undefined,
     has_pty_output: bool = false,
     has_had_client: bool = false,
-    has_terminal_client: bool = false, // true only after a real attach (.Init received)
     created_at: u64, // unix timestamp (ns)
     is_task_mode: bool = false, // flag for when session is run as a task
     task_id: [4]u8 = undefined,
@@ -628,6 +638,41 @@ pub const Daemon = struct {
             gpa.destroy(client);
         }
         self.clients.clearRetainingCapacity();
+    }
+
+    /// Resize the daemon's terminal with prompt_redraw disabled. On resize the
+    /// terminal would clear prompt lines expecting the shell to redraw them,
+    /// but the shell's redraw goes to the PTY (forwarded to clients), not to
+    /// this terminal, so the clearing only corrupts our snapshot state.
+    fn resizeTerm(gpa: std.mem.Allocator, term: *ghostty_vt.Terminal, cols: u16, rows: u16) !void {
+        const saved = term.flags.shell_redraws_prompt;
+        term.flags.shell_redraws_prompt = .false;
+        defer term.flags.shell_redraws_prompt = saved;
+        try term.resize(gpa, .{ .cols = cols, .rows = rows });
+    }
+
+    /// If the PTY is already at `ws`, briefly shrink it by one row so the
+    /// program receives a SIGWINCH and redraws (setting an identical size
+    /// raises no signal). Rows rather than cols so nothing re-wraps. The pause
+    /// lets the program read the intermediate size before the caller restores
+    /// it; programs react in well under 1ms, 5ms is margin.
+    fn forceSigwinchIfUnchanged(io: std.Io, pty_fd: i32, ws: cross.c.struct_winsize) void {
+        var cur: cross.c.struct_winsize = undefined;
+        if (cross.c.ioctl(pty_fd, cross.c.TIOCGWINSZ, &cur) != 0) return;
+        if (cur.ws_row != ws.ws_row or cur.ws_col != ws.ws_col or
+            cur.ws_xpixel != ws.ws_xpixel or cur.ws_ypixel != ws.ws_ypixel) return;
+        if (cur.ws_row < 2) return;
+        cur.ws_row -= 1;
+        _ = cross.c.ioctl(pty_fd, cross.c.TIOCSWINSZ, &cur);
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(5), .real) catch {};
+    }
+
+    /// True while a client that sent .Init (a real `zmx attach`) is connected.
+    fn hasTerminalClient(self: *const Daemon) bool {
+        for (self.clients.items) |c| {
+            if (c.is_terminal) return true;
+        }
+        return false;
     }
 
     pub fn closeClient(self: *Daemon, gpa: std.mem.Allocator, client: *Client, i: usize, shutdown_on_last: bool) bool {
@@ -921,6 +966,7 @@ pub const Daemon = struct {
     pub fn handleInit(
         self: *Daemon,
         gpa: std.mem.Allocator,
+        io: std.Io,
         client: *Client,
         pty_fd: i32,
         term: *ghostty_vt.Terminal,
@@ -928,9 +974,24 @@ pub const Daemon = struct {
     ) !void {
         if (payload.len != @sizeOf(ipc.Resize)) return;
 
-        // Serialize terminal state BEFORE resize to capture correct cursor position.
-        // Resizing triggers reflow which can move the cursor, and the shell's
-        // SIGWINCH-triggered redraw will run after our snapshot is sent.
+        client.is_terminal = true;
+
+        if (self.leader_client_fd == null) {
+            try self.setLeader(gpa, client);
+        }
+        const is_leader = self.leader_client_fd == client.socket_fd;
+        const resize = std.mem.bytesToValue(ipc.Resize, payload);
+
+        // Resize our terminal (not yet the PTY) to the leader's size before
+        // serializing, so the snapshot is laid out for the width the client
+        // will render it at instead of being wrapped a second time on arrival.
+        // Cursor position stays consistent because it is serialized from the
+        // same, already-resized terminal; the PTY is resized below, so the
+        // shell's own SIGWINCH redraw still arrives after the snapshot.
+        if (is_leader) {
+            try resizeTerm(gpa, term, resize.cols, resize.rows);
+        }
+
         // Only serialize on re-attach (has_had_client), not first attach, to avoid
         // interfering with shell initialization (DA1 queries, etc.)
         if (self.has_pty_output and self.has_had_client) {
@@ -956,37 +1017,20 @@ pub const Daemon = struct {
             }
         }
 
-        // no leader is set so set one
-        if (self.leader_client_fd == null) {
-            try self.setLeader(gpa, client);
-        }
-
         // only resize if leader
-        if (self.leader_client_fd == client.socket_fd) {
-            const resize = std.mem.bytesToValue(ipc.Resize, payload);
-            var ws: cross.c.struct_winsize = .{
-                .ws_row = resize.rows,
-                .ws_col = resize.cols,
-                .ws_xpixel = resize.xpixel,
-                .ws_ypixel = resize.ypixel,
-            };
+        if (is_leader) {
+            var ws = resize.winsize();
+            // On re-attach the program should redraw, since what's on screen
+            // is now our replay rather than what it last drew. A size change
+            // makes it do that via SIGWINCH, but the kernel sends none when the
+            // size is unchanged, so force one in that case.
+            if (self.has_pty_output and self.has_had_client) {
+                forceSigwinchIfUnchanged(io, pty_fd, ws);
+            }
             _ = cross.c.ioctl(pty_fd, cross.c.TIOCSWINSZ, &ws);
-            // Disable prompt_redraw before resize. The daemon's internal terminal
-            // would otherwise clear prompt lines expecting the shell to redraw them,
-            // but the shell's redraw goes to the PTY (forwarded to clients), not to
-            // this daemon terminal. The clearing corrupts the daemon's snapshot state.
-            const saved_prompt_redraw = term.flags.shell_redraws_prompt;
-            term.flags.shell_redraws_prompt = .false;
-            defer term.flags.shell_redraws_prompt = saved_prompt_redraw;
-            const opts = ghostty_vt.Terminal.Resize{
-                .cols = resize.cols,
-                .rows = resize.rows,
-            };
-            try term.resize(gpa, opts);
 
             // Mark that we've had a client init, so subsequent clients get terminal state
             self.has_had_client = true;
-            self.has_terminal_client = true;
 
             std.log.debug("init resize rows={d} cols={d}", .{ resize.rows, resize.cols });
         }
@@ -1008,22 +1052,9 @@ pub const Daemon = struct {
         if (self.leader_client_fd != client.socket_fd) return;
 
         const resize = std.mem.bytesToValue(ipc.Resize, payload);
-        var ws: cross.c.struct_winsize = .{
-            .ws_row = resize.rows,
-            .ws_col = resize.cols,
-            .ws_xpixel = resize.xpixel,
-            .ws_ypixel = resize.ypixel,
-        };
+        var ws = resize.winsize();
         _ = cross.c.ioctl(pty_fd, cross.c.TIOCSWINSZ, &ws);
-        // Disable prompt_redraw before resize (same rationale as handleInit).
-        const saved_prompt_redraw = term.flags.shell_redraws_prompt;
-        term.flags.shell_redraws_prompt = .false;
-        defer term.flags.shell_redraws_prompt = saved_prompt_redraw;
-        const opts = ghostty_vt.Terminal.Resize{
-            .cols = resize.cols,
-            .rows = resize.rows,
-        };
-        try term.resize(gpa, opts);
+        try resizeTerm(gpa, term, resize.cols, resize.rows);
         std.log.debug("resize rows={d} cols={d}", .{ resize.rows, resize.cols });
     }
 
@@ -1034,11 +1065,11 @@ pub const Daemon = struct {
 
     pub fn handleDetachAll(self: *Daemon, gpa: std.mem.Allocator) void {
         std.log.info("detach all clients={d}", .{self.clients.items.len});
-        for (self.clients.items) |client_to_close| {
-            client_to_close.deinit(gpa);
-            gpa.destroy(client_to_close);
+        // Go through closeClient so the leader is cleared like any other detach.
+        while (self.clients.items.len > 0) {
+            const last = self.clients.items.len - 1;
+            _ = self.closeClient(gpa, self.clients.items[last], last, false);
         }
-        self.clients.clearRetainingCapacity();
     }
 
     pub fn handleKill(self: *Daemon, gpa: std.mem.Allocator, io: std.Io) void {
@@ -1341,18 +1372,63 @@ pub const Daemon = struct {
     }
 };
 
-test "send queues PTY input without changing leader" {
-    const alloc = std.testing.allocator;
-    var daemon = Daemon{
+fn testDaemon() Daemon {
+    return .{
         .cfg = undefined,
         .clients = .empty,
-        .leader_client_fd = 42,
+        .leader_client_fd = null,
         .session_name = "test",
         .socket_path = "",
         .running = true,
         .pid = 0,
         .created_at = 0,
     };
+}
+
+fn testClient(alloc: std.mem.Allocator, fd: i32, is_terminal: bool) !*Client {
+    const c = try alloc.create(Client);
+    c.* = .{ .alloc = alloc, .socket_fd = fd, .read_buf = try ipc.SocketBuffer.init(alloc), .write_buf = .empty };
+    c.is_terminal = is_terminal;
+    return c;
+}
+
+test "hasTerminalClient follows attach, detach and detach-all" {
+    const alloc = std.testing.allocator;
+    var daemon = testDaemon();
+    defer daemon.clients.deinit(alloc);
+    defer daemon.pty_write_buf.deinit(alloc);
+
+    // Real fds (pipes) so Client.deinit's close() is legal.
+    const a = try lib_posix.pipe2(.{});
+    const b = try lib_posix.pipe2(.{});
+
+    try std.testing.expect(!daemon.hasTerminalClient());
+
+    // A run/send/tail client doesn't count.
+    const tail_client = try testClient(alloc, a[0], false);
+    try daemon.clients.append(alloc, tail_client);
+    try std.testing.expect(!daemon.hasTerminalClient());
+
+    // An attach client does, until it disconnects.
+    const term_client = try testClient(alloc, a[1], true);
+    try daemon.clients.append(alloc, term_client);
+    try std.testing.expect(daemon.hasTerminalClient());
+    _ = daemon.closeClient(alloc, tail_client, 0, false);
+    try std.testing.expect(daemon.hasTerminalClient());
+    _ = daemon.closeClient(alloc, term_client, 0, false);
+    try std.testing.expect(!daemon.hasTerminalClient());
+
+    try daemon.clients.append(alloc, try testClient(alloc, b[0], true));
+    try daemon.clients.append(alloc, try testClient(alloc, b[1], true));
+    daemon.handleDetachAll(alloc);
+    try std.testing.expect(!daemon.hasTerminalClient());
+    try std.testing.expectEqual(@as(?i32, null), daemon.leader_client_fd);
+}
+
+test "send queues PTY input without changing leader" {
+    const alloc = std.testing.allocator;
+    var daemon = testDaemon();
+    daemon.leader_client_fd = 42;
     defer daemon.pty_write_buf.deinit(alloc);
 
     daemon.handleSend(alloc, "hello");
