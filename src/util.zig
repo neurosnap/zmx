@@ -702,6 +702,14 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
         return null;
     };
 
+    // The formatter doesn't emit the window title, so restore it (OSC 2)
+    // explicitly; otherwise a reattached client shows a blank/stale title
+    // until the program sets it again. Use getTitle(), which strips the
+    // trailing NUL the terminal stores with the title.
+    writeTitleRestore(&builder.writer, term.getTitle() orelse "") catch |err| {
+        std.log.warn("failed to write title restore err={s}", .{@errorName(err)});
+    };
+
     const output = builder.writer.buffered();
     if (output.len == 0) return null;
 
@@ -836,6 +844,50 @@ pub fn writeSessionLine(
     }
     try writer.print("\n", .{});
 }
+
+const TITLE_RESTORE_MAX = 512;
+
+/// Emit `ESC ] 2 ; <title> ESC \`. Skips empty or overly long titles and any
+/// title containing a control byte, since OSC has no escaping and a control
+/// byte would terminate or corrupt the sequence.
+fn writeTitleRestore(writer: *std.Io.Writer, title: []const u8) !void {
+    if (title.len == 0 or title.len > TITLE_RESTORE_MAX) return;
+    for (title) |c| {
+        if (c < 0x20 or c == 0x7f) return;
+    }
+    try writer.print("\x1b]2;{s}\x1b\\", .{title});
+}
+
+test "writeTitleRestore emits OSC 2 and skips titles it can't frame" {
+    var b: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer b.deinit();
+    try writeTitleRestore(&b.writer, "dev shell — ✨");
+    try testing.expectEqualStrings("\x1b]2;dev shell — ✨\x1b\\", b.writer.buffered());
+
+    var t: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer t.deinit();
+    try writeTitleRestore(&t.writer, "");
+    try writeTitleRestore(&t.writer, "nested\x1b]0;osc");
+    try writeTitleRestore(&t.writer, "bell\x07here");
+    try writeTitleRestore(&t.writer, "del\x7fhere");
+    try writeTitleRestore(&t.writer, &(.{'x'} ** (TITLE_RESTORE_MAX + 1)));
+    try testing.expectEqual(@as(usize, 0), t.writer.buffered().len);
+}
+
+test "serializeTerminalState restores the window title" {
+    // Goes through the terminal's own OSC parsing (which stores the title
+    // NUL-terminated) to check the wiring, not just the helper.
+    const alloc = testing.allocator;
+    var term = try ghostty_vt.Terminal.init(alloc, .{ .cols = 40, .rows = 5 });
+    defer term.deinit(alloc);
+    var stream = term.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("\x1b]2;build watcher\x1b\\hello");
+    const out = serializeTerminalState(alloc, &term) orelse return error.TestUnexpectedResult;
+    defer alloc.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b]2;build watcher\x1b\\") != null);
+}
+
 
 test "writeSessionLine formats output for current session and short output" {
     const Case = struct {
