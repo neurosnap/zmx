@@ -703,6 +703,17 @@ const Daemon = struct {
 
         var kvs = label.LabelIterator.init(labels);
         while (kvs.next()) |kv| {
+            // The CLI validates before sending, but the socket accepts messages from
+            // any writer, and stored labels are printed raw into `zmx list` lines —
+            // a value carrying a tab or newline would forge extra fields or whole
+            // rows there. Enforce the same charset the CLI does, per pair; a bad pair
+            // is dropped (logged) rather than failing the whole Ack a well-behaved
+            // client is waiting on. (`assertLabel` accepts an empty value — that's the
+            // remove form.)
+            label.assertLabel(kv.key, kv.value) catch |err| {
+                std.log.warn("rejecting label pair over IPC key={s} err={s}", .{ kv.key, @errorName(err) });
+                continue;
+            };
             if (kv.value.len == 0) {
                 if (self.labels.fetchRemove(kv.key)) |existing| {
                     self.alloc.free(existing.key);
