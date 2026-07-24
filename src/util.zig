@@ -813,11 +813,18 @@ pub fn writeSessionLine(
         session.clients_len.?,
         session.created_at,
     });
+    // start_dir and cmd are attacker-chosen at session creation (`zmx attach
+    // name -- <cmd>` from any dir) and this format is line/tab-delimited: an
+    // embedded separator would forge extra fields or whole extra rows for
+    // parsers of `zmx list`. Display-only fields, so separators just fold to
+    // spaces. (Labels are charset-validated when set, so they can't.)
     if (session.cwd) |cwd| {
-        try writer.print("\tstart_dir={s}", .{cwd});
+        try writer.print("\tstart_dir=", .{});
+        try writeFieldSafe(writer, cwd);
     }
     if (session.cmd) |cmd| {
-        try writer.print("\tcmd={s}", .{cmd});
+        try writer.print("\tcmd=", .{});
+        try writeFieldSafe(writer, cmd);
     }
     if (session.task_ended_at) |ended_at| {
         if (ended_at > 0) {
@@ -835,6 +842,37 @@ pub fn writeSessionLine(
         }
     }
     try writer.print("\n", .{});
+}
+
+/// Print a free-form field value with `zmx list` separators (tab, newline,
+/// carriage return) folded to spaces so it can't break out of its field/row.
+fn writeFieldSafe(writer: *std.Io.Writer, value: []const u8) !void {
+    for (value) |c| {
+        try writer.writeByte(if (c == '\t' or c == '\n' or c == '\r') ' ' else c);
+    }
+}
+
+test "writeSessionLine folds separators in cmd/start_dir so a row can't be forged" {
+    var builder: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer builder.deinit();
+    const session = SessionEntry{
+        .name = "dev",
+        .pid = 1,
+        .clients_len = 0,
+        .is_error = false,
+        .error_name = null,
+        .cmd = "printf 'a\nname=evil\tclients=9\tcreated=1'",
+        .cwd = "/tmp/tab\there",
+        .created_at = 0,
+        .task_ended_at = null,
+        .task_exit_code = null,
+    };
+    try writeSessionLine(&builder.writer, session, false, null);
+    const out = builder.writer.buffered();
+    // Exactly one line, and the injected separators didn't create fields.
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "\n"));
+    try testing.expect(std.mem.indexOf(u8, out, "\tclients=9") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "start_dir=/tmp/tab here") != null);
 }
 
 test "writeSessionLine formats output for current session and short output" {
