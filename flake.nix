@@ -64,6 +64,8 @@
           build = env.app [ ] "zig build \"$@\"";
 
           test = env.app [ ] "zig build test -- \"$@\"";
+
+          update-lock = env.app [ ] "zig2nix zon2lock \"$@\"";
         };
 
         devShells.default = env.mkShell {
