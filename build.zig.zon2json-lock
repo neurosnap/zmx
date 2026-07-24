@@ -1,8 +1,8 @@
 {
-  "ghostty-1.3.2-dev-5UdBC7meIAWzGmyD-DFyCREkFQyRFzHTZZ2heWLRXl5X": {
+  "ghostty-1.3.2-dev-5UdBC5gHIgWG-_Voonf5F76Vt2I2KljI5lIuvI-7eyBI": {
     "name": "ghostty",
-    "url": "git+https://github.com/ghostty-org/ghostty.git/?ref=HEAD#53bd14fecfd68c6c0ab64d37b5943247299e2b40",
-    "hash": "sha256-0wRsav1cyKenWoJZZ9RplzosYBO0t/smUcr48ngrjkw="
+    "url": "git+https://github.com/ghostty-org/ghostty#30e1f3bb8c3d2949e9ae4aefc1c2b76142569cfb",
+    "hash": "sha256-oEmVpkbLwX4DqsxFLOLWD7ybkj0KmpFRr+6amGeCsaU="
   },
   "libxev-0.0.0-86vtc4IcEwCqEYxEYoN_3KXmc6A9VLcm22aVImfvecYs": {
     "name": "libxev",
@@ -179,9 +179,9 @@
     "url": "https://deps.files.ghostty.org/NerdFontsSymbolsOnly-3.4.0.tar.gz",
     "hash": "sha256-GIcZBeqw06DZAXrUXeLz9iFrT1cUW9DYis57df2BbOM="
   },
-  "N-V-__8AAAYpBACKY0n8sQbPfzY47xFRRtjXiF766UVF5ZyD": {
+  "N-V-__8AALZGBAAS5NLVH-c8eC-6VtCdcH-9nUvVfUSkWS__": {
     "name": "iterm2_themes",
-    "url": "https://deps.files.ghostty.org/ghostty-themes-release-20260629-161812-8c97c3c.tgz",
-    "hash": "sha256-Z9eFboqmkHf+itoa5y2OOkNe2YVQjfxn8SYWlDXaVJs="
+    "url": "https://deps.files.ghostty.org/ghostty-themes-release-20260713-155359-c3968b3.tgz",
+    "hash": "sha256-T4QQ3UW8yA0JYNbsmynogJ8CZPVLAG9xXX2Ab8O6MNU="
   }
 }
