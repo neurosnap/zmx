@@ -1,6 +1,5 @@
 const builtin = @import("builtin");
 const std = @import("std");
-const posix = std.posix;
 
 pub const c = switch (builtin.os.tag) {
     .macos => @cImport({

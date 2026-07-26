@@ -1,5 +1,4 @@
 const std = @import("std");
-const posix = std.posix;
 const build_options = @import("build_options");
 const ghostty_vt = @import("ghostty-vt");
 const ipc = @import("ipc.zig");
@@ -33,10 +32,10 @@ fn zmxLogFn(
 /// Self-pipe woken by signal handlers. std.posix.poll loops on .INTR internally
 /// (PollError has no Interrupted member), so a signal that lands during poll()
 /// never surfaces; the handler writes a byte here and poll() wakes on POLLIN.
-var sig_pipe: [2]posix.fd_t = .{ -1, -1 };
+var sig_pipe: [2]lib_posix.fd_t = .{ -1, -1 };
 
 // https://github.com/ziglang/zig/blob/738d2be9d6b6ef3ff3559130c05159ef53336224/lib/std/posix.zig#L3505
-const O_NONBLOCK: usize = 1 << @bitOffsetOf(posix.O, "NONBLOCK");
+const O_NONBLOCK: usize = 1 << @bitOffsetOf(lib_posix.O, "NONBLOCK");
 
 const SessionMatch = struct {
     name: []const u8,
@@ -83,7 +82,7 @@ fn openSignalPipe() !void {
 fn drainSignalPipe() void {
     var b: [16]u8 = undefined;
     while (true) {
-        const n = posix.read(sig_pipe[0], &b) catch return;
+        const n = lib_posix.read(sig_pipe[0], &b) catch return;
         if (n == 0) return;
     }
 }
@@ -805,12 +804,12 @@ const Daemon = struct {
         // main() set SIGPIPE to SIG_IGN, which (unlike handlers) survives
         // exec. Restore the default so the shell and its children behave
         // normally (e.g. `yes | head` should exit 141 via SIGPIPE).
-        const dfl: posix.Sigaction = .{
-            .handler = .{ .handler = posix.SIG.DFL },
-            .mask = posix.sigemptyset(),
+        const dfl: lib_posix.Sigaction = .{
+            .handler = .{ .handler = lib_posix.SIG.DFL },
+            .mask = lib_posix.sigemptyset(),
             .flags = 0,
         };
-        posix.sigaction(posix.SIG.PIPE, &dfl, null);
+        lib_posix.sigaction(lib_posix.SIG.PIPE, &dfl, null);
 
         const session_env = try std.fmt.allocPrintSentinel(
             alloc,
@@ -848,7 +847,7 @@ const Daemon = struct {
 
     /// spawnPty runs forkpty() and executes the shell or shell command the user provides.
     fn spawnPty(self: *Daemon) !c_int {
-        const size = ipc.getTerminalSize(posix.STDOUT_FILENO);
+        const size = ipc.getTerminalSize(lib_posix.STDOUT_FILENO);
         var ws: cross.c.struct_winsize = .{
             .ws_row = size.rows,
             .ws_col = size.cols,
@@ -878,8 +877,8 @@ const Daemon = struct {
         std.log.info("pty spawned session={s} pid={d}", .{ self.session_name, pid });
 
         // make pty non-blocking
-        const flags = try lib_posix.fcntl(master_fd, posix.F.GETFL, 0);
-        _ = try lib_posix.fcntl(master_fd, posix.F.SETFL, flags | O_NONBLOCK);
+        const flags = try lib_posix.fcntl(master_fd, lib_posix.F.GETFL, 0);
+        _ = try lib_posix.fcntl(master_fd, lib_posix.F.SETFL, flags | O_NONBLOCK);
         return master_fd;
     }
 
@@ -946,7 +945,7 @@ const Daemon = struct {
                         std.log.warn("failed to open /dev/null: {s}", .{@errorName(err)});
                         return err;
                     };
-                    inline for (.{ posix.STDIN_FILENO, posix.STDOUT_FILENO, posix.STDERR_FILENO }) |fd| {
+                    inline for (.{ lib_posix.STDIN_FILENO, lib_posix.STDOUT_FILENO, lib_posix.STDERR_FILENO }) |fd| {
                         _ = lib_posix.dup2(devnull, fd) catch |err| {
                             std.log.warn("dup2 /dev/null -> {d}: {s}", .{ fd, @errorName(err) });
                             return err;
@@ -1221,11 +1220,11 @@ const Daemon = struct {
         //   https://www.gnu.org/software/bash/manual/html_node/Signals.html
         // negative pid means kill process and children
         std.log.info("sending SIGHUP session={s} pid={d}", .{ self.session_name, self.pid });
-        posix.kill(-self.pid, posix.SIG.HUP) catch |err| {
+        lib_posix.kill(-self.pid, lib_posix.SIG.HUP) catch |err| {
             std.log.warn("failed to send SIGHUP to pty child err={s}", .{@errorName(err)});
         };
         std.Io.sleep(self.io, std.Io.Duration.fromMilliseconds(500), .real) catch unreachable;
-        posix.kill(-self.pid, posix.SIG.KILL) catch |err| {
+        lib_posix.kill(-self.pid, lib_posix.SIG.KILL) catch |err| {
             std.log.warn("failed to send SIGKILL to pty child err={s}", .{@errorName(err)});
         };
     }
@@ -1339,7 +1338,7 @@ const Daemon = struct {
             client.has_pending_output = true;
         }
         if (self.clients.items.len > 0) {
-            posix.kill(self.pid, posix.SIG.WINCH) catch |err| {
+            lib_posix.kill(self.pid, lib_posix.SIG.WINCH) catch |err| {
                 std.log.warn("failed to send SIGWINCH err={s}", .{@errorName(err)});
             };
         }
@@ -1580,7 +1579,7 @@ fn help(io: std.Io) !void {
 }
 
 fn tail(alloc: std.mem.Allocator, client_socket_fds: std.ArrayList(i32), detached: bool, is_run_cmd: bool) !u8 {
-    var poll_fds = try std.ArrayList(posix.pollfd).initCapacity(alloc, 4);
+    var poll_fds = try std.ArrayList(lib_posix.pollfd).initCapacity(alloc, 4);
     defer poll_fds.deinit(alloc);
 
     var read_buf = try ipc.SocketBuffer.init(alloc);
@@ -1599,7 +1598,7 @@ fn tail(alloc: std.mem.Allocator, client_socket_fds: std.ArrayList(i32), detache
         for (client_socket_fds.items) |client_sock_fd| {
             try poll_fds.append(alloc, .{
                 .fd = client_sock_fd,
-                .events = posix.POLL.IN,
+                .events = lib_posix.POLL.IN,
                 .revents = 0,
             });
         }
@@ -1607,20 +1606,20 @@ fn tail(alloc: std.mem.Allocator, client_socket_fds: std.ArrayList(i32), detache
         // Poll for write if we have pending data
         if (stdout_buf.items.len > 0) {
             try poll_fds.append(alloc, .{
-                .fd = posix.STDOUT_FILENO,
-                .events = posix.POLL.OUT,
+                .fd = lib_posix.STDOUT_FILENO,
+                .events = lib_posix.POLL.OUT,
                 .revents = 0,
             });
         }
 
-        _ = posix.poll(poll_fds.items, -1) catch |err| {
+        _ = lib_posix.poll(poll_fds.items, -1) catch |err| {
             if (err == error.Interrupted) continue; // EINTR from signal, loop again
             return err;
         };
 
         // Handle socket read (incoming Output messages from daemon)
         for (poll_fds.items) |*poll_fd| {
-            if (poll_fd.revents & posix.POLL.IN != 0) {
+            if (poll_fd.revents & lib_posix.POLL.IN != 0) {
                 const n = read_buf.read(poll_fd.fd) catch |err| {
                     if (err == error.WouldBlock) continue;
                     if (err == error.ConnectionResetByPeer or err == error.BrokenPipe) {
@@ -1642,7 +1641,7 @@ fn tail(alloc: std.mem.Allocator, client_socket_fds: std.ArrayList(i32), detache
                     switch (msg.header.tag) {
                         .Ack => {
                             if (detached) {
-                                _ = lib_posix.write(posix.STDOUT_FILENO, "command sent!\n") catch |err| blk: {
+                                _ = lib_posix.write(lib_posix.STDOUT_FILENO, "command sent!\n") catch |err| blk: {
                                     if (err == error.WouldBlock) break :blk 0;
                                     return err;
                                 };
@@ -1704,7 +1703,7 @@ fn tail(alloc: std.mem.Allocator, client_socket_fds: std.ArrayList(i32), detache
         if (task_complete_code) |exit_code| {
             // Flush any remaining output before returning
             flush_loop: while (stdout_buf.items.len > 0) {
-                const n = lib_posix.write(posix.STDOUT_FILENO, stdout_buf.items) catch |err| {
+                const n = lib_posix.write(lib_posix.STDOUT_FILENO, stdout_buf.items) catch |err| {
                     if (err == error.WouldBlock) break :flush_loop;
                     return err;
                 };
@@ -1714,7 +1713,7 @@ fn tail(alloc: std.mem.Allocator, client_socket_fds: std.ArrayList(i32), detache
         }
 
         if (stdout_buf.items.len > 0) {
-            const n = lib_posix.write(posix.STDOUT_FILENO, stdout_buf.items) catch |err| blk: {
+            const n = lib_posix.write(lib_posix.STDOUT_FILENO, stdout_buf.items) catch |err| blk: {
                 if (err == error.WouldBlock) break :blk 0;
                 return err;
             };
@@ -1725,7 +1724,7 @@ fn tail(alloc: std.mem.Allocator, client_socket_fds: std.ArrayList(i32), detache
 
         // Check for HUP/ERR on any socket
         for (poll_fds.items) |poll_fd| {
-            if (poll_fd.revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
+            if (poll_fd.revents & (lib_posix.POLL.HUP | lib_posix.POLL.ERR | lib_posix.POLL.NVAL) != 0) {
                 return 0;
             }
         }
@@ -2022,7 +2021,7 @@ fn kill(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []const u
     // accept backlog.
     var drain: [256]u8 = undefined;
     while (true) {
-        const n = posix.read(fd, &drain) catch break;
+        const n = lib_posix.read(fd, &drain) catch break;
         if (n == 0) break;
     }
 
@@ -2179,8 +2178,8 @@ fn fetchHistory(
     errdefer result.deinit(alloc);
 
     while (true) {
-        var poll_fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
-        const poll_result = posix.poll(&poll_fds, 5000) catch return error.Timeout;
+        var poll_fds = [_]lib_posix.pollfd{.{ .fd = fd, .events = lib_posix.POLL.IN, .revents = 0 }};
+        const poll_result = lib_posix.poll(&poll_fds, 5000) catch return error.Timeout;
         if (poll_result == 0) {
             return error.Timeout;
         }
@@ -2236,8 +2235,8 @@ fn history(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []cons
     defer sb.deinit();
 
     while (true) {
-        var poll_fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
-        const poll_result = posix.poll(&poll_fds, 5000) catch return;
+        var poll_fds = [_]lib_posix.pollfd{.{ .fd = fd, .events = lib_posix.POLL.IN, .revents = 0 }};
+        const poll_result = lib_posix.poll(&poll_fds, 5000) catch return;
         if (poll_result == 0) {
             std.log.err("timeout waiting for history response", .{});
             return;
@@ -2248,7 +2247,7 @@ fn history(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []cons
 
         while (sb.next()) |msg| {
             if (msg.header.tag == .History) {
-                _ = lib_posix.write(posix.STDOUT_FILENO, msg.payload) catch return;
+                _ = lib_posix.write(lib_posix.STDOUT_FILENO, msg.payload) catch return;
                 return;
             }
         }
@@ -2314,15 +2313,15 @@ fn attach(daemon: *Daemon) !void {
     // skip terminal setup entirely rather than applying undefined stack bytes
     // via tcsetattr.
     var orig_termios: cross.c.termios = undefined;
-    const stdin_is_tty = cross.c.tcgetattr(posix.STDIN_FILENO, &orig_termios) == 0;
+    const stdin_is_tty = cross.c.tcgetattr(lib_posix.STDIN_FILENO, &orig_termios) == 0;
 
     defer {
         if (stdin_is_tty) {
-            _ = cross.c.tcsetattr(posix.STDIN_FILENO, cross.c.TCSAFLUSH, &orig_termios);
+            _ = cross.c.tcsetattr(lib_posix.STDIN_FILENO, cross.c.TCSAFLUSH, &orig_termios);
         }
         // Reset terminal modes on detach
         const restore_seq = "\x1bc";
-        _ = lib_posix.write(posix.STDOUT_FILENO, restore_seq) catch {};
+        _ = lib_posix.write(lib_posix.STDOUT_FILENO, restore_seq) catch {};
     }
 
     if (stdin_is_tty) {
@@ -2340,13 +2339,13 @@ fn attach(daemon: *Daemon) !void {
         raw_termios.c_cc[cross.c.VMIN] = 1; // Minimum chars to read: return after 1 byte
         raw_termios.c_cc[cross.c.VTIME] = 0; // Read timeout: no timeout, return immediately
 
-        _ = cross.c.tcsetattr(posix.STDIN_FILENO, cross.c.TCSANOW, &raw_termios);
+        _ = cross.c.tcsetattr(lib_posix.STDIN_FILENO, cross.c.TCSANOW, &raw_termios);
     }
 
     // Clear screen before attaching. This provides a clean slate before
     // the session restore.
     const clear_seq = "\x1b[2J\x1b[H";
-    _ = try lib_posix.write(posix.STDOUT_FILENO, clear_seq);
+    _ = try lib_posix.write(lib_posix.STDOUT_FILENO, clear_seq);
 
     const looper = try clientLoop(client_sock);
     switch (looper.kind) {
@@ -2399,13 +2398,13 @@ fn writeFile(daemon: *Daemon, file_path: []const u8) !void {
         try w.interface.print("session \"{s}\" created\n", .{daemon.session_name});
         try w.interface.flush();
     }
-    const stdin_fd = posix.STDIN_FILENO;
+    const stdin_fd = lib_posix.STDIN_FILENO;
     var stdin_buf = try std.ArrayList(u8).initCapacity(daemon.alloc, 4096);
     defer stdin_buf.deinit(daemon.alloc);
 
     while (true) {
         var tmp: [4096]u8 = undefined;
-        const n = posix.read(stdin_fd, &tmp) catch |err| {
+        const n = lib_posix.read(stdin_fd, &tmp) catch |err| {
             if (err == error.WouldBlock) break;
             return err;
         };
@@ -2680,22 +2679,22 @@ fn clientLoop(client_sock_fd: i32) !ClientResult {
     defer lib_posix.close(client_sock_fd);
 
     try openSignalPipe();
-    installWakeHandler(@intFromEnum(posix.SIG.WINCH));
+    installWakeHandler(@intFromEnum(lib_posix.SIG.WINCH));
 
     // Make socket non-blocking to avoid blocking on writes
-    var sock_flags = try lib_posix.fcntl(client_sock_fd, posix.F.GETFL, 0);
+    var sock_flags = try lib_posix.fcntl(client_sock_fd, lib_posix.F.GETFL, 0);
     sock_flags |= O_NONBLOCK;
-    _ = try lib_posix.fcntl(client_sock_fd, posix.F.SETFL, sock_flags);
+    _ = try lib_posix.fcntl(client_sock_fd, lib_posix.F.SETFL, sock_flags);
 
     // Buffer for outgoing socket writes
     var sock_write_buf = try std.ArrayList(u8).initCapacity(alloc, 4096);
     defer sock_write_buf.deinit(alloc);
 
     // Send init message with terminal size (buffered)
-    const size = ipc.getTerminalSize(posix.STDOUT_FILENO);
+    const size = ipc.getTerminalSize(lib_posix.STDOUT_FILENO);
     try ipc.appendMessage(alloc, &sock_write_buf, .Init, std.mem.asBytes(&size));
 
-    var poll_fds = try std.ArrayList(posix.pollfd).initCapacity(alloc, 4);
+    var poll_fds = try std.ArrayList(lib_posix.pollfd).initCapacity(alloc, 4);
     defer poll_fds.deinit(alloc);
 
     var read_buf = try ipc.SocketBuffer.init(alloc);
@@ -2704,28 +2703,28 @@ fn clientLoop(client_sock_fd: i32) !ClientResult {
     var stdout_buf = try std.ArrayList(u8).initCapacity(alloc, 4096);
     defer stdout_buf.deinit(alloc);
 
-    const stdin_fd = posix.STDIN_FILENO;
+    const stdin_fd = lib_posix.STDIN_FILENO;
 
     // Make stdin non-blocking. O_NONBLOCK is set on the open file description,
     // which is shared with the parent shell; restore on exit to avoid
     // corrupting the parent's stdin.
-    const stdin_orig_flags = try lib_posix.fcntl(stdin_fd, posix.F.GETFL, 0);
-    _ = try lib_posix.fcntl(stdin_fd, posix.F.SETFL, stdin_orig_flags | O_NONBLOCK);
-    defer _ = lib_posix.fcntl(stdin_fd, posix.F.SETFL, stdin_orig_flags) catch {};
+    const stdin_orig_flags = try lib_posix.fcntl(stdin_fd, lib_posix.F.GETFL, 0);
+    _ = try lib_posix.fcntl(stdin_fd, lib_posix.F.SETFL, stdin_orig_flags | O_NONBLOCK);
+    defer _ = lib_posix.fcntl(stdin_fd, lib_posix.F.SETFL, stdin_orig_flags) catch {};
 
     while (true) {
         poll_fds.clearRetainingCapacity();
 
         try poll_fds.append(alloc, .{
             .fd = stdin_fd,
-            .events = posix.POLL.IN,
+            .events = lib_posix.POLL.IN,
             .revents = 0,
         });
 
         // Poll socket for read, and also for write if we have pending data
-        var sock_events: i16 = posix.POLL.IN;
+        var sock_events: i16 = lib_posix.POLL.IN;
         if (sock_write_buf.items.len > 0) {
-            sock_events |= posix.POLL.OUT;
+            sock_events |= lib_posix.POLL.OUT;
         }
         try poll_fds.append(alloc, .{
             .fd = client_sock_fd,
@@ -2733,29 +2732,29 @@ fn clientLoop(client_sock_fd: i32) !ClientResult {
             .revents = 0,
         });
 
-        try poll_fds.append(alloc, .{ .fd = sig_pipe[0], .events = posix.POLL.IN, .revents = 0 });
+        try poll_fds.append(alloc, .{ .fd = sig_pipe[0], .events = lib_posix.POLL.IN, .revents = 0 });
 
         if (stdout_buf.items.len > 0) {
             try poll_fds.append(alloc, .{
-                .fd = posix.STDOUT_FILENO,
-                .events = posix.POLL.OUT,
+                .fd = lib_posix.STDOUT_FILENO,
+                .events = lib_posix.POLL.OUT,
                 .revents = 0,
             });
         }
 
-        _ = try posix.poll(poll_fds.items, -1);
+        _ = try lib_posix.poll(poll_fds.items, -1);
 
-        if (poll_fds.items[2].revents & posix.POLL.IN != 0) {
+        if (poll_fds.items[2].revents & lib_posix.POLL.IN != 0) {
             drainSignalPipe();
-            const next_size = ipc.getTerminalSize(posix.STDOUT_FILENO);
+            const next_size = ipc.getTerminalSize(lib_posix.STDOUT_FILENO);
             try ipc.appendMessage(alloc, &sock_write_buf, .Resize, std.mem.asBytes(&next_size));
         }
 
         // Handle stdin -> socket (Input)
-        const inp_flags = (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL);
+        const inp_flags = (lib_posix.POLL.IN | lib_posix.POLL.HUP | lib_posix.POLL.ERR | lib_posix.POLL.NVAL);
         if (poll_fds.items[0].revents & inp_flags != 0) {
             var buf: [4096]u8 = undefined;
-            const n_opt: ?usize = posix.read(stdin_fd, &buf) catch |err| blk: {
+            const n_opt: ?usize = lib_posix.read(stdin_fd, &buf) catch |err| blk: {
                 if (err == error.WouldBlock) break :blk null;
                 return err;
             };
@@ -2778,7 +2777,7 @@ fn clientLoop(client_sock_fd: i32) !ClientResult {
         }
 
         // Handle socket read (incoming Output messages from daemon)
-        if (poll_fds.items[1].revents & posix.POLL.IN != 0) {
+        if (poll_fds.items[1].revents & lib_posix.POLL.IN != 0) {
             const n = read_buf.read(client_sock_fd) catch |err| {
                 if (err == error.WouldBlock) continue;
                 if (err == error.ConnectionResetByPeer or err == error.BrokenPipe) {
@@ -2803,7 +2802,7 @@ fn clientLoop(client_sock_fd: i32) !ClientResult {
                     .Resize => {
                         // daemon is asking for the client's window size usually in response
                         // to this client being set as leader.
-                        const next_size = ipc.getTerminalSize(posix.STDOUT_FILENO);
+                        const next_size = ipc.getTerminalSize(lib_posix.STDOUT_FILENO);
                         try ipc.appendMessage(
                             alloc,
                             &sock_write_buf,
@@ -2821,7 +2820,7 @@ fn clientLoop(client_sock_fd: i32) !ClientResult {
         }
 
         // Handle socket write (flush buffered messages to daemon)
-        if (poll_fds.items[1].revents & posix.POLL.OUT != 0) {
+        if (poll_fds.items[1].revents & lib_posix.POLL.OUT != 0) {
             if (sock_write_buf.items.len > 0) {
                 const n = lib_posix.write(client_sock_fd, sock_write_buf.items) catch |err| blk: {
                     if (err == error.WouldBlock) break :blk 0;
@@ -2838,7 +2837,7 @@ fn clientLoop(client_sock_fd: i32) !ClientResult {
         }
 
         if (stdout_buf.items.len > 0) {
-            const n = lib_posix.write(posix.STDOUT_FILENO, stdout_buf.items) catch |err| blk: {
+            const n = lib_posix.write(lib_posix.STDOUT_FILENO, stdout_buf.items) catch |err| blk: {
                 if (err == error.WouldBlock) break :blk 0;
                 return err;
             };
@@ -2847,7 +2846,7 @@ fn clientLoop(client_sock_fd: i32) !ClientResult {
             }
         }
 
-        if (poll_fds.items[1].revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
+        if (poll_fds.items[1].revents & (lib_posix.POLL.HUP | lib_posix.POLL.ERR | lib_posix.POLL.NVAL) != 0) {
             std.log.info("poll hup|err|nval", .{});
             return ClientResult{ .kind = .detach, .session_name = null };
         }
@@ -2861,7 +2860,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
     daemon.pty_fd = pty_fd;
     try openSignalPipe();
     installWakeHandler(@intFromEnum(lib_posix.SIG.TERM));
-    var poll_fds = try std.ArrayList(posix.pollfd).initCapacity(daemon.alloc, 8);
+    var poll_fds = try std.ArrayList(lib_posix.pollfd).initCapacity(daemon.alloc, 8);
     defer poll_fds.deinit(daemon.alloc);
 
     const init_size = ipc.getTerminalSize(pty_fd);
@@ -2885,13 +2884,13 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
 
         try poll_fds.append(daemon.alloc, .{
             .fd = server_sock_fd,
-            .events = posix.POLL.IN,
+            .events = lib_posix.POLL.IN,
             .revents = 0,
         });
 
-        var pty_events: i16 = posix.POLL.IN;
+        var pty_events: i16 = lib_posix.POLL.IN;
         if (daemon.pty_write_buf.items.len > 0) {
-            pty_events |= posix.POLL.OUT;
+            pty_events |= lib_posix.POLL.OUT;
         }
         try poll_fds.append(daemon.alloc, .{
             .fd = pty_fd,
@@ -2899,12 +2898,12 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
             .revents = 0,
         });
 
-        try poll_fds.append(daemon.alloc, .{ .fd = sig_pipe[0], .events = posix.POLL.IN, .revents = 0 });
+        try poll_fds.append(daemon.alloc, .{ .fd = sig_pipe[0], .events = lib_posix.POLL.IN, .revents = 0 });
 
         for (daemon.clients.items) |client| {
-            var events: i16 = posix.POLL.IN;
+            var events: i16 = lib_posix.POLL.IN;
             if (client.has_pending_output) {
-                events |= posix.POLL.OUT;
+                events |= lib_posix.POLL.OUT;
             }
             try poll_fds.append(daemon.alloc, .{
                 .fd = client.socket_fd,
@@ -2913,9 +2912,9 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
             });
         }
 
-        _ = try posix.poll(poll_fds.items, -1);
+        _ = try lib_posix.poll(poll_fds.items, -1);
 
-        if (poll_fds.items[2].revents & posix.POLL.IN != 0) {
+        if (poll_fds.items[2].revents & lib_posix.POLL.IN != 0) {
             drainSignalPipe();
             std.log.info(
                 "SIGTERM received, shutting down gracefully session={s}",
@@ -2924,15 +2923,15 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
             break :daemon_loop;
         }
 
-        if (poll_fds.items[0].revents & (posix.POLL.ERR | posix.POLL.HUP | posix.POLL.NVAL) != 0) {
+        if (poll_fds.items[0].revents & (lib_posix.POLL.ERR | lib_posix.POLL.HUP | lib_posix.POLL.NVAL) != 0) {
             std.log.err("server socket error revents={d}", .{poll_fds.items[0].revents});
             break :daemon_loop;
-        } else if (poll_fds.items[0].revents & posix.POLL.IN != 0) {
+        } else if (poll_fds.items[0].revents & lib_posix.POLL.IN != 0) {
             const client_fd = try lib_posix.accept(
                 server_sock_fd,
                 null,
                 null,
-                posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC,
+                lib_posix.SOCK.NONBLOCK | lib_posix.SOCK.CLOEXEC,
             );
             const client = try daemon.alloc.create(Client);
             client.* = Client{
@@ -2953,14 +2952,14 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
             );
         }
 
-        const inp_flags = posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL;
+        const inp_flags = lib_posix.POLL.IN | lib_posix.POLL.HUP | lib_posix.POLL.ERR | lib_posix.POLL.NVAL;
         if (poll_fds.items[1].revents & inp_flags != 0) {
             // Read from PTY. Buffer is sized to N_TTY_BUF_SIZE (4096): the hard
             // kernel limit for the N_TTY line discipline. A larger buffer doesn't
             // help: each read() from a PTY master returns at most 4096 bytes
             // regardless of the userspace buffer size.
             var buf: [4096]u8 = undefined;
-            const n_opt: ?usize = posix.read(pty_fd, &buf) catch |err| blk: {
+            const n_opt: ?usize = lib_posix.read(pty_fd, &buf) catch |err| blk: {
                 if (err == error.WouldBlock) break :blk null;
                 break :blk 0;
             };
@@ -3039,7 +3038,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
             }
         }
 
-        if (poll_fds.items[1].revents & posix.POLL.OUT != 0) {
+        if (poll_fds.items[1].revents & lib_posix.POLL.OUT != 0) {
             while (daemon.pty_write_buf.items.len > 0) {
                 const n = lib_posix.write(pty_fd, daemon.pty_write_buf.items) catch |err| {
                     if (err != error.WouldBlock) {
@@ -3069,7 +3068,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
             const client = daemon.clients.items[i];
             const revents = poll_fds.items[i + 3].revents;
 
-            if (revents & posix.POLL.IN != 0) {
+            if (revents & lib_posix.POLL.IN != 0) {
                 const n = client.read_buf.read(client.socket_fd) catch |err| {
                     if (err == error.WouldBlock) continue;
                     std.log.debug(
@@ -3123,7 +3122,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                 }
             }
 
-            if (revents & posix.POLL.OUT != 0) {
+            if (revents & lib_posix.POLL.OUT != 0) {
                 // Flush pending output buffers
                 const n = lib_posix.write(client.socket_fd, client.write_buf.items) catch |err| blk: {
                     if (err == error.WouldBlock) break :blk 0;
@@ -3142,7 +3141,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                 }
             }
 
-            if (revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
+            if (revents & (lib_posix.POLL.HUP | lib_posix.POLL.ERR | lib_posix.POLL.NVAL) != 0) {
                 const last = daemon.closeClient(client, i, false);
                 if (last) break :daemon_loop;
             }
@@ -3150,7 +3149,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
     }
 }
 
-fn wakeSignalPipe(_: std.os.linux.SIG, _: *const posix.siginfo_t, _: ?*anyopaque) callconv(.c) void {
+fn wakeSignalPipe(_: std.os.linux.SIG, _: *const lib_posix.siginfo_t, _: ?*anyopaque) callconv(.c) void {
     const saved = std.c._errno().*;
     _ = std.c.write(sig_pipe[1], "x", 1);
     std.c._errno().* = saved;
@@ -3160,19 +3159,19 @@ fn wakeSignalPipe(_: std.os.linux.SIG, _: *const posix.siginfo_t, _: ?*anyopaque
 // setting wakes the loop. The handler writes to sig_pipe instead; poll()
 // wakes on its read end.
 fn installWakeHandler(sig: u6) void {
-    const act: posix.Sigaction = .{
+    const act: lib_posix.Sigaction = .{
         .handler = .{ .sigaction = wakeSignalPipe },
-        .mask = posix.sigemptyset(),
-        .flags = posix.SA.SIGINFO,
+        .mask = lib_posix.sigemptyset(),
+        .flags = lib_posix.SA.SIGINFO,
     };
-    posix.sigaction(@as(posix.SIG, @enumFromInt(sig)), &act, null);
+    lib_posix.sigaction(@as(lib_posix.SIG, @enumFromInt(sig)), &act, null);
 }
 
 fn ignoreSigpipe() void {
-    const act: posix.Sigaction = .{
-        .handler = .{ .handler = posix.SIG.IGN },
-        .mask = posix.sigemptyset(),
+    const act: lib_posix.Sigaction = .{
+        .handler = .{ .handler = lib_posix.SIG.IGN },
+        .mask = lib_posix.sigemptyset(),
         .flags = 0,
     };
-    posix.sigaction(posix.SIG.PIPE, &act, null);
+    lib_posix.sigaction(lib_posix.SIG.PIPE, &act, null);
 }

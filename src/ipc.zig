@@ -1,5 +1,4 @@
 const std = @import("std");
-const posix = std.posix;
 const cross = @import("cross.zig");
 const socket = @import("socket.zig");
 const lib_posix = @import("posix.zig");
@@ -172,7 +171,7 @@ pub const SocketBuffer = struct {
         }
 
         var tmp: [4096]u8 = undefined;
-        const n = try posix.read(fd, &tmp);
+        const n = try lib_posix.read(fd, &tmp);
         if (n > 0) {
             try self.buf.appendSlice(self.alloc, tmp[0..n]);
         }
@@ -239,8 +238,8 @@ pub fn probeSession(
     send(fd, .Info, "") catch return error.Unexpected;
     send(fd, .LabelGet, "") catch {};
 
-    var poll_fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
-    const poll_result = posix.poll(&poll_fds, timeout_ms) catch return error.Unexpected;
+    var poll_fds = [_]lib_posix.pollfd{.{ .fd = fd, .events = lib_posix.POLL.IN, .revents = 0 }};
+    const poll_result = lib_posix.poll(&poll_fds, timeout_ms) catch return error.Unexpected;
     if (poll_result == 0) {
         return error.Timeout;
     }
@@ -270,7 +269,7 @@ pub fn probeSession(
         }
 
         // No complete message available, wait for more data
-        const more = posix.poll(&poll_fds, 50) catch break;
+        const more = lib_posix.poll(&poll_fds, 50) catch break;
         if (more == 0) break;
         const n_read = sb.read(fd) catch break;
         if (n_read == 0) break;
@@ -325,8 +324,8 @@ pub fn roundTripForTag(
 
     send(fd, request_tag, payload) catch return error.Unexpected;
 
-    var poll_fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
-    const poll_result = posix.poll(&poll_fds, timeout_ms) catch return error.Unexpected;
+    var poll_fds = [_]lib_posix.pollfd{.{ .fd = fd, .events = lib_posix.POLL.IN, .revents = 0 }};
+    const poll_result = lib_posix.poll(&poll_fds, timeout_ms) catch return error.Unexpected;
     if (poll_result == 0) return error.Timeout;
 
     var sb = SocketBuffer.init(alloc) catch return error.Unexpected;

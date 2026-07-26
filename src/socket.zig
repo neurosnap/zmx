@@ -1,5 +1,4 @@
 const std = @import("std");
-const posix = std.posix;
 const lib_posix = @import("posix.zig");
 
 pub fn getSeshPrefix() []const u8 {
@@ -31,7 +30,7 @@ pub fn getSeshName(alloc: std.mem.Allocator, sesh: []const u8) ![]const u8 {
 
 pub fn sessionConnect(sesh: []const u8) !i32 {
     var unix_addr = try lib_posix.initUnix(sesh);
-    const socket_fd = try lib_posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    const socket_fd = try lib_posix.socket(lib_posix.AF.UNIX, lib_posix.SOCK.STREAM | lib_posix.SOCK.CLOEXEC, 0);
     errdefer lib_posix.close(socket_fd);
     try lib_posix.connect(socket_fd, &unix_addr.any, unix_addr.getOsSockLen());
     return socket_fd;
@@ -62,8 +61,8 @@ pub fn createSocket(sesh: []const u8) !i32 {
     // SOCK.STREAM: Reliable, bidirectional communication
     // SOCK.NONBLOCK: Set socket to non-blocking
     const fd = try lib_posix.socket(
-        posix.AF.UNIX,
-        posix.SOCK.STREAM | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC,
+        lib_posix.AF.UNIX,
+        lib_posix.SOCK.STREAM | lib_posix.SOCK.NONBLOCK | lib_posix.SOCK.CLOEXEC,
         0,
     );
     errdefer lib_posix.close(fd);
@@ -78,7 +77,7 @@ pub fn createSocket(sesh: []const u8) !i32 {
 /// Derived from the platform's sockaddr_un.path field, minus 1 for the
 /// required null terminator.
 pub const max_socket_path_len: usize = @typeInfo(
-    @TypeOf(@as(posix.sockaddr.un, undefined).path),
+    @TypeOf(@as(lib_posix.sockaddr.un, undefined).path),
 ).array.len - 1;
 
 pub fn getSocketPath(
@@ -124,7 +123,7 @@ pub fn maxSessionNameLen(socket_dir: []const u8) ?usize {
 
 test "max_socket_path_len matches platform sockaddr_un" {
     const path_field_len = @typeInfo(
-        @TypeOf(@as(posix.sockaddr.un, undefined).path),
+        @TypeOf(@as(lib_posix.sockaddr.un, undefined).path),
     ).array.len;
     try std.testing.expectEqual(path_field_len - 1, max_socket_path_len);
     try std.testing.expect(max_socket_path_len > 0);

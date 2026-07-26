@@ -1,5 +1,4 @@
 const std = @import("std");
-const posix = std.posix;
 const ghostty_vt = @import("ghostty-vt");
 const ipc = @import("ipc.zig");
 const socket = @import("socket.zig");

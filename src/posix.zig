@@ -6,6 +6,7 @@ const mem = std.mem;
 const native_os = builtin.os.tag;
 const use_libc = builtin.link_libc;
 const linux = std.os.linux;
+const cast = std.math.cast;
 
 /// A libc-compatible API layer.
 const system = if (use_libc)
@@ -23,26 +24,60 @@ else switch (native_os) {
     },
 };
 
-pub const SIG = system.SIG;
 const E = system.E;
 const PATH_MAX = system.PATH_MAX;
 const pid_t = system.pid_t;
-const AT = system.AT;
 const lfs64_abi = native_os == .linux and builtin.link_libc and (builtin.abi.isGnu() or builtin.abi.isAndroid());
 const uid_t = system.uid_t;
-const fd_t = system.fd_t;
 const mode_t = system.mode_t;
 const socket_t = fd_t;
-const SOCK = system.SOCK;
-const F = system.F;
-const O = system.O;
-const AF = system.AF;
 const FD_CLOEXEC = system.FD_CLOEXEC;
-const sockaddr = system.sockaddr;
+pub const SA = system.SA;
+pub const fd_t = system.fd_t;
+pub const O = system.O;
+pub const F = system.F;
+pub const sigset_t = system.sigset_t;
+pub const nfds_t = system.nfds_t;
+pub const SOCK = system.SOCK;
+pub const AT = system.AT;
+pub const AF = system.AF;
+pub const sockaddr = system.sockaddr;
 pub const socklen_t = system.socklen_t;
+pub const pollfd = system.pollfd;
+pub const POLL = system.POLL;
+pub const STDERR_FILENO = system.STDERR_FILENO;
+pub const STDIN_FILENO = system.STDIN_FILENO;
+pub const STDOUT_FILENO = system.STDOUT_FILENO;
+pub const Sigaction = system.Sigaction;
+pub const SIG = system.SIG;
+pub const siginfo_t = system.siginfo_t;
 
 pub fn getuid() uid_t {
     return system.getuid();
+}
+
+/// Return an empty sigset_t.
+pub fn sigemptyset() sigset_t {
+    if (builtin.link_libc) {
+        var set: sigset_t = undefined;
+        switch (errno(system.sigemptyset(&set))) {
+            .SUCCESS => return set,
+            else => unreachable,
+        }
+    }
+    return system.sigemptyset();
+}
+
+/// Examine and change a signal action.
+pub fn sigaction(sig: SIG, noalias act: ?*const Sigaction, noalias oact: ?*Sigaction) void {
+    switch (errno(system.sigaction(sig, act, oact))) {
+        .SUCCESS => return,
+        // EINVAL means the signal is either invalid or some signal that cannot have its action
+        // changed. For POSIX, this means SIGKILL/SIGSTOP. For e.g. Solaris, this also includes the
+        // non-standard SIGWAITING, SIGCANCEL, and SIGLWP. Either way, programmer error.
+        .INVAL => unreachable,
+        else => unreachable,
+    }
 }
 
 /// Get an environment variable.
@@ -552,6 +587,78 @@ pub fn setsid() SetSidError!pid_t {
         .SUCCESS => return rc,
         .PERM => return error.PermissionDenied,
         else => |err| return unexpectedErrno(err),
+    }
+}
+
+pub const ReadError = error{
+    InputOutput,
+    SystemResources,
+    IsDir,
+    OperationAborted,
+    BrokenPipe,
+    ConnectionResetByPeer,
+    ConnectionTimedOut,
+    NotOpenForReading,
+    SocketNotConnected,
+
+    /// This error occurs when no global event loop is configured,
+    /// and reading from the file descriptor would block.
+    WouldBlock,
+
+    /// reading a timerfd with CANCEL_ON_SET will lead to this error
+    /// when the clock goes through a discontinuous change
+    Canceled,
+
+    /// In WASI, this error occurs when the file descriptor does
+    /// not hold the required rights to read from it.
+    AccessDenied,
+
+    /// This error occurs in Linux if the process to be read from
+    /// no longer exists.
+    ProcessNotFound,
+
+    /// Unable to read file due to lock.
+    LockViolation,
+} || UnexpectedError;
+
+/// Returns the number of bytes that were read, which can be less than
+/// buf.len. If 0 bytes were read, that means EOF.
+/// If `fd` is opened in non blocking mode, the function will return error.WouldBlock
+/// when EAGAIN is received.
+///
+/// Linux has a limit on how many bytes may be transferred in one `read` call, which is `0x7ffff000`
+/// on both 64-bit and 32-bit systems. This is due to using a signed C int as the return value, as
+/// well as stuffing the errno codes into the last `4096` values. This is noted on the `read` man page.
+/// The limit on Darwin is `0x7fffffff`, trying to read more than that returns EINVAL.
+/// The corresponding POSIX limit is `maxInt(isize)`.
+pub fn read(fd: fd_t, buf: []u8) ReadError!usize {
+    if (buf.len == 0) return 0;
+    // Prevents EINVAL.
+    const max_count = switch (native_os) {
+        .linux => 0x7ffff000,
+        .macos, .ios, .watchos, .tvos, .visionos => maxInt(i32),
+        else => maxInt(isize),
+    };
+    while (true) {
+        const rc = system.read(fd, buf.ptr, @min(buf.len, max_count));
+        switch (errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+            .INVAL => unreachable,
+            .FAULT => unreachable,
+            .SRCH => return error.ProcessNotFound,
+            .AGAIN => return error.WouldBlock,
+            .CANCELED => return error.Canceled,
+            .BADF => return error.NotOpenForReading, // Can be a race condition.
+            .IO => return error.InputOutput,
+            .ISDIR => return error.IsDir,
+            .NOBUFS => return error.SystemResources,
+            .NOMEM => return error.SystemResources,
+            .NOTCONN => return error.SocketNotConnected,
+            .CONNRESET => return error.ConnectionResetByPeer,
+            .TIMEDOUT => return error.ConnectionTimedOut,
+            else => |err| return unexpectedErrno(err),
+        }
     }
 }
 
@@ -1106,6 +1213,30 @@ pub fn waitpid(pid: pid_t, flags: u32) WaitPidResult {
     }
 }
 
+pub const PollError = error{
+    /// The network subsystem has failed.
+    NetworkSubsystemFailed,
+
+    /// The kernel had no space to allocate file descriptor tables.
+    SystemResources,
+} || UnexpectedError;
+
+pub fn poll(fds: []pollfd, timeout: i32) PollError!usize {
+    while (true) {
+        const fds_count = cast(nfds_t, fds.len) orelse return error.SystemResources;
+        const rc = system.poll(fds.ptr, fds_count, timeout);
+        switch (errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .FAULT => unreachable,
+            .INTR => continue,
+            .INVAL => unreachable,
+            .NOMEM => return error.SystemResources,
+            else => |err| return unexpectedErrno(err),
+        }
+    }
+    unreachable;
+}
+
 /// Call this when you made a syscall or something that sets errno
 /// and you get an unexpected error.
 fn unexpectedErrno(err: E) UnexpectedError {
@@ -1167,4 +1298,16 @@ pub fn initUnix(path: []const u8) !Address {
     @memcpy(sock_addr.path[0..path.len], path);
 
     return Address{ .un = sock_addr };
+}
+
+const KillError = error{ ProcessNotFound, PermissionDenied } || UnexpectedError;
+
+pub fn kill(pid: pid_t, sig: SIG) KillError!void {
+    switch (errno(system.kill(pid, sig))) {
+        .SUCCESS => return,
+        .INVAL => unreachable, // invalid signal
+        .PERM => return error.PermissionDenied,
+        .SRCH => return error.ProcessNotFound,
+        else => |err| return unexpectedErrno(err),
+    }
 }
