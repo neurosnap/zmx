@@ -92,6 +92,15 @@ fn detectHelp(arg: []const u8) bool {
     return (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h"));
 }
 
+/// Prints an error message to stderr and exits with status 1.
+fn printError(io: std.Io, comptime fmt: []const u8, args: anytype) noreturn {
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.File.stderr().writer(io, &buf);
+    w.interface.print("error: " ++ fmt ++ "\n", args) catch {};
+    w.interface.flush() catch {};
+    std.process.exit(1);
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -161,11 +170,15 @@ pub fn main(init: std.process.Init) !void {
         defer gpa.free(sesh);
         return labelClear(gpa, io, &cfg, sesh);
     } else if (std.mem.eql(u8, cmd, "completions") or std.mem.eql(u8, cmd, "c")) {
-        const arg = args.next() orelse return;
+        const arg = args.next() orelse {
+            return printError(io, "completions requires a shell argument (bash, zsh, fish, nu)", .{});
+        };
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             return help(io);
         }
-        const shell = completions.Shell.fromString(arg) orelse return;
+        const shell = completions.Shell.fromString(arg) orelse {
+            return printError(io, "unknown shell \"{s}\" (valid: bash, zsh, fish, nu)", .{arg});
+        };
         return printCompletions(io, shell);
     } else if (std.mem.eql(u8, cmd, "detach") or std.mem.eql(u8, cmd, "d")) {
         return detachAll(gpa, io, &cfg);
@@ -506,7 +519,7 @@ pub fn main(init: std.process.Init) !void {
         std.log.info("socket path={s}", .{daemon.socket_path});
         try writeFile(&daemon, file_path);
     } else {
-        return help(io);
+        return printError(io, "unknown command \"{s}\"", .{cmd});
     }
 }
 
