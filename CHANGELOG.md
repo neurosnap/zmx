@@ -9,6 +9,7 @@ Use spec: https://common-changelog.org/
 - We now track cwd changes via OSC7
 - Replay window title on attach
 - `ZMX_NO_DETACH_KEY` env var to disable `ctrl+\` keybinding
+- `ZMX_TASK=1` inside sessions created by `zmx run`
 
 ### Fixed
 
