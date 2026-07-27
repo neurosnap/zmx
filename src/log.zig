@@ -1,19 +1,28 @@
 const std = @import("std");
 
+pub var log_system = LogSystem{};
+
+pub fn zmxLogFn(
+    comptime level: std.log.Level,
+    comptime scope: anytype,
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    log_system.log(level, scope, format, args) catch {};
+}
+
 pub const LogSystem = struct {
     file: ?std.Io.File = null,
     mutex: std.Io.Mutex = .init,
     current_size: u64 = 0,
-    max_size: u64 = 5 * 1024 * 1024, // 5MB
+    max_size: u64 = 2 * 1024 * 1024, // 2MB
     path: []const u8 = "",
-    alloc: std.mem.Allocator = undefined,
     io: std.Io = undefined,
     mode: std.Io.File.Permissions = std.Io.File.Permissions.fromMode(0o640),
 
-    pub fn init(self: *LogSystem, alloc: std.mem.Allocator, io: std.Io, path: []const u8, mode: std.Io.File.Permissions) !void {
-        self.alloc = alloc;
+    pub fn init(self: *LogSystem, io: std.Io, path: []const u8, mode: std.Io.File.Permissions) !void {
         self.io = io;
-        self.path = try alloc.dupe(u8, path);
+        self.path = path;
         self.mode = mode;
 
         const file = std.Io.Dir.openFileAbsolute(self.io, path, .{ .mode = .read_write }) catch |err| switch (err) {
@@ -35,7 +44,6 @@ pub const LogSystem = struct {
 
     pub fn deinit(self: *LogSystem) void {
         if (self.file) |f| std.Io.File.close(f, self.io);
-        if (self.path.len > 0) self.alloc.free(self.path);
     }
 
     pub fn log(
@@ -54,12 +62,12 @@ pub const LogSystem = struct {
         }
 
         if (self.current_size >= self.max_size) {
-            self.rotate() catch |err| {
-                std.debug.print("Log rotation failed: {s}\n", .{@errorName(err)});
+            self.wipe() catch |err| {
+                std.debug.print("Log wipe failed: {s}\n", .{@errorName(err)});
             };
         }
 
-        const now: i64 = @intCast(@divTrunc(std.Io.Timestamp.now(self.io, .real).nanoseconds, std.time.ns_per_ms));
+        const now: std.Io.Timestamp = .now(self.io, .real);
         const prefix = "[{d}] [{s}] ({s}): ";
         const scope_name = @tagName(scope);
         const level_name = level.asText();
@@ -84,19 +92,11 @@ pub const LogSystem = struct {
         }
     }
 
-    fn rotate(self: *LogSystem) !void {
+    fn wipe(self: *LogSystem) !void {
         if (self.file) |f| {
             std.Io.File.close(f, self.io);
             self.file = null;
         }
-
-        const old_path = try std.fmt.allocPrint(self.alloc, "{s}.old", .{self.path});
-        defer self.alloc.free(old_path);
-
-        std.Io.Dir.renameAbsolute(self.path, old_path, self.io) catch |err| switch (err) {
-            error.FileNotFound => {},
-            else => return err,
-        };
 
         self.file = try std.Io.Dir.createFileAbsolute(
             self.io,

@@ -28,6 +28,44 @@ pub fn getSeshName(alloc: std.mem.Allocator, sesh: []const u8) ![]const u8 {
     return full;
 }
 
+pub fn resolveSessionOrEnv(alloc: std.mem.Allocator, io: std.Io, session_name: ?[]const u8) ![]const u8 {
+    const sesh_env = getSeshNameFromEnv();
+    const raw = if (session_name) |name|
+        if (std.mem.eql(u8, name, ".")) blk: {
+            if (sesh_env.len > 0) break :blk sesh_env;
+            var buf: [4096]u8 = undefined;
+            var w = std.Io.File.stderr().writer(io, &buf);
+            w.interface.print("error: \".\" requires ZMX_SESSION (are you inside a zmx session?)\n", .{}) catch {};
+            w.interface.flush() catch {};
+            return error.SessionNameRequired;
+        } else name
+    else if (sesh_env.len > 0)
+        sesh_env
+    else {
+        return error.SessionNameRequired;
+    };
+    return getSeshName(alloc, raw);
+}
+
+pub const SessionMatch = struct {
+    name: []const u8,
+    is_prefix: bool,
+
+    pub fn matches(self: SessionMatch, session_name: []const u8) bool {
+        if (self.is_prefix) return std.mem.startsWith(u8, session_name, self.name);
+        return std.mem.eql(u8, session_name, self.name);
+    }
+};
+
+pub fn parseSessionArg(alloc: std.mem.Allocator, raw: []const u8) !SessionMatch {
+    if (raw.len > 0 and raw[raw.len - 1] == '*') {
+        const name = try getSeshName(alloc, raw[0 .. raw.len - 1]);
+        return .{ .name = name, .is_prefix = true };
+    }
+    const name = try getSeshName(alloc, raw);
+    return .{ .name = name, .is_prefix = false };
+}
+
 pub fn sessionConnect(sesh: []const u8) !i32 {
     var unix_addr = try lib_posix.initUnix(sesh);
     const socket_fd = try lib_posix.socket(lib_posix.AF.UNIX, lib_posix.SOCK.STREAM | lib_posix.SOCK.CLOEXEC, 0);
@@ -56,7 +94,7 @@ pub fn sessionExists(io: std.Io, dir: std.Io.Dir, name: []const u8) !bool {
     return true;
 }
 
-pub fn createSocket(sesh: []const u8) !i32 {
+pub fn createSocket(sesh: []const u8) !lib_posix.socket_t {
     // AF.UNIX: Unix domain socket for local IPC with client processes
     // SOCK.STREAM: Reliable, bidirectional communication
     // SOCK.NONBLOCK: Set socket to non-blocking

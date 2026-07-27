@@ -94,7 +94,7 @@ pub fn send(fd: i32, tag: Tag, data: []const u8) !void {
 }
 
 pub fn appendMessage(
-    alloc: std.mem.Allocator,
+    gpa: std.mem.Allocator,
     list: *std.ArrayList(u8),
     tag: Tag,
     data: []const u8,
@@ -105,7 +105,7 @@ pub fn appendMessage(
     };
     // Guarantee capacity for header + payload in one check to avoid
     // intermediate realloc between the two appends on the hot path.
-    try list.ensureTotalCapacity(alloc, list.items.len + @sizeOf(Header) + data.len);
+    try list.ensureTotalCapacity(gpa, list.items.len + @sizeOf(Header) + data.len);
     list.appendSliceAssumeCapacity(std.mem.asBytes(&header));
     if (data.len > 0) {
         list.appendSliceAssumeCapacity(data);

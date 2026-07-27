@@ -30,8 +30,8 @@ const pid_t = system.pid_t;
 const lfs64_abi = native_os == .linux and builtin.link_libc and (builtin.abi.isGnu() or builtin.abi.isAndroid());
 const uid_t = system.uid_t;
 const mode_t = system.mode_t;
-const socket_t = fd_t;
 const FD_CLOEXEC = system.FD_CLOEXEC;
+pub const socket_t = fd_t;
 pub const SA = system.SA;
 pub const fd_t = system.fd_t;
 pub const O = system.O;
@@ -51,6 +51,9 @@ pub const STDOUT_FILENO = system.STDOUT_FILENO;
 pub const Sigaction = system.Sigaction;
 pub const SIG = system.SIG;
 pub const siginfo_t = system.siginfo_t;
+
+// https://github.com/ziglang/zig/blob/738d2be9d6b6ef3ff3559130c05159ef53336224/lib/std/posix.zig#L3505
+pub const O_NONBLOCK: usize = 1 << @bitOffsetOf(O, "NONBLOCK");
 
 pub fn getuid() uid_t {
     return system.getuid();
