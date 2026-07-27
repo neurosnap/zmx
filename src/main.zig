@@ -2692,7 +2692,7 @@ fn clientLoop(client_sock_fd: i32) !ClientResult {
 
     // Send init message with terminal size (buffered)
     const size = ipc.getTerminalSize(lib_posix.STDOUT_FILENO);
-    try ipc.appendMessage(alloc, &sock_write_buf, .Init, std.mem.asBytes(&size));
+    try ipc.appendSizeMessage(alloc, &sock_write_buf, .Init, size);
 
     var poll_fds = try std.ArrayList(lib_posix.pollfd).initCapacity(alloc, 4);
     defer poll_fds.deinit(alloc);
@@ -2747,7 +2747,7 @@ fn clientLoop(client_sock_fd: i32) !ClientResult {
         if (poll_fds.items[2].revents & lib_posix.POLL.IN != 0) {
             drainSignalPipe();
             const next_size = ipc.getTerminalSize(lib_posix.STDOUT_FILENO);
-            try ipc.appendMessage(alloc, &sock_write_buf, .Resize, std.mem.asBytes(&next_size));
+            try ipc.appendSizeMessage(alloc, &sock_write_buf, .Resize, next_size);
         }
 
         // Handle stdin -> socket (Input)
@@ -2803,12 +2803,7 @@ fn clientLoop(client_sock_fd: i32) !ClientResult {
                         // daemon is asking for the client's window size usually in response
                         // to this client being set as leader.
                         const next_size = ipc.getTerminalSize(lib_posix.STDOUT_FILENO);
-                        try ipc.appendMessage(
-                            alloc,
-                            &sock_write_buf,
-                            .Resize,
-                            std.mem.asBytes(&next_size),
-                        );
+                        try ipc.appendSizeMessage(alloc, &sock_write_buf, .Resize, next_size);
                     },
                     .Switch => {
                         std.log.info("switch session", .{});
