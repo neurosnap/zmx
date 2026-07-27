@@ -110,7 +110,7 @@ pub fn main(init: std.process.Init) !void {
 
     const log_path = try std.fs.path.join(gpa, &.{ cfg.log_dir, "zmx.log" });
     defer gpa.free(log_path);
-    const log_mode = std.Io.File.Permissions.fromMode(cfg.log_mode);
+    const log_mode = std.Io.File.Permissions.fromMode(@intCast(cfg.log_mode));
     try log_system.init(gpa, io, log_path, log_mode);
     defer log_system.deinit();
 
@@ -985,7 +985,7 @@ const Daemon = struct {
                     &.{ self.cfg.log_dir, session_log_name },
                 );
                 defer self.alloc.free(session_log_path);
-                const log_mode = std.Io.File.Permissions.fromMode(self.cfg.log_mode);
+                const log_mode = std.Io.File.Permissions.fromMode(@intCast(self.cfg.log_mode));
                 try log_system.init(self.alloc, self.io, session_log_path, log_mode);
 
                 // If spawnPty fails, clean up here. Once it succeeds,
@@ -3149,7 +3149,7 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
     }
 }
 
-fn wakeSignalPipe(_: std.os.linux.SIG, _: *const lib_posix.siginfo_t, _: ?*anyopaque) callconv(.c) void {
+fn wakeSignalPipe(_: lib_posix.SIG, _: *const lib_posix.siginfo_t, _: ?*anyopaque) callconv(.c) void {
     const saved = std.c._errno().*;
     _ = std.c.write(sig_pipe[1], "x", 1);
     std.c._errno().* = saved;
