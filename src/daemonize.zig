@@ -118,30 +118,51 @@ pub fn spawnPty(sesh_name: []const u8, cmd: Cmd) !PtyInfo {
 }
 
 /// daemonize is the first fork in a double-fork technique to create a
-/// completely disconnected session (group of processes).
+/// completely disconnected session (container of process groups).
 ///
 /// When launching a daemon, you normally set the child process of the fork to
-/// be the session leader via setsid() which creates a new session that does
-/// *not* have a controlling terminal. This is important because we don't want
-/// a controlling terminal for our daemon or else our daemon could receive
-/// signals to shutdown when the controlling terminal closes.
+/// be the session leader via setsid() which creates a new session that removes
+/// the current controlling terminal but creates the authority to grab a new
+/// one. This is important because we don't want a controlling terminal for our
+/// daemon or else our daemon could receive signals to shutdown when the
+/// controlling terminal closes.
 ///
 /// However, if the first fork's child process is also the daemon process, then
-/// it's technically possible for the daemon to open a terminal device
-/// (e.g. open("/dev/console", O_RDWR)) and then it would acquire a controlling
+/// it's technically possible for the daemon to open a terminal device (e.g.
+/// open("/dev/console", O_RDWR)) and then it would acquire a controlling
 /// terminal! A controlling terminal would expose the daemon to
 /// terminal-generated signals (e.g. SIGINT) or SIGHUP from terminal disconnect
 /// which could kill the daemon.
 ///
-/// By forking a second time, the grandchild process (the daemon) is not the
-/// session leader. Per POSIX, only a process that is the session leader can
-/// acquire a controlling terminal.
+/// The first fork isn't arbitrary either: setsid() fails with EPERM if the
+/// caller is already a process group leader, which a process launched directly
+/// from a shell typically is. The first fork produces a child guaranteed not
+/// to be a group leader, so setsid() will succeed.  By forking a second time,
+/// the grandchild process (the daemon) is not the session leader. Per POSIX,
+/// only a process that is the session leader can acquire a controlling terminal.
 ///
-/// Apparently this is considered "being paranoid" but appears to be a standard
-/// practice for daemons so we're doing it anyway.
+/// Apparently this is "a bit paranoid," and on Linux it is arguable since a
+/// session leader only acquires a controlling terminal under
+/// implementation-defined conditions. But the double-fork is the portable way
+/// to guarantee the daemon can never acquire one, regardless of how a given
+/// POSIX implementation behaves. So we baked it into zmx.
 ///
-/// https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap11.html#tag_11_01_03
-/// https://stackoverflow.com/a/16317668
+/// PID=42  SID=10  PGID=10  ← original (PG leader, has tty)
+///     │
+///     │  fork #1
+///     ├──────────┐
+///     │ exit     │ PID=55  SID=10  PGID=10  (not a PG leader)
+///     ✝          │
+///                │ setsid()
+///                ▼
+///               PID=55  SID=55  PGID=55  (session leader, no tty)
+///                 │
+///                 │  fork #2
+///                 ├──────────┐
+///                 │ exit     │ PID=73  SID=55  PGID=55
+///                 ✝          │ PID≠SID → can't get a tty
+///                            ▼
+///                          DAEMON ✓
 pub fn daemonize(sesh_name: []const u8, cmd: Cmd, keep_fds_open: []i32) !PtyInfo {
     // creates the daemon
     const pid = try lib_posix.fork();
