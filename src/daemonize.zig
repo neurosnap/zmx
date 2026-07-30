@@ -122,10 +122,9 @@ pub fn spawnPty(sesh_name: []const u8, cmd: Cmd) !PtyInfo {
 ///
 /// When launching a daemon, you normally set the child process of the fork to
 /// be the session leader via setsid() which creates a new session that removes
-/// the current controlling terminal but creates the authority to grab a new
-/// one. This is important because we don't want a controlling terminal for our
-/// daemon or else our daemon could receive signals to shutdown when the
-/// controlling terminal closes.
+/// the current controlling terminal. This is important because we don't want a
+/// controlling terminal for our daemon or else it could receive signals to
+/// shutdown when the controlling terminal closes.
 ///
 /// However, if the first fork's child process is also the daemon process, then
 /// it's technically possible for the daemon to open a terminal device (e.g.
@@ -134,14 +133,12 @@ pub fn spawnPty(sesh_name: []const u8, cmd: Cmd) !PtyInfo {
 /// terminal-generated signals (e.g. SIGINT) or SIGHUP from terminal disconnect
 /// which could kill the daemon.
 ///
-/// The first fork isn't arbitrary either: setsid() fails with EPERM if the
-/// caller is already a process group leader, which a process launched directly
-/// from a shell typically is. The first fork produces a child guaranteed not
-/// to be a group leader, so setsid() will succeed.  By forking a second time,
-/// the grandchild process (the daemon) is not the session leader. Per POSIX,
-/// only a process that is the session leader can acquire a controlling terminal.
+/// The first fork produces a child guaranteed not to be a group leader, so
+/// setsid() will succeed.  By forking a second time, the grandchild process
+/// (the daemon) is not the session leader. Per POSIX, only a process that is
+/// the session leader can acquire a controlling terminal.
 ///
-/// Apparently this is "a bit paranoid," and on Linux it is arguable since a
+/// Apparently this is "a bit paranoid" and on Linux it is arguable since a
 /// session leader only acquires a controlling terminal under
 /// implementation-defined conditions. But the double-fork is the portable way
 /// to guarantee the daemon can never acquire one, regardless of how a given
