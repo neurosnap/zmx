@@ -1260,8 +1260,35 @@ const unexpected_error_tracing = builtin.mode == .Debug and switch (builtin.zig_
     else => false,
 };
 
+const ChangeCurDirError = error{
+    AccessDenied,
+    FileSystem,
+    SymLinkLoop,
+    NameTooLong,
+    FileNotFound,
+    SystemResources,
+    NotDir,
+    BadPathName,
+} || UnexpectedError;
+
+pub fn chdirZ(dir_path: [*:0]const u8) ChangeCurDirError!void {
+    switch (errno(system.chdir(dir_path))) {
+        .SUCCESS => return,
+        .ACCES => return error.AccessDenied,
+        .FAULT => unreachable,
+        .IO => return error.FileSystem,
+        .LOOP => return error.SymLinkLoop,
+        .NAMETOOLONG => return error.NameTooLong,
+        .NOENT => return error.FileNotFound,
+        .NOMEM => return error.SystemResources,
+        .NOTDIR => return error.NotDir,
+        .ILSEQ => |err| return unexpectedErrno(err),
+        else => |err| return unexpectedErrno(err),
+    }
+}
+
 /// Used to convert a slice to a null terminated slice on the stack.
-fn toPosixPath(file_path: []const u8) error{NameTooLong}![PATH_MAX - 1:0]u8 {
+pub fn toPosixPath(file_path: []const u8) error{NameTooLong}![PATH_MAX - 1:0]u8 {
     if (std.debug.runtime_safety) assert(mem.indexOfScalar(u8, file_path, 0) == null);
     var path_with_null: [PATH_MAX - 1:0]u8 = undefined;
     // >= rather than > to make room for the null byte
