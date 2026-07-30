@@ -182,20 +182,6 @@ pub fn daemonize(sesh_name: []const u8, cmd: Cmd, keep_fds_open: []i32) !PtyInfo
     // becomes the session leader and detaches process from its controlling terminal
     _ = try lib_posix.setsid();
 
-    // If the daemon was launched from a mounted filesystem (e.g., a USB drive
-    // at /mnt/usb), keeping that directory as the working directory pins the
-    // mount which means it can't be unmounted while the daemon holds it.
-    // chdir("/") moves to the root filesystem, which is never unmounted.
-    const dir_path_c = try lib_posix.toPosixPath("/");
-    try lib_posix.chdirZ(&dir_path_c);
-
-    // The parent may have had a restrictive umask (e.g., 0077) that would
-    // prevent the daemon from creating files with the intended permissions.
-    // Setting umask(0) lets the daemon explicitly control permissions via
-    // open()/creat() mode arguments, rather than inheriting an unpredictable
-    // mask.
-    _ = std.c.umask(0); // requires libc on linux
-
     // Redirect stdin/stdout/stderr to /dev/null. The daemon
     // communicates via its unix socket, not stdio. Without
     // this, any pipe on FDs 0-2 (e.g. from bats' `run`
