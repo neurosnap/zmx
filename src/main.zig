@@ -1347,6 +1347,10 @@ fn attach(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon) !void {
         .detach => return,
         .switch_session => {
             if (looper.session_name) |session_name| {
+                // Reset terminal modes when switching sessions
+                const restore_seq = "\x1bc";
+                _ = lib_posix.write(lib_posix.STDOUT_FILENO, restore_seq) catch {};
+
                 var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
                 const cwd_len = std.process.currentPath(io, &cwd_buf) catch 0;
                 const cwd = cwd_buf[0..cwd_len];
@@ -1365,6 +1369,7 @@ fn attach(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon) !void {
 
                 var target_daemon = Daemon.init(io, daemon.cfg, session_name, target_path);
                 target_daemon.cwd = cwd;
+                target_daemon.shell = daemon.shell;
                 return attach(gpa, io, &target_daemon);
             }
         },
