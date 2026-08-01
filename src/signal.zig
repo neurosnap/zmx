@@ -6,7 +6,7 @@ const lib_posix = @import("posix.zig");
 /// never surfaces; the handler writes a byte here and poll() wakes on POLLIN.
 pub var sig_pipe: [2]lib_posix.fd_t = .{ -1, -1 };
 
-pub fn wakeSignalPipe(_: std.os.linux.SIG, _: *const lib_posix.siginfo_t, _: ?*anyopaque) callconv(.c) void {
+pub fn wakeSignalPipe(_: lib_posix.SIG, _: *const lib_posix.siginfo_t, _: ?*anyopaque) callconv(.c) void {
     const saved = std.c._errno().*;
     _ = std.c.write(sig_pipe[1], "x", 1);
     std.c._errno().* = saved;

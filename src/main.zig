@@ -42,7 +42,7 @@ pub fn main(init: std.process.Init) !void {
 
     const log_path = try std.fs.path.join(gpa, &.{ cfg.log_dir, "zmx.log" });
     defer gpa.free(log_path);
-    const log_mode = std.Io.File.Permissions.fromMode(cfg.log_mode);
+    const log_mode = std.Io.File.Permissions.fromMode(@intCast(cfg.log_mode));
     try log.log_system.init(io, log_path, log_mode);
     defer log.log_system.deinit();
 

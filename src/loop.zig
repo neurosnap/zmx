@@ -725,7 +725,7 @@ pub const Daemon = struct {
                 fba.allocator(),
                 &.{ self.cfg.log_dir, session_log_name },
             );
-            const log_mode = std.Io.File.Permissions.fromMode(self.cfg.log_mode);
+            const log_mode = std.Io.File.Permissions.fromMode(@intCast(self.cfg.log_mode));
             log.log_system.init(new_io, session_log_path, log_mode) catch {};
         }
 
