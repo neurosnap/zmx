@@ -35,7 +35,6 @@ pub fn get_session_entries(
     io: std.Io,
     socket_dir: []const u8,
 ) !std.ArrayList(SessionEntry) {
-    std.log.info("get session entries socket_dir={s}", .{socket_dir});
     var dir = try std.Io.Dir.openDirAbsolute(io, socket_dir, .{ .iterate = true });
     defer dir.close(io);
     var iter = dir.iterate();
@@ -112,6 +111,18 @@ pub fn get_session_entries(
     }
 
     return sessions;
+}
+
+/// getCwd get the current working directory in a std.Uri format.
+/// Caller is responsible for releasing memory.
+pub fn getCwd(gpa: std.mem.Allocator, io: std.Io) ![]u8 {
+    const cur_path = try std.process.currentPathAlloc(io, gpa);
+    defer gpa.free(cur_path);
+
+    var buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
+    const hostname = try std.posix.gethostname(&buf);
+
+    return std.fmt.allocPrint(gpa, "file://{s}{s}", .{ hostname, cur_path });
 }
 
 pub fn shellNeedsQuoting(arg: []const u8) bool {
@@ -820,7 +831,7 @@ pub fn writeSessionLine(
         session.created_at,
     });
     if (session.cwd) |cwd| {
-        try writer.print("\tstart_dir={s}", .{cwd});
+        try writer.print("\tcwd={s}", .{cwd});
     }
     if (session.cmd) |cmd| {
         try writer.print("\tcmd={s}", .{cmd});

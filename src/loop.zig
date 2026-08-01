@@ -163,7 +163,16 @@ pub fn clientLoop(client_sock_fd: i32) !ClientResult {
                     },
                     .Switch => {
                         std.log.info("switch session", .{});
-                        return ClientResult{ .kind = .switch_session, .session_name = try gpa.dupe(u8, msg.payload) };
+                        // Payload format: "session_name\ncwd" from the daemon
+                        const newline_idx = std.mem.indexOfScalar(u8, msg.payload, '\n') orelse {
+                            // No cwd provided (backward compat or old daemon)
+                            return ClientResult{ .kind = .switch_session, .session_name = try gpa.dupe(u8, msg.payload) };
+                        };
+                        return ClientResult{
+                            .kind = .switch_session,
+                            .session_name = try gpa.dupe(u8, msg.payload[0..newline_idx]),
+                            .cwd = if (newline_idx + 1 < msg.payload.len) try gpa.dupe(u8, msg.payload[newline_idx + 1 ..]) else null,
+                        };
                     },
                     else => {},
                 }
@@ -326,6 +335,7 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
                 } else {
                     // Feed PTY output to terminal emulator for state tracking
                     vt_stream.nextSlice(buf[0..n]);
+                    daemon.setPwd(&term);
                     daemon.has_pty_output = true;
 
                     // When no real terminal client has attached yet, respond to
@@ -442,7 +452,7 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
                     switch (msg.header.tag) {
                         .Input => try daemon.handleInput(gpa, client, msg.payload),
                         .Send => daemon.handleSend(gpa, msg.payload),
-                        .Output => try daemon.handleOutput(gpa, msg.payload, &vt_stream),
+                        .Output => try daemon.handleOutput(gpa, msg.payload, &term, &vt_stream),
                         .Init => try daemon.handleInit(gpa, client, pty_fd, &term, msg.payload),
                         .Switch => try daemon.handleSwitch(gpa, msg.payload),
                         .Resize => try daemon.handleResize(gpa, client, pty_fd, &term, msg.payload),
@@ -506,6 +516,7 @@ const ClientResult = struct {
         switch_session,
     },
     session_name: ?[]const u8,
+    cwd: ?[]const u8 = null,
 };
 
 /// Client represents each terminal that has connected to a session.
@@ -676,6 +687,35 @@ pub const Daemon = struct {
 
         var keep_fds_open = [_]i32{ server_sock_fd, dir.handle, log_fd };
         const cmd = try daemonize.createCmdZ(self.shell, self.is_task_mode, self.command);
+
+        // format will look like file://{host}{path}
+        std.log.info("checking pwd={s}", .{self.cwd});
+        const uri_opt = std.Uri.parse(self.cwd) catch |err| blk: {
+            std.log.warn("uri parse failed err={s}", .{@errorName(err)});
+            break :blk null;
+        };
+        if (uri_opt) |uri| {
+            var host_buf: [255]u8 = undefined;
+            const pwd_host = if (uri.getHost(&host_buf) catch null) |host| host.bytes else "unknown";
+            var buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
+            const hostname = try std.posix.gethostname(&buf);
+            std.log.info("pwd_host={s} hostname={s}", .{ pwd_host, hostname });
+            if (std.mem.eql(u8, pwd_host, hostname)) {
+                const path_str = switch (uri.path) {
+                    .raw, .percent_encoded => |s| s,
+                };
+                const pwd_dir = std.Io.Dir.openDirAbsolute(io, path_str, .{}) catch |err| blk: {
+                    std.log.warn("failed to open dir={s} err={s}", .{ path_str, @errorName(err) });
+                    break :blk null;
+                };
+                if (pwd_dir) |pdir| {
+                    defer std.Io.Dir.close(pdir, io);
+                    std.log.info("set directory dir={s}", .{path_str});
+                    try std.process.setCurrentDir(io, pdir);
+                }
+            }
+        }
+
         const pty_info = daemonize.daemonize(
             sesh_name,
             cmd,
@@ -818,17 +858,27 @@ pub const Daemon = struct {
     pub fn handleSwitch(self: *Daemon, gpa: std.mem.Allocator, session_name: []const u8) !void {
         for (self.clients.items) |client| {
             if (self.leader_client_fd == client.socket_fd) {
-                ipc.appendMessage(
-                    gpa,
-                    &client.write_buf,
-                    .Switch,
-                    session_name,
-                ) catch |err| {
-                    std.log.warn(
-                        "failed to buffer terminal state for client err={s}",
-                        .{@errorName(err)},
-                    );
-                };
+                // Include the daemon's current cwd so the new session can start in the right directory
+                if (self.cwd.len > 0) {
+                    var payload = gpa.alloc(u8, session_name.len + 1 + self.cwd.len) catch return;
+                    defer gpa.free(payload);
+                    @memcpy(payload[0..session_name.len], session_name);
+                    payload[session_name.len] = '\n';
+                    @memcpy(payload[session_name.len + 1 ..], self.cwd);
+                    ipc.appendMessage(gpa, &client.write_buf, .Switch, payload) catch |err| {
+                        std.log.warn(
+                            "failed to buffer terminal state for client err={s}",
+                            .{@errorName(err)},
+                        );
+                    };
+                } else {
+                    ipc.appendMessage(gpa, &client.write_buf, .Switch, session_name) catch |err| {
+                        std.log.warn(
+                            "failed to buffer terminal state for client err={s}",
+                            .{@errorName(err)},
+                        );
+                    };
+                }
                 client.has_pending_output = true;
                 return;
             }
@@ -1078,8 +1128,17 @@ pub const Daemon = struct {
         std.log.debug("run command len={d}", .{payload.len});
     }
 
-    pub fn handleOutput(self: *Daemon, gpa: std.mem.Allocator, payload: []const u8, vt_stream: anytype) !void {
+    fn setPwd(self: *Daemon, term: *ghostty_vt.Terminal) void {
+        const pwd_opt = term.getPwd();
+        if (pwd_opt) |pwd| {
+            std.log.info("setting pwd to ghostty term pwd={s}", .{pwd});
+            self.cwd = pwd;
+        }
+    }
+
+    pub fn handleOutput(self: *Daemon, gpa: std.mem.Allocator, payload: []const u8, term: *ghostty_vt.Terminal, vt_stream: anytype) !void {
         vt_stream.nextSlice(payload);
+        self.setPwd(term);
         self.has_pty_output = true;
         for (self.clients.items) |client| {
             try ipc.appendMessage(gpa, &client.write_buf, .Output, payload);
