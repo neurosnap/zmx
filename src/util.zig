@@ -702,6 +702,16 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
         return null;
     };
 
+    // The formatter has no title extra and never emits OSC 0/1/2, so the title
+    // has to be replayed separately or an attaching client shows whatever its
+    // terminal defaults to, usually the client process name. OSC 2 does not
+    // move the cursor, so this is safe to append after the content.
+    if (term.getTitle()) |title| {
+        builder.writer.print("\x1b]2;{s}\x07", .{title}) catch |err| {
+            std.log.warn("failed to format title err={s}", .{@errorName(err)});
+        };
+    }
+
     const output = builder.writer.buffered();
     if (output.len == 0) return null;
 
@@ -1189,6 +1199,49 @@ test "serializeTerminalState excludes synchronized output replay" {
     // but NOT synchronized output (DECSET 2026)
     try testing.expect(std.mem.indexOf(u8, output, "\x1b[?2004h") != null);
     try testing.expect(std.mem.indexOf(u8, output, "\x1b[?2026h") == null);
+}
+
+test "serializeTerminalState replays the title" {
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var term = try ghostty_vt.Terminal.init(io, alloc, .{
+        .cols = 80,
+        .rows = 24,
+    });
+    defer term.deinit(alloc);
+
+    var stream = term.vtStream();
+    defer stream.deinit();
+
+    stream.nextSlice("\x1b]2;my title\x07");
+    stream.nextSlice("hello");
+
+    const output = serializeTerminalState(alloc, &term) orelse return error.TestUnexpectedNull;
+    defer alloc.free(output);
+
+    try testing.expect(std.mem.indexOf(u8, output, "\x1b]2;my title\x07") != null);
+}
+
+test "serializeTerminalState omits the title when none is set" {
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var term = try ghostty_vt.Terminal.init(io, alloc, .{
+        .cols = 80,
+        .rows = 24,
+    });
+    defer term.deinit(alloc);
+
+    var stream = term.vtStream();
+    defer stream.deinit();
+
+    stream.nextSlice("hello");
+
+    const output = serializeTerminalState(alloc, &term) orelse return error.TestUnexpectedNull;
+    defer alloc.free(output);
+
+    try testing.expect(std.mem.indexOf(u8, output, "\x1b]2;") == null);
 }
 
 fn testCreateTerminal(alloc: std.mem.Allocator, io: std.Io, cols: u16, rows: u16, vt_data: []const u8) !ghostty_vt.Terminal {
