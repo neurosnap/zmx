@@ -218,7 +218,7 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
     var term = try ghostty_vt.Terminal.init(io, gpa, .{
         .cols = init_size.cols,
         .rows = init_size.rows,
-        .max_scrollback = daemon.cfg.max_scrollback,
+        .max_scrollback_lines = daemon.cfg.max_scrollback_lines,
     });
     defer term.deinit(gpa);
     var vt_stream = term.vtStream();

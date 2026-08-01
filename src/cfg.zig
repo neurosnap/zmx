@@ -9,7 +9,7 @@ const cross = @import("cross.zig");
 
 socket_dir: []const u8,
 log_dir: []const u8,
-max_scrollback: usize = 10_000_000,
+max_scrollback_lines: usize = 2_000, // same default as tmux
 dir_mode: u32 = 0o750,
 log_mode: u32 = 0o640,
 

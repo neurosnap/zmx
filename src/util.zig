@@ -1195,7 +1195,7 @@ fn testCreateTerminal(alloc: std.mem.Allocator, io: std.Io, cols: u16, rows: u16
     var term = try ghostty_vt.Terminal.init(io, alloc, .{
         .cols = cols,
         .rows = rows,
-        .max_scrollback = 10_000_000,
+        .max_scrollback_lines = 2_000,
     });
     if (vt_data.len > 0) {
         var stream = term.vtStream();
@@ -1227,7 +1227,7 @@ fn serializeRoundtrip(alloc: std.mem.Allocator, io: std.Io, source: *ghostty_vt.
     var dest = try ghostty_vt.Terminal.init(io, alloc, .{
         .cols = source.screens.active.pages.cols,
         .rows = source.screens.active.pages.rows,
-        .max_scrollback = 10_000_000,
+        .max_scrollback_lines = 2_000,
     });
     var stream = dest.vtStream();
     defer stream.deinit();
