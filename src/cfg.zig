@@ -12,6 +12,10 @@ log_dir: []const u8,
 max_scrollback_lines: usize = 2_000, // same default as tmux
 dir_mode: u32 = 0o750,
 log_mode: u32 = 0o640,
+/// Hex-dump every byte queued for the PTY into the session log. This is
+/// keystroke capture -- it records passwords typed at any prompt -- so it
+/// stays off unless ZMX_LOG_INPUT is set.
+log_input: bool = false,
 
 pub fn init(alloc: std.mem.Allocator, io: std.Io) !Cfg {
     const socket_dir = try socketDir(alloc);
@@ -34,6 +38,7 @@ pub fn init(alloc: std.mem.Allocator, io: std.Io) !Cfg {
         .log_dir = log_dir,
         .dir_mode = dir_mode,
         .log_mode = log_mode,
+        .log_input = lib_posix.getenv("ZMX_LOG_INPUT") != null,
     };
 
     try cfg.mkdir(io);

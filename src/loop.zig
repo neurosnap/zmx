@@ -557,6 +557,9 @@ pub const Daemon = struct {
     task_ended_at: ?u64 = null, // timestamp when task exited
     pty_fd: i32 = -1, // set by daemonLoop so handleRun can probe the foreground process
     shell: []const u8 = "/bin/sh",
+    /// Copied from Cfg at init: fixed for the daemon's lifetime, and read on
+    /// the PTY write path where chasing the Cfg pointer buys nothing.
+    log_input: bool = false,
 
     /// Create a Daemon. Caller is responsible for freeing all variables passed
     /// into the init fn.
@@ -566,6 +569,7 @@ pub const Daemon = struct {
             .session_name = sesh_name,
             .socket_path = socket_path,
             .created_at = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+            .log_input = cfg.log_input,
         };
     }
 
@@ -786,17 +790,19 @@ pub const Daemon = struct {
             );
             return;
         }
-        std.log.debug("buffering pty input data={x}", .{data});
         self.pty_write_buf.appendSlice(gpa, data) catch |err| {
             std.log.warn(
                 "pty input dropped {d} bytes: {s}",
                 .{ data.len, @errorName(err) },
             );
+            return;
         };
+        // Everything headed for the PTY funnels through here, so this single
+        // site covers interactive keystrokes, `send`, `run`, and `write`.
+        if (self.log_input) std.log.debug("buffering pty input data={x}", .{data});
     }
 
     pub fn handleInput(self: *Daemon, gpa: std.mem.Allocator, client: *Client, payload: []const u8) !void {
-        std.log.debug("buffering pty input data={x}", .{payload});
         // client is leader, send entire payload (ansi escape codes + text)
         if (self.leader_client_fd == client.socket_fd) {
             self.queuePtyInput(gpa, payload);
@@ -1136,10 +1142,7 @@ pub const Daemon = struct {
         try ipc.appendMessage(gpa, &client.write_buf, .Ack, "");
         client.has_pending_output = true;
         self.has_had_client = true;
-        std.log.debug(
-            "write command len={d} file_path={s}",
-            .{ file_content.len, file_path },
-        );
+        std.log.debug("write command len={d}", .{file_content.len});
     }
 
     fn handleLabelGet(self: *Daemon, gpa: std.mem.Allocator, client: *Client) !void {
