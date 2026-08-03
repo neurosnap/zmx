@@ -537,8 +537,9 @@ fn help(io: std.Io) !void {
         \\  TMPDIR               Socket directory (priority 3)
         \\  ZMX_SESSION          Session name (injected automatically)
         \\  ZMX_SESSION_PREFIX   Prefix added to all session names
-        \\  ZMX_DIR_MODE         Sets mode for socket and log directories (octal, defaults to 0750)
-        \\  ZMX_LOG_MODE         Sets mode for log files (octal, defaults to 0640)
+        \\  ZMX_DIR_MODE         Sets mode for socket and log directories (octal, defaults to 0700)
+        \\                       Socket mode is ZMX_DIR_MODE without the execute bits
+        \\  ZMX_LOG_MODE         Sets mode for log files (octal, defaults to 0600)
         \\  ZMX_NO_DETACH_KEY    Disables the ctrl+\ detach shortcut (set to any value)
         \\
     ;

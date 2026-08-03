@@ -1,5 +1,6 @@
 const std = @import("std");
 const lib_posix = @import("posix.zig");
+const cross = @import("cross.zig");
 
 pub fn getSeshPrefix() []const u8 {
     return lib_posix.getenv("ZMX_SESSION_PREFIX") orelse "";
@@ -94,7 +95,7 @@ pub fn sessionExists(io: std.Io, dir: std.Io.Dir, name: []const u8) !bool {
     return true;
 }
 
-pub fn createSocket(sesh: []const u8) !lib_posix.socket_t {
+pub fn createSocket(sesh: []const u8, socket_mode: u32) !lib_posix.socket_t {
     // AF.UNIX: Unix domain socket for local IPC with client processes
     // SOCK.STREAM: Reliable, bidirectional communication
     // SOCK.NONBLOCK: Set socket to non-blocking
@@ -106,6 +107,9 @@ pub fn createSocket(sesh: []const u8) !lib_posix.socket_t {
     errdefer lib_posix.close(fd);
 
     var unix_addr = try lib_posix.initUnix(sesh);
+    // bind() creates the socket as 0777 & ~umask, so adjust umask here
+    const old_umask = cross.c.umask(@intCast((~socket_mode) & 0o777));
+    defer _ = cross.c.umask(old_umask);
     try lib_posix.bind(fd, &unix_addr.any, unix_addr.getOsSockLen());
     try lib_posix.listen(fd, 128);
     return fd;
