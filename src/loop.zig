@@ -826,7 +826,10 @@ pub const Daemon = struct {
             );
             return;
         }
-        std.log.debug("buffering pty input data={x}", .{data});
+
+        // NOTE: for local dev only
+        // std.log.debug("buffering pty input data={x}", .{data});
+
         self.pty_write_buf.appendSlice(gpa, data) catch |err| {
             std.log.warn(
                 "pty input dropped {d} bytes: {s}",
@@ -836,7 +839,9 @@ pub const Daemon = struct {
     }
 
     pub fn handleInput(self: *Daemon, gpa: std.mem.Allocator, client: *Client, payload: []const u8) !void {
-        std.log.debug("buffering pty input data={x}", .{payload});
+        // NOTE: for local dev only
+        // std.log.debug("buffering pty input data={x}", .{payload});
+
         // client is leader, send entire payload (ansi escape codes + text)
         if (self.leader_client_fd == client.socket_fd) {
             self.queuePtyInput(gpa, payload);
