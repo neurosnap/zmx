@@ -686,7 +686,9 @@ pub const Daemon = struct {
         std.log.info("creating session={s}", .{sesh_name});
         const server_sock_fd: lib_posix.socket_t = try socket.createSocket(
             io,
+            dir,
             self.socket_path,
+            sesh_name,
             self.cfg.socketMode(),
         );
         const log_fd = log.log_system.file.?.handle;
