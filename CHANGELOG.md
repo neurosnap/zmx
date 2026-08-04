@@ -4,6 +4,22 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
+### Added
+
+- We now track cwd changes via OSC7
+- Replay window title on attach
+- `ZMX_NO_DETACH_KEY` env var to disable `ctrl+\` keybinding
+
+### Fixed
+
+- Clear screen when switching sessions to prevent term state corruption
+
+### Changed
+
+- Upgraded to zig v0.16
+- `zmx list` replaced `start_dir` with `cwd`
+- Storing 2k lines of scrollback buffer (like tmux) for each session
+
 ## v0.7.0 - 2026-07-23
 
 ### Added
