@@ -684,7 +684,13 @@ pub const Daemon = struct {
 
     fn run(self: *Daemon, io: std.Io, dir: std.Io.Dir, sesh_name: []const u8) !bool {
         std.log.info("creating session={s}", .{sesh_name});
-        const server_sock_fd: lib_posix.socket_t = try socket.createSocket(self.socket_path);
+        const server_sock_fd: lib_posix.socket_t = try socket.createSocket(
+            io,
+            dir,
+            self.socket_path,
+            sesh_name,
+            self.cfg.socketMode(),
+        );
         const log_fd = log.log_system.file.?.handle;
 
         var keep_fds_open = [_]i32{ server_sock_fd, dir.handle, log_fd };
