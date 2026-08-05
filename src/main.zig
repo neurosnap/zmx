@@ -27,6 +27,9 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
 
+    var buf: [1024]u8 = undefined;
+    var w = std.Io.File.stdout().writer(io, &buf);
+
     // Every subcommand may write to a Unix-domain socket; a peer that
     // disappears between probe and send would otherwise kill us before
     // write() can return BrokenPipe. Inherited across fork, so this also
@@ -118,10 +121,48 @@ pub fn main(init: std.process.Init) !void {
         const sesh = try socket.getSeshName(gpa, session_name orelse sesh_env);
         defer gpa.free(sesh);
         return history(gpa, io, &cfg, sesh, format);
+    } else if (std.mem.eql(u8, cmd, "switch") or std.mem.eql(u8, cmd, "sw")) {
+        const session_name = args.next() orelse "";
+        if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
+            return help(io);
+        }
+
+        const cur_sesh = socket.getSeshNameFromEnv();
+        if (cur_sesh.len == 0) {
+            try w.interface.print("error: ZMX_SESSION env var not found: can only switch if inside a zmx session\n", .{});
+            try w.interface.flush();
+            return std.process.exit(1);
+        }
+
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd_len = std.process.currentPath(io, &cwd_buf) catch 0;
+        const cwd = cwd_buf[0..cwd_len];
+
+        const sesh = try socket.getSeshName(gpa, session_name);
+        defer gpa.free(sesh);
+        const socket_path = socket.getSocketPath(gpa, cfg.socket_dir, sesh) catch |err| switch (err) {
+            error.NameTooLong => return socket.printSessionNameTooLong(io, sesh, cfg.socket_dir),
+            error.OutOfMemory => return err,
+        };
+
+        var daemon = Daemon.init(io, &cfg, sesh, socket_path);
+        daemon.cwd = cwd;
+        daemon.shell = shell_env;
+        std.log.info("socket path={s}", .{daemon.socket_path});
+        return switchSesh(gpa, io, &daemon, cur_sesh);
     } else if (std.mem.eql(u8, cmd, "attach") or std.mem.eql(u8, cmd, "a")) {
         const session_name = args.next() orelse "";
         if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
             return help(io);
+        }
+
+        if (socket.getSeshNameFromEnv().len > 0) {
+            try w.interface.print(
+                "error: ZMX_SESSION env var found: use `zmx switch {s}` to switch to session from within a session\n",
+                .{session_name},
+            );
+            try w.interface.flush();
+            return std.process.exit(1);
         }
 
         var command_args: std.ArrayList([]const u8) = .empty;
@@ -412,6 +453,7 @@ fn help(io: std.Io) !void {
         \\
         \\Commands:
         \\  [a]ttach <name> [command...]             Attach to session, creating if needed
+        \\  [sw]itch <name>                          Switch to a session from within a session
         \\  [r]un <name> [-d] [command...]           Send command without attaching
         \\  [s]end <name> <text...>                  Send raw input to session PTY
         \\  [p]rint <name> <text...>                 Inject text into session display
@@ -419,7 +461,7 @@ fn help(io: std.Io) !void {
         \\  [d]etach                                 Detach all clients (ctrl+\\ for current client)
         \\  [l]ist|ls [--short|--where k=v]          List active sessions
         \\  [g]et <name>                             Get session labels
-        \\  set <name> k=v ...                     Set session labels (k= to remove)
+        \\  set <name> k=v ...                       Set session labels (k= to remove)
         \\  [cl]ear <name>                           Clear all session labels
         \\  [k]ill <name>... [--force]               Kill session and all attached clients
         \\  [hi]story <name> [--vt|--html]           Output session scrollback
@@ -1287,11 +1329,6 @@ fn switchSesh(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon, current_sesh:
 }
 
 fn attach(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon) !void {
-    const sesh = socket.getSeshNameFromEnv();
-    if (sesh.len > 0) {
-        return switchSesh(gpa, io, daemon, sesh);
-    }
-
     const is_daemon_proc = try daemon.ensureSession(io);
     if (is_daemon_proc) return;
 
