@@ -147,7 +147,7 @@ pub fn main(init: std.process.Init) !void {
         };
         var daemon = Daemon.init(io, &cfg, sesh, socket_path);
         daemon.command = command;
-        daemon.cwd = cwd;
+        daemon.setCwd(cwd);
         daemon.shell = shell_env;
         std.log.info("socket path={s}", .{daemon.socket_path});
         return attach(gpa, io, &daemon);
@@ -180,7 +180,7 @@ pub fn main(init: std.process.Init) !void {
         };
         defer gpa.free(socket_path);
         var daemon = Daemon.init(io, &cfg, sesh, socket_path);
-        daemon.cwd = cwd;
+        daemon.setCwd(cwd);
         daemon.is_task_mode = true;
         daemon.shell = shell_env;
         std.log.info("socket path={s}", .{daemon.socket_path});
@@ -395,7 +395,7 @@ pub fn main(init: std.process.Init) !void {
         };
         var daemon = Daemon.init(io, &cfg, sesh, socket_path);
         daemon.is_task_mode = true;
-        daemon.cwd = cwd;
+        daemon.setCwd(cwd);
         daemon.shell = shell_env;
         std.log.info("socket path={s}", .{daemon.socket_path});
         try writeFile(gpa, io, &daemon, file_path);
@@ -1370,7 +1370,7 @@ fn attach(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon) !void {
                 // otherwise fall back to the client's original cwd
                 const switch_cwd = looper.cwd orelse daemon.cwd;
                 std.log.info("switching to new session cwd={s}", .{switch_cwd});
-                target_daemon.cwd = switch_cwd;
+                target_daemon.setCwd(switch_cwd);
                 target_daemon.shell = daemon.shell;
                 return attach(gpa, io, &target_daemon);
             }
