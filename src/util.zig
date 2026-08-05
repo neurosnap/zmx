@@ -638,6 +638,24 @@ pub fn isUserInput(payload: []const u8) bool {
     return false;
 }
 
+/// Emit the terminal's pwd as OSC 7.
+///
+/// This replaces the formatter's own `extra.pwd`, which writes
+/// `terminal.pwd.items` verbatim. `Terminal.setPwd` appends a NUL sentinel to
+/// that buffer, so the formatter's OSC 7 carries a stray `\x00` before the
+/// terminator. `getPwd()` returns the same bytes without the sentinel.
+///
+/// The NUL is not cosmetic: a client that records what it receives (kitty
+/// writing its session file, for one) persists the NUL and then fails to parse
+/// its own state back. See https://github.com/neurosnap/zmx/issues/222.
+fn writePwd(writer: *std.Io.Writer, term: *const ghostty_vt.Terminal) void {
+    const pwd = term.getPwd() orelse return;
+    if (pwd.len == 0) return;
+    writer.print("\x1b]7;{s}\x1b\\", .{pwd}) catch |err| {
+        std.log.warn("failed to format pwd err={s}", .{@errorName(err)});
+    };
+}
+
 pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Terminal) ?[]const u8 {
     var builder: std.Io.Writer.Allocating = .init(alloc);
     defer builder.deinit();
@@ -723,7 +741,7 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
         .modes = true,
         .scrolling_region = true,
         .tabstops = false, // tabstop restoration moves cursor after CUP, corrupting position
-        .pwd = true,
+        .pwd = false, // emitted below without the sentinel the formatter includes
         .keyboard = true,
         .screen = .all,
     };
@@ -732,6 +750,8 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
         std.log.warn("failed to format terminal state err={s}", .{@errorName(err)});
         return null;
     };
+
+    writePwd(&builder.writer, term);
 
     // The formatter has no title extra and never emits OSC 0/1/2, so the title
     // has to be replayed separately or an attaching client shows whatever its
@@ -785,7 +805,7 @@ pub fn serializeTerminal(
             .modes = true,
             .scrolling_region = true,
             .tabstops = false,
-            .pwd = true,
+            .pwd = false, // emitted below without the sentinel the formatter includes
             .keyboard = true,
             .screen = .all,
         },
@@ -796,6 +816,8 @@ pub fn serializeTerminal(
         std.log.warn("failed to format terminal err={s}", .{@errorName(err)});
         return null;
     };
+
+    if (format == .vt) writePwd(&builder.writer, term);
 
     const output = builder.writer.buffered();
     if (output.len == 0) return null;
@@ -1282,6 +1304,73 @@ test "serializeTerminalState omits the title when none is set" {
     defer alloc.free(output);
 
     try testing.expect(std.mem.indexOf(u8, output, "\x1b]2;") == null);
+}
+
+test "serializeTerminalState replays the pwd without a NUL sentinel" {
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var term = try ghostty_vt.Terminal.init(io, alloc, .{
+        .cols = 80,
+        .rows = 24,
+    });
+    defer term.deinit(alloc);
+
+    var stream = term.vtStream();
+    defer stream.deinit();
+
+    stream.nextSlice("\x1b]7;file://myhost/private/tmp\x1b\\");
+    stream.nextSlice("hello");
+
+    const output = serializeTerminalState(alloc, &term) orelse return error.TestUnexpectedNull;
+    defer alloc.free(output);
+
+    try testing.expect(std.mem.indexOf(u8, output, "\x1b]7;file://myhost/private/tmp\x1b\\") != null);
+    try testing.expectEqual(@as(?usize, null), std.mem.indexOfScalar(u8, output, 0));
+}
+
+test "serializeTerminalState omits the pwd when none is set" {
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var term = try ghostty_vt.Terminal.init(io, alloc, .{
+        .cols = 80,
+        .rows = 24,
+    });
+    defer term.deinit(alloc);
+
+    var stream = term.vtStream();
+    defer stream.deinit();
+
+    stream.nextSlice("hello");
+
+    const output = serializeTerminalState(alloc, &term) orelse return error.TestUnexpectedNull;
+    defer alloc.free(output);
+
+    try testing.expect(std.mem.indexOf(u8, output, "\x1b]7;") == null);
+}
+
+test "serializeTerminal vt replays the pwd without a NUL sentinel" {
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var term = try ghostty_vt.Terminal.init(io, alloc, .{
+        .cols = 80,
+        .rows = 24,
+    });
+    defer term.deinit(alloc);
+
+    var stream = term.vtStream();
+    defer stream.deinit();
+
+    stream.nextSlice("\x1b]7;file://myhost/private/tmp\x1b\\");
+    stream.nextSlice("hello");
+
+    const output = serializeTerminal(alloc, &term, .vt) orelse return error.TestUnexpectedNull;
+    defer alloc.free(output);
+
+    try testing.expect(std.mem.indexOf(u8, output, "\x1b]7;file://myhost/private/tmp\x1b\\") != null);
+    try testing.expectEqual(@as(?usize, null), std.mem.indexOfScalar(u8, output, 0));
 }
 
 fn testCreateTerminal(alloc: std.mem.Allocator, io: std.Io, cols: u16, rows: u16, vt_data: []const u8) !ghostty_vt.Terminal {

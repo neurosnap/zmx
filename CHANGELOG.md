@@ -13,6 +13,7 @@ Use spec: https://common-changelog.org/
 ### Fixed
 
 - Clear screen when switching sessions to prevent term state corruption
+- Stray NUL byte in the OSC 7 sequence replayed on attach
 
 ### Changed
 
