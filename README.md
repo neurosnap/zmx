@@ -127,6 +127,11 @@ When you attach to a `zmx` session, we don't provide any indication that you are
 
 We recommend checking for that env var inside your prompt and displaying some indication there.
 
+Sessions created by `zmx run` also set `ZMX_TASK=1`. Nobody is watching those, so
+if your shell config is expensive or chatty, gate the prompt (and any greeter)
+on `ZMX_TASK` being unset — otherwise every prompt it draws ends up in the
+scrollback that `zmx history` returns.
+
 ### fish
 
 Place this file in `~/.config/fish/config.fish`:
