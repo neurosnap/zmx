@@ -1,0 +1,79 @@
+name: Build zmx
+
+# Drop this into thdxg/zmx at .github/workflows/build-zmx.yml.
+# Mirrors thdxg/ghostty's build-ghosttykit.yml: builds the arm64 binary on a
+# macos runner with pinned zig and publishes it as a release asset that
+# Macterm's setup.sh downloads. zmx is never compiled on a dev machine.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'build.zig'
+      - 'build.zig.zon'
+
+jobs:
+  build:
+    # macos-15: the GhosttyKit CI proved zig links here (its Xcode is older
+    # than the 26.4 build that breaks zig#31658 on dev machines).
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          # Must satisfy minimum_zig_version in build.zig.zon, which the daily
+          # upstream sync can bump out from under this pin — when the build
+          # starts failing with stdlib API mismatches right after a sync,
+          # check that field first.
+          version: 0.16.0
+
+      # Build both arches and lipo into a universal binary — Macterm ships a
+      # universal app, so an arm64-only zmx would fail to exec on Intel.
+      - name: Build zmx (aarch64 + x86_64)
+        run: |
+          zig build -Doptimize=ReleaseSafe -Dtarget=aarch64-macos --prefix zig-out-arm64
+          zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-macos --prefix zig-out-x86_64
+
+      - name: Make universal binary
+        run: |
+          mkdir -p zig-out/bin
+          lipo -create -output zig-out/bin/zmx \
+            zig-out-arm64/bin/zmx zig-out-x86_64/bin/zmx
+
+      - name: Verify binary
+        run: |
+          test -x zig-out/bin/zmx
+          # Both slices must be present, or the universal build is broken.
+          lipo zig-out/bin/zmx -verify_arch arm64 x86_64
+          file zig-out/bin/zmx
+
+      - name: Package
+        run: |
+          # Tar (not a bare asset) so the executable bit survives the GitHub
+          # asset round-trip; setup.sh extracts + chmod +x.
+          tar czf zmx-universal-macos.tar.gz -C zig-out/bin zmx
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="build-$(date -u +%Y-%m-%d)"
+          COMMIT=$(git rev-parse --short HEAD)
+
+          if gh release view "$TAG" &> /dev/null; then
+            gh release delete "$TAG" --yes
+            git push --delete origin "$TAG" 2>/dev/null || true
+          fi
+
+          gh release create "$TAG" \
+            --title "zmx $(date -u +%Y-%m-%d)" \
+            --latest \
+            --notes "Built from commit ${COMMIT} on $(date -u +%Y-%m-%d)" \
+            zmx-universal-macos.tar.gz

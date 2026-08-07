@@ -1,0 +1,126 @@
+name: Sync Upstream
+
+# Keep this fork exactly ONE commit ahead of neurosnap/zmx: pristine upstream,
+# plus a single squashed commit that re-establishes the fork's downstream delta.
+# The delta is TWO explicit, auditable things:
+#
+#   1. Fork-owned FILES (DOWNSTREAM_FILES) — CI that upstream doesn't have.
+#      These are copied verbatim on top of upstream.
+#   2. Source PATCHES (.github/downstream/*.patch) — genuine changes that must
+#      be re-applied onto upstream every sync. Applied with `git apply --3way`.
+#      Every .patch must ALSO be listed in DOWNSTREAM_FILES: the reset to
+#      pristine upstream deletes anything not snapshotted, so an unlisted
+#      patch would silently vanish on the next sync.
+#      Current, both macOS-only breaks from upstream's zig 0.16 + daemonize
+#      work, to retire when upstream fixes them: 0001 casts Cfg.log_mode
+#      (u32) to mode_t at the two fromMode call sites that miss the cast
+#      (mode_t is u16 on macOS); 0002 types wakeSignalPipe's first param
+#      with the platform SIG enum instead of a hardcoded std.os.linux.SIG.
+#      Neither changes upstream's Linux behavior. (Previous patch, the OSC
+#      8 state-tracking strip —
+#      zmx#182 workaround, thdxg/zmx#1 — was retired when upstream bumped
+#      libghostty past ghostty#13394, which fixes the HyperlinkSetOutOfMemory
+#      abort properly.)
+#
+# Why not `git diff upstream..HEAD` like the old workflow: it captured the whole
+# tree difference (including any accidental drift) and re-applied it every run,
+# so once the tree drifted it stayed drifted forever. It had silently reverted
+# upstream files (build.zig's emit-lib-vt/emit-xcframework settings, README,
+# flake.nix, a test) back to stale versions. This design can only (a) lay our
+# own files down and (b) apply known patches; it can never revert upstream
+# source, and it FAILS LOUDLY if a patch no longer applies instead of shipping a
+# broken tree.
+#
+# To change the downstream delta:
+#   - New fork-owned CI file → add it to DOWNSTREAM_FILES.
+#   - New/changed source patch → regenerate the .patch under .github/downstream
+#     (e.g. `git format-patch`), commit it, and add its path to
+#     DOWNSTREAM_FILES here AND in assert-no-drift.yml. Patches apply in
+#     filename order.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  # Fork-owned files overlaid verbatim on upstream. Keep minimal: every entry is
+  # a file that will NOT receive upstream updates.
+  DOWNSTREAM_FILES: >-
+    .github/workflows/build-zmx.yml
+    .github/workflows/sync-upstream.yml
+    .github/workflows/assert-no-drift.yml
+    .github/downstream/0001-cast-log_mode-to-mode_t-for-macos.patch
+    .github/downstream/0002-use-portable-sig-type-in-wake-handler.patch
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Squash-sync onto upstream
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/neurosnap/zmx.git
+          git fetch upstream main
+
+          # Snapshot the fork-owned files from THIS commit (not from a diff, so
+          # the sync can never revert upstream source) into a temp dir.
+          tmp="$(mktemp -d)"
+          for f in $DOWNSTREAM_FILES; do
+            if [ -f "$f" ]; then
+              mkdir -p "$tmp/$(dirname "$f")"
+              cp "$f" "$tmp/$f"
+            fi
+          done
+
+          # Rebuild main as pristine upstream HEAD…
+          git reset --hard upstream/main
+
+          # …lay the fork-owned files back on top…
+          for f in $DOWNSTREAM_FILES; do
+            if [ -f "$tmp/$f" ]; then
+              mkdir -p "$(dirname "$f")"
+              cp "$tmp/$f" "$f"
+              git add "$f"
+            fi
+          done
+
+          # …and re-apply the source patches. Fail loudly (don't ship a broken
+          # or half-patched tree) if any patch no longer applies to upstream.
+          shopt -s nullglob
+          for p in .github/downstream/*.patch; do
+            echo "Applying downstream patch: $p"
+            if ! git apply --3way --index "$p"; then
+              echo "::error::Downstream patch failed to apply: $p" >&2
+              echo "::error::Upstream likely changed the patched region. Regenerate the patch against current upstream and re-run." >&2
+              exit 1
+            fi
+          done
+
+          if git diff --cached --quiet; then
+            echo "No downstream delta; main is pristine upstream."
+            git push --force-with-lease
+            exit 0
+          fi
+
+          git commit -m "ci: downstream delta on pristine upstream
+
+          Fork-owned CI workflows + re-applied source patches (see
+          .github/downstream and DOWNSTREAM_FILES in sync-upstream.yml) on top of
+          an untouched neurosnap/zmx main. Regenerated automatically by
+          sync-upstream.yml; it can only add owned files and apply known patches,
+          never revert upstream source, and fails loudly if a patch no longer
+          applies."
+
+          git push --force-with-lease

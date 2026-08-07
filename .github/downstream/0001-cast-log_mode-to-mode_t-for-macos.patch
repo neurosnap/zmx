@@ -1,0 +1,43 @@
+From dbcaecf953cacca09fa667a00f892d0704b14616 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 31 Jul 2026 13:16:00 +0000
+Subject: [PATCH] fix: cast log_mode to mode_t for macOS builds
+
+std.Io.File.Permissions.fromMode takes std.posix.mode_t, which is u16 on
+macOS but u32 on Linux, so passing Cfg.log_mode (u32) fails to compile
+when targeting macOS. Use the same @intCast cfg.zig already applies to
+dir_mode at its fromMode call sites.
+---
+ src/loop.zig | 2 +-
+ src/main.zig | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/loop.zig b/src/loop.zig
+index 2ca97e3..2fea9d2 100644
+--- a/src/loop.zig
++++ b/src/loop.zig
+@@ -725,7 +725,7 @@ pub const Daemon = struct {
+                 fba.allocator(),
+                 &.{ self.cfg.log_dir, session_log_name },
+             );
+-            const log_mode = std.Io.File.Permissions.fromMode(self.cfg.log_mode);
++            const log_mode = std.Io.File.Permissions.fromMode(@intCast(self.cfg.log_mode));
+             log.log_system.init(new_io, session_log_path, log_mode) catch {};
+         }
+ 
+diff --git a/src/main.zig b/src/main.zig
+index 370db1e..c4b4f33 100644
+--- a/src/main.zig
++++ b/src/main.zig
+@@ -42,7 +42,7 @@ pub fn main(init: std.process.Init) !void {
+ 
+     const log_path = try std.fs.path.join(gpa, &.{ cfg.log_dir, "zmx.log" });
+     defer gpa.free(log_path);
+-    const log_mode = std.Io.File.Permissions.fromMode(cfg.log_mode);
++    const log_mode = std.Io.File.Permissions.fromMode(@intCast(cfg.log_mode));
+     try log.log_system.init(io, log_path, log_mode);
+     defer log.log_system.deinit();
+ 
+-- 
+2.43.0
+

@@ -1,0 +1,34 @@
+From d0f0476709ff77098ccc680fafe6e7b94daf50f7 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 31 Jul 2026 13:25:53 +0000
+Subject: [PATCH] fix: use portable SIG type in wakeSignalPipe handler
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Sigaction's sigaction-handler parameter is typed with the platform SIG
+enum, which is std.c.SIG on macOS but was hardcoded here as
+std.os.linux.SIG, so the handler pointer fails to coerce when targeting
+macOS. Use lib_posix.SIG — the same platform alias the rest of this file
+already uses (and identical to the Linux enum under libc there, so no
+change on upstream's targets).
+---
+ src/signal.zig | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/signal.zig b/src/signal.zig
+index 44f1fb3..3ba93e2 100644
+--- a/src/signal.zig
++++ b/src/signal.zig
+@@ -6,7 +6,7 @@ const lib_posix = @import("posix.zig");
+ /// never surfaces; the handler writes a byte here and poll() wakes on POLLIN.
+ pub var sig_pipe: [2]lib_posix.fd_t = .{ -1, -1 };
+ 
+-pub fn wakeSignalPipe(_: std.os.linux.SIG, _: *const lib_posix.siginfo_t, _: ?*anyopaque) callconv(.c) void {
++pub fn wakeSignalPipe(_: lib_posix.SIG, _: *const lib_posix.siginfo_t, _: ?*anyopaque) callconv(.c) void {
+     const saved = std.c._errno().*;
+     _ = std.c.write(sig_pipe[1], "x", 1);
+     std.c._errno().* = saved;
+-- 
+2.43.0
+
