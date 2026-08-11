@@ -1599,6 +1599,9 @@ fn run(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon, detached: bool, comm
     };
     defer lib_posix.close(client_sock);
 
+    const term_size = ipc.getTerminalSize(lib_posix.STDOUT_FILENO);
+    ipc.send(client_sock, .Resize, std.mem.asBytes(&term_size)) catch {};
+
     var fds = try std.ArrayList(i32).initCapacity(gpa, 1);
     defer fds.deinit(gpa);
     try fds.append(gpa, client_sock);

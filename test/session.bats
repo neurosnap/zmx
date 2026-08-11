@@ -295,3 +295,15 @@ load test_helper
   run "$ZMX" print
   [ "$status" -ne 0 ]
 }
+
+@test "run: long command line does not truncate history when creating session" {
+  local longcmd="echo 1234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890"
+  run "$ZMX" run test-long-cmd -d "$longcmd"
+  [ "$status" -eq 0 ]
+  wait_for_session test-long-cmd
+  wait_for_output test-long-cmd 12345678901234567890
+  run "$ZMX" history test-long-cmd
+  [[ "$output" != *"<1234567890"* ]]
+  [[ "$output" == *"12345678901234567890"* ]]
+}
+
