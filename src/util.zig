@@ -350,13 +350,24 @@ test "rewritePromptRedraw: embedded in larger output" {
     try std.testing.expectEqualStrings("some output\r\n\x1b]133;A;redraw=0\x07prompt$ \x1b]133;B\x07", result);
 }
 
-pub fn findTaskExitMarker(output: []const u8) ?u8 {
-    const marker = "ZMX_TASK_COMPLETED:";
+pub fn generateTaskId(io: std.Io) [4]u8 {
+    var bytes: [2]u8 = undefined;
+    io.random(&bytes);
+    return std.fmt.bytesToHex(bytes, .lower);
+}
+
+pub fn getTaskExitMarker(buf: []u8, id_marker: [4]u8) ![]u8 {
+    return std.fmt.bufPrint(buf, "ZMX_TASK_COMPLETED:{s}:", .{id_marker});
+}
+
+pub fn findTaskExitMarker(output: []const u8, id_marker: [4]u8) !?u8 {
+    var buf: [1024]u8 = undefined;
+    const marker = try getTaskExitMarker(&buf, id_marker);
 
     // The command line is echoed back by the PTY (canonical mode) before the
     // shell evaluates it, so the *first* occurrence of the marker in the
-    // output is often the literal, unexpanded "ZMX_TASK_COMPLETED:$?" from
-    // the echo, not the real "ZMX_TASK_COMPLETED:<code>" written once the
+    // output is often the literal, unexpanded "ZMX_TASK_COMPLETED:{id}:$?" from
+    // the echo, not the real "ZMX_TASK_COMPLETED:{id}:<code>" written once the
     // shell actually runs it. Keep scanning past unparseable occurrences
     // instead of giving up on the first one.
     var search_start: usize = 0;

@@ -642,15 +642,16 @@ fn tail(alloc: std.mem.Allocator, client_socket_fds: std.ArrayList(i32), detache
                         },
                         .Output => {
                             if (msg.payload.len > 0) {
+                                //  TODO: figure out how to bring this back
                                 // Fallback: scan output for task exit marker in case
                                 // .TaskComplete was lost (e.g. daemon exited before
                                 // flushing). This ensures we detect completion even
                                 // when the IPC message doesn't arrive.
-                                if (task_complete_code == null and is_run_cmd) {
-                                    if (util.findTaskExitMarker(msg.payload)) |ec| {
-                                        task_complete_code = ec;
-                                    }
-                                }
+                                // if (task_complete_code == null and is_run_cmd) {
+                                //     if (util.findTaskExitMarker(msg.payload)) |ec| {
+                                //         task_complete_code = ec;
+                                //     }
+                                // }
 
                                 // Strip the first line (command echo) for run mode.
                                 var payload = msg.payload;

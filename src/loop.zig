@@ -362,7 +362,7 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
                         @memcpy(scan_buf[marker_carry_len..][0..n], buf[0..n]);
                         const scan_len = marker_carry_len + n;
 
-                        if (util.findTaskExitMarker(scan_buf[0..scan_len])) |exit_code| {
+                        if (try util.findTaskExitMarker(scan_buf[0..scan_len], daemon.task_id)) |exit_code| {
                             daemon.task_exit_code = exit_code;
                             daemon.task_ended_at = @intCast(std.Io.Timestamp.now(io, .real).toSeconds());
 
@@ -474,7 +474,7 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
                         .LabelSet => try daemon.handleLabelSet(gpa, client, msg.payload),
                         .LabelClear => try daemon.handleLabelClear(gpa, client),
                         .History => try daemon.handleHistory(gpa, client, &term, msg.payload),
-                        .Run => try daemon.handleRun(gpa, client, msg.payload),
+                        .Run => try daemon.handleRun(gpa, io, client, msg.payload),
                         .Ack, .TaskComplete, .LabelData => {},
                         .Write => try daemon.handleWrite(gpa, client, msg.payload),
                         _ => std.log.warn(
@@ -566,6 +566,7 @@ pub const Daemon = struct {
     has_terminal_client: bool = false, // true only after a real attach (.Init received)
     created_at: u64, // unix timestamp (ns)
     is_task_mode: bool = false, // flag for when session is run as a task
+    task_id: [4]u8 = undefined,
     task_exit_code: ?u8 = null, // null = running or n/a, set when task completes
     task_ended_at: ?u64 = null, // timestamp when task exited
     pty_fd: i32 = -1, // set by daemonLoop so handleRun can probe the foreground process
@@ -1102,13 +1103,14 @@ pub const Daemon = struct {
         }
     }
 
-    pub fn handleRun(self: *Daemon, gpa: std.mem.Allocator, client: *Client, payload: []const u8) !void {
+    pub fn handleRun(self: *Daemon, gpa: std.mem.Allocator, io: std.Io, client: *Client, payload: []const u8) !void {
         // Reset task tracking so the new command's exit marker is detected.
         // Without this, a second `zmx run` on the same session is ignored
         // because task_exit_code is still set from the first run.
         self.task_exit_code = null;
         self.task_ended_at = null;
         self.is_task_mode = true;
+        self.task_id = util.generateTaskId(io);
 
         if (payload.len == 0) return;
 
@@ -1118,8 +1120,12 @@ pub const Daemon = struct {
         // exit code of the command (not the `;`). The sole exception is when
         // the command contains a heredoc (`<<`), the delimiter must be alone
         // on its line, so the marker goes on the next line instead.
-        const single_line_marker = "; echo ZMX_TASK_COMPLETED:$?\r";
-        const heredoc_marker = "\r\necho ZMX_TASK_COMPLETED:$?\r";
+        var buf: [1024]u8 = undefined;
+        const marker = try util.getTaskExitMarker(&buf, self.task_id);
+        var single_buf: [1024]u8 = undefined;
+        const single_line_marker = try std.fmt.bufPrint(&single_buf, "; echo {s}$?\r", .{marker});
+        var here_buf: [1024]u8 = undefined;
+        const heredoc_marker = try std.fmt.bufPrint(&here_buf, "\r\necho {s}$?\r", .{marker});
         const uses_heredoc = std.mem.indexOf(u8, cmd, "<<") != null;
 
         if (cmd.len > 0 and cmd[cmd.len - 1] == '\r') {
