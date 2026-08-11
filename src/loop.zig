@@ -469,7 +469,7 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
                         .Kill => {
                             break :daemon_loop;
                         },
-                        .Info => try daemon.handleInfo(gpa, client),
+                        .Info => try daemon.handleInfo(gpa, client, &term),
                         .LabelGet => try daemon.handleLabelGet(gpa, client),
                         .LabelSet => try daemon.handleLabelSet(gpa, client, msg.payload),
                         .LabelClear => try daemon.handleLabelClear(gpa, client),
@@ -1036,7 +1036,9 @@ pub const Daemon = struct {
         };
     }
 
-    pub fn handleInfo(self: *Daemon, gpa: std.mem.Allocator, client: *Client) !void {
+    pub fn handleInfo(self: *Daemon, gpa: std.mem.Allocator, client: *Client, term: *ghostty_vt.Terminal) !void {
+        self.setPwd(term);
+
         // zeroes() so asBytes() doesn't ship struct padding + unused cmd/cwd
         // tail bytes (daemon stack contents) to clients.
         var info = std.mem.zeroes(ipc.Info);
@@ -1085,12 +1087,13 @@ pub const Daemon = struct {
     }
 
     pub fn handleHistory(
-        _: *Daemon,
+        self: *Daemon,
         gpa: std.mem.Allocator,
         client: *Client,
         term: *ghostty_vt.Terminal,
         payload: []const u8,
     ) !void {
+        self.setPwd(term);
         const format: util.HistoryFormat = if (payload.len > 0)
             @enumFromInt(payload[0])
         else

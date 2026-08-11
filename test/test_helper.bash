@@ -54,3 +54,17 @@ wait_for_output() {
   echo "Timed out waiting for output '$marker' in session '$name'" >&2
   return 1
 }
+
+# Helper: wait for a session's cwd to match expected substring (up to N seconds).
+wait_for_cwd() {
+  local name="$1" pattern="$2" timeout="${3:-5}" i=0
+  while (( i < timeout * 10 )); do
+    if "$ZMX" list 2>/dev/null | grep -F "name=$name" | grep -qF "$pattern"; then
+      return 0
+    fi
+    sleep 0.1
+    (( i++ )) || true
+  done
+  echo "Timed out waiting for cwd '$pattern' in session '$name'" >&2
+  return 1
+}

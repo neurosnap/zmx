@@ -28,6 +28,7 @@ osc7_session() {
   osc7_session test-cwd-uri "$dir"
   wait_for_session test-cwd-uri
   wait_for_output test-cwd-uri marker-test-cwd-uri
+  wait_for_cwd test-cwd-uri "cwd=file://$(hostname)${dir// /%20}"
 
   run "$ZMX" list
   [ "$status" -eq 0 ]
@@ -39,6 +40,7 @@ osc7_session() {
     "printf '\033]7;file://some-remote-box/home/me\007marker-remote\n'; sleep 30"
   wait_for_session test-cwd-remote
   wait_for_output test-cwd-remote marker-remote
+  wait_for_cwd test-cwd-remote "cwd=file://some-remote-box/home/me"
 
   run "$ZMX" list
   [ "$status" -eq 0 ]
