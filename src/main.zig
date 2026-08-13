@@ -1312,12 +1312,14 @@ fn attach(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon) !void {
     var orig_termios: cross.c.termios = undefined;
     const stdin_is_tty = cross.c.tcgetattr(lib_posix.STDIN_FILENO, &orig_termios) == 0;
 
+    // RIS, OSC 10/11/12
+    const restore_seq = "\x1bc\x1b]110\x1b\\\x1b]111\x1b\\\x1b]112\x1b\\";
+
     defer {
         if (stdin_is_tty) {
             _ = cross.c.tcsetattr(lib_posix.STDIN_FILENO, cross.c.TCSAFLUSH, &orig_termios);
         }
         // Reset terminal modes on detach
-        const restore_seq = "\x1bc";
         _ = lib_posix.write(lib_posix.STDOUT_FILENO, restore_seq) catch {};
     }
 
@@ -1350,7 +1352,6 @@ fn attach(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon) !void {
         .switch_session => {
             if (looper.session_name) |session_name| {
                 // Reset terminal modes when switching sessions
-                const restore_seq = "\x1bc";
                 _ = lib_posix.write(lib_posix.STDOUT_FILENO, restore_seq) catch {};
 
                 const target_path = socket.getSocketPath(

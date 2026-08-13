@@ -746,6 +746,26 @@ fn writePwd(writer: *std.Io.Writer, term: *const ghostty_vt.Terminal) void {
     };
 }
 
+fn writeDynamicColor(
+    writer: *std.Io.Writer,
+    kind: ghostty_vt.color.Dynamic,
+    dynamic: ghostty_vt.color.DynamicRGB,
+) void {
+    const c = dynamic.override orelse return;
+    writer.print("\x1b]{d};rgb:{x:0>2}/{x:0>2}/{x:0>2}\x1b\\", .{
+        @intFromEnum(kind), c.r, c.g, c.b,
+    }) catch |err| {
+        std.log.warn("failed to format dynamic color err={s}", .{@errorName(err)});
+    };
+}
+
+fn writeColorOverrides(writer: *std.Io.Writer, term: *const ghostty_vt.Terminal) void {
+    const colors = &term.colors;
+    writeDynamicColor(writer, .foreground, colors.foreground);
+    writeDynamicColor(writer, .background, colors.background);
+    writeDynamicColor(writer, .cursor, colors.cursor);
+}
+
 pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Terminal) ?[]const u8 {
     var builder: std.Io.Writer.Allocating = .init(alloc);
     defer builder.deinit();
@@ -759,6 +779,9 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
     if (had_synchronized_output) {
         term.modes.set(.synchronized_output, false);
     }
+
+    // If state contains color override, restore it.
+    writeColorOverrides(&builder.writer, term);
 
     const pages = &term.screens.active.pages;
     const screen_top = pages.getTopLeft(.screen);
