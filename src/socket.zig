@@ -59,7 +59,11 @@ pub const SessionMatch = struct {
 
 pub fn parseSessionArg(alloc: std.mem.Allocator, raw: []const u8) !SessionMatch {
     if (raw.len > 0 and raw[raw.len - 1] == '*') {
-        const name = try getSeshName(alloc, raw[0 .. raw.len - 1]);
+        const prefix = raw[0 .. raw.len - 1];
+        const name = if (prefix.len == 0 and getSeshPrefix().len == 0)
+            try alloc.dupe(u8, "")
+        else
+            try getSeshName(alloc, prefix);
         return .{ .name = name, .is_prefix = true };
     }
     const name = try getSeshName(alloc, raw);
@@ -227,4 +231,13 @@ test "getSocketPath boundary: name fills exactly to limit" {
     @memset(name_over_limit, 'b');
 
     try std.testing.expectError(error.NameTooLong, getSocketPath(alloc, dir, name_over_limit));
+}
+
+test "parseSessionArg accepts a wildcard matching all sessions" {
+    const match = try parseSessionArg(std.testing.allocator, "*");
+    defer std.testing.allocator.free(match.name);
+
+    try std.testing.expect(match.is_prefix);
+    try std.testing.expectEqualStrings("", match.name);
+    try std.testing.expect(match.matches("any-session"));
 }
