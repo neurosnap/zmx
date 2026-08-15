@@ -253,11 +253,16 @@ Requires [fzf](https://github.com/junegunn/fzf).
 ```bash
 zmx-select() {
   local display
+  local prefix="${ZMX_SESSION_PREFIX:-}"
   display=$(zmx list 2>/dev/null | while IFS=$'\t' read -r name pid clients created dir; do
     name=${name#*name=}
     pid=${pid#*pid=}
     clients=${clients#*clients=}
     dir=${dir#*start_dir=}
+    if [[ -n "$prefix" ]]; then
+      [[ "$name" == "$prefix"* ]] || continue
+      name=${name#"$prefix"}
+    fi
     printf "%-20s  pid:%-8s  clients:%-2s  %s\n" "$name" "$pid" "$clients" "$dir"
   done)
 
