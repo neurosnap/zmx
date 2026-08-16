@@ -119,27 +119,27 @@ pub fn main(init: std.process.Init) !void {
         defer gpa.free(sesh);
         return history(gpa, io, &cfg, sesh, format);
     } else if (std.mem.eql(u8, cmd, "attach") or std.mem.eql(u8, cmd, "a")) {
-        const session_name = args.next() orelse "";
-        if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
+        var attach_args: std.ArrayList([]const u8) = .empty;
+        defer attach_args.deinit(gpa);
+        while (args.next()) |arg| {
+            try attach_args.append(gpa, arg);
+        }
+
+        const parsed = parseAttachArgs(attach_args.items);
+        if (parsed.want_help) {
             return help(io);
         }
 
-        var command_args: std.ArrayList([]const u8) = .empty;
-        defer command_args.deinit(gpa);
-        while (args.next()) |arg| {
-            try command_args.append(gpa, arg);
-        }
-
         var command: ?[][]const u8 = null;
-        if (command_args.items.len > 0) {
-            command = command_args.items;
+        if (parsed.command_start < attach_args.items.len) {
+            command = attach_args.items[parsed.command_start..];
         }
 
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
         const cwd_len = std.process.currentPath(io, &cwd_buf) catch 0;
         const cwd = cwd_buf[0..cwd_len];
 
-        const sesh = try socket.getSeshName(gpa, session_name);
+        const sesh = try socket.getSeshName(gpa, parsed.session_name);
         defer gpa.free(sesh);
         const socket_path = socket.getSocketPath(gpa, cfg.socket_dir, sesh) catch |err| switch (err) {
             error.NameTooLong => return socket.printSessionNameTooLong(io, sesh, cfg.socket_dir),
@@ -150,7 +150,7 @@ pub fn main(init: std.process.Init) !void {
         daemon.setCwd(cwd);
         daemon.shell = shell_env;
         std.log.info("socket path={s}", .{daemon.socket_path});
-        return attach(gpa, io, &daemon);
+        return attach(gpa, io, &daemon, parsed.no_switch);
     } else if (std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "r")) {
         const session_name = args.next() orelse "";
         if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
@@ -411,7 +411,7 @@ fn help(io: std.Io) !void {
         \\Usage: zmx <command> [args...]
         \\
         \\Commands:
-        \\  [a]ttach <name> [command...]             Attach to session, creating if needed
+        \\  [a]ttach [-n] <name> [command...]        Attach to session, creating if needed
         \\  [r]un <name> [-d] [command...]           Send command without attaching
         \\  [s]end <name> <text...>                  Send raw input to session PTY
         \\  [p]rint <name> <text...>                 Inject text into session display
@@ -433,9 +433,14 @@ fn help(io: std.Io) !void {
         \\  This will spawn a login $SHELL with a PTY.  You can provide a
         \\  command instead of creating a shell.
         \\
+        \\  When ZMX_SESSION is set, attach switches the calling terminal to
+        \\  <name> instead of creating another client.  Pass -n (--new) to
+        \\  attach in the current terminal and leave that session alone.
+        \\
         \\  Examples:
         \\    zmx attach dev
         \\    zmx attach dev vim
+        \\    zmx attach -n scratch
         \\
         \\History:
         \\  This should generally be used with `tail` to print the last lines
@@ -535,7 +540,8 @@ fn help(io: std.Io) !void {
         \\  ZMX_DIR              Socket directory (priority 1)
         \\  XDG_RUNTIME_DIR      Socket directory (priority 2)
         \\  TMPDIR               Socket directory (priority 3)
-        \\  ZMX_SESSION          Session name (injected automatically)
+        \\  ZMX_SESSION          Session name (injected automatically; makes attach
+        \\                       switch this session unless -n is given)
         \\  ZMX_SESSION_PREFIX   Prefix added to all session names
         \\  ZMX_DIR_MODE         Sets mode for socket and log directories (octal, defaults to 0750)
         \\  ZMX_LOG_MODE         Sets mode for log files (octal, defaults to 0640)
@@ -1287,9 +1293,44 @@ fn switchSesh(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon, current_sesh:
     };
 }
 
-fn attach(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon) !void {
+const AttachArgs = struct {
+    /// Session name, or "" when the caller did not name one.
+    session_name: []const u8 = "",
+    /// Index of the first word of the session command.
+    command_start: usize = 0,
+    /// `-n`/`--new`: attach in this terminal instead of switching the session
+    /// named by ZMX_SESSION.
+    no_switch: bool = false,
+    want_help: bool = false,
+};
+
+/// Parses the arguments that follow `zmx attach`. Flags are only recognized
+/// before the session name, so everything after it stays part of the command
+/// handed to the session.
+fn parseAttachArgs(argv: []const []const u8) AttachArgs {
+    var parsed: AttachArgs = .{};
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            parsed.want_help = true;
+            return parsed;
+        }
+        if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--new")) {
+            parsed.no_switch = true;
+            continue;
+        }
+        parsed.session_name = arg;
+        i += 1;
+        break;
+    }
+    parsed.command_start = i;
+    return parsed;
+}
+
+fn attach(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon, no_switch: bool) !void {
     const sesh = socket.getSeshNameFromEnv();
-    if (sesh.len > 0) {
+    if (!no_switch and sesh.len > 0) {
         return switchSesh(gpa, io, daemon, sesh);
     }
 
@@ -1373,7 +1414,7 @@ fn attach(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon) !void {
                 std.log.info("switching to new session cwd={s}", .{switch_cwd});
                 target_daemon.setCwd(switch_cwd);
                 target_daemon.shell = daemon.shell;
-                return attach(gpa, io, &target_daemon);
+                return attach(gpa, io, &target_daemon, no_switch);
             }
         },
     }
@@ -1613,4 +1654,53 @@ fn run(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon, detached: bool, comm
 
     const exit_code = try tail(gpa, fds, detached, true);
     lib_posix.exit(exit_code);
+}
+
+test "parseAttachArgs reads a bare session name" {
+    const parsed = parseAttachArgs(&.{"dev"});
+    try std.testing.expectEqualStrings("dev", parsed.session_name);
+    try std.testing.expect(!parsed.no_switch);
+    try std.testing.expect(!parsed.want_help);
+    try std.testing.expectEqual(@as(usize, 1), parsed.command_start);
+}
+
+test "parseAttachArgs keeps the session command intact" {
+    const argv: []const []const u8 = &.{ "dev", "vim", "-n" };
+    const parsed = parseAttachArgs(argv);
+    try std.testing.expectEqualStrings("dev", parsed.session_name);
+    // -n after the session name belongs to the command, not to zmx.
+    try std.testing.expect(!parsed.no_switch);
+    try std.testing.expectEqualSlices([]const u8, argv[1..], argv[parsed.command_start..]);
+}
+
+test "parseAttachArgs accepts -n before the session name" {
+    for ([_][]const u8{ "-n", "--new" }) |flag| {
+        const parsed = parseAttachArgs(&.{ flag, "scratch" });
+        try std.testing.expect(parsed.no_switch);
+        try std.testing.expectEqualStrings("scratch", parsed.session_name);
+        try std.testing.expectEqual(@as(usize, 2), parsed.command_start);
+    }
+}
+
+test "parseAttachArgs keeps -n and a session command together" {
+    const argv: []const []const u8 = &.{ "-n", "scratch", "vim" };
+    const parsed = parseAttachArgs(argv);
+    try std.testing.expect(parsed.no_switch);
+    try std.testing.expectEqualStrings("scratch", parsed.session_name);
+    try std.testing.expectEqualSlices([]const u8, argv[2..], argv[parsed.command_start..]);
+}
+
+test "parseAttachArgs leaves the session name empty when only -n is given" {
+    const parsed = parseAttachArgs(&.{"-n"});
+    try std.testing.expect(parsed.no_switch);
+    try std.testing.expectEqualStrings("", parsed.session_name);
+    try std.testing.expectEqual(@as(usize, 1), parsed.command_start);
+}
+
+test "parseAttachArgs reports help before and after -n" {
+    try std.testing.expect(parseAttachArgs(&.{"--help"}).want_help);
+    try std.testing.expect(parseAttachArgs(&.{"-h"}).want_help);
+    try std.testing.expect(parseAttachArgs(&.{ "-n", "--help" }).want_help);
+    // Once a session name is read, -h belongs to the command.
+    try std.testing.expect(!parseAttachArgs(&.{ "dev", "-h" }).want_help);
 }
