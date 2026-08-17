@@ -160,6 +160,7 @@ const fish_completions =
     \\complete -c zmx -n "__fish_is_nth_token 2; and __fish_seen_subcommand_from c completions" -a 'bash zsh fish nu' -d Shell
     \\
     \\# Subcommand flags
+    \\complete -c zmx -n "__fish_seen_subcommand_from a attach" -l labels -d 'Apply "key=value ..." labels as the session is created' -r
     \\complete -c zmx -n "__fish_seen_subcommand_from r run" -s d -d 'Detach from the calling terminal; use `wait` to track its status'
     \\complete -c zmx -n "__fish_seen_subcommand_from r run" -l fish -d 'Required when the session runs fish shell'
     \\complete -c zmx -n "__fish_seen_subcommand_from l list" -l short -d 'Short output'
@@ -180,6 +181,7 @@ const nu_completions =
     \\
     \\export extern "zmx attach" [
     \\    name: string@"nu-complete zmx sessions"
+    \\    --labels: string
     \\    ...rest: string
     \\]
     \\
