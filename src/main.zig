@@ -119,27 +119,37 @@ pub fn main(init: std.process.Init) !void {
         defer gpa.free(sesh);
         return history(gpa, io, &cfg, sesh, format);
     } else if (std.mem.eql(u8, cmd, "attach") or std.mem.eql(u8, cmd, "a")) {
-        const session_name = args.next() orelse "";
-        if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
+        var attach_args: std.ArrayList([]const u8) = .empty;
+        defer attach_args.deinit(gpa);
+        while (args.next()) |arg| {
+            try attach_args.append(gpa, arg);
+        }
+
+        const parsed = parseAttachArgs(attach_args.items);
+        if (parsed.want_help) {
             return help(io);
         }
-
-        var command_args: std.ArrayList([]const u8) = .empty;
-        defer command_args.deinit(gpa);
-        while (args.next()) |arg| {
-            try command_args.append(gpa, arg);
+        if (parsed.missing_labels_value) {
+            var buf: [4096]u8 = undefined;
+            var w = std.Io.File.stderr().writer(io, &buf);
+            w.interface.print("error: --labels requires \"key=value ...\"\n", .{}) catch {};
+            w.interface.flush() catch {};
+            std.process.exit(1);
         }
+        // Before ensureSession, so a rejected label does not leave a session
+        // behind that the caller never asked for.
+        if (parsed.labels) |kvs| assertLabels(io, kvs);
 
         var command: ?[][]const u8 = null;
-        if (command_args.items.len > 0) {
-            command = command_args.items;
+        if (parsed.command_start < attach_args.items.len) {
+            command = attach_args.items[parsed.command_start..];
         }
 
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
         const cwd_len = std.process.currentPath(io, &cwd_buf) catch 0;
         const cwd = cwd_buf[0..cwd_len];
 
-        const sesh = try socket.getSeshName(gpa, session_name);
+        const sesh = try socket.getSeshName(gpa, parsed.session_name);
         defer gpa.free(sesh);
         const socket_path = socket.getSocketPath(gpa, cfg.socket_dir, sesh) catch |err| switch (err) {
             error.NameTooLong => return socket.printSessionNameTooLong(io, sesh, cfg.socket_dir),
@@ -150,7 +160,7 @@ pub fn main(init: std.process.Init) !void {
         daemon.setCwd(cwd);
         daemon.shell = shell_env;
         std.log.info("socket path={s}", .{daemon.socket_path});
-        return attach(gpa, io, &daemon);
+        return attach(gpa, io, &daemon, parsed.labels);
     } else if (std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "r")) {
         const session_name = args.next() orelse "";
         if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
@@ -411,7 +421,7 @@ fn help(io: std.Io) !void {
         \\Usage: zmx <command> [args...]
         \\
         \\Commands:
-        \\  [a]ttach <name> [command...]             Attach to session, creating if needed
+        \\  [a]ttach [--labels kv] <name> [command...]  Attach to session, creating if needed
         \\  [r]un <name> [-d] [command...]           Send command without attaching
         \\  [s]end <name> <text...>                  Send raw input to session PTY
         \\  [p]rint <name> <text...>                 Inject text into session display
@@ -433,9 +443,14 @@ fn help(io: std.Io) !void {
         \\  This will spawn a login $SHELL with a PTY.  You can provide a
         \\  command instead of creating a shell.
         \\
+        \\  --labels applies labels as the session is created, in the same form
+        \\  `zmx set` takes. A caller that creates and then labels in two steps
+        \\  leaves an unlabelled session behind if it dies between them.
+        \\
         \\  Examples:
         \\    zmx attach dev
         \\    zmx attach dev vim
+        \\    zmx attach --labels "project=api role=worker" build
         \\
         \\History:
         \\  This should generally be used with `tail` to print the last lines
@@ -535,7 +550,8 @@ fn help(io: std.Io) !void {
         \\  ZMX_DIR              Socket directory (priority 1)
         \\  XDG_RUNTIME_DIR      Socket directory (priority 2)
         \\  TMPDIR               Socket directory (priority 3)
-        \\  ZMX_SESSION          Session name (injected automatically)
+        \\  ZMX_SESSION          Session name (injected automatically; makes attach
+        \\                       switch this session)
         \\  ZMX_SESSION_PREFIX   Prefix added to all session names
         \\  ZMX_DIR_MODE         Sets mode for socket and log directories (octal, defaults to 0750)
         \\  ZMX_LOG_MODE         Sets mode for log files (octal, defaults to 0640)
@@ -1076,9 +1092,10 @@ fn labelGet(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []con
     try stdout.interface.flush();
 }
 
-fn labelSet(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []const u8, labels: []const u8) !void {
-    std.log.info("label set session={s}", .{session_name});
-
+/// Rejects a malformed label set before the caller acts on it. Exits rather
+/// than returning, so `attach --labels` can check its labels before a session
+/// exists to be left behind.
+fn assertLabels(io: std.Io, labels: []const u8) void {
     var kvs = label.LabelIterator.init(labels);
     while (kvs.next()) |kv| {
         label.assertLabel(kv.key, kv.value) catch |err| {
@@ -1103,6 +1120,12 @@ fn labelSet(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []con
             std.process.exit(1);
         };
     }
+}
+
+fn labelSet(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []const u8, labels: []const u8) !void {
+    std.log.info("label set session={s}", .{session_name});
+
+    assertLabels(io, labels);
 
     const socket_path = socket.getSocketPath(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
         error.NameTooLong => return socket.printSessionNameTooLong(io, session_name, cfg.socket_dir),
@@ -1287,7 +1310,55 @@ fn switchSesh(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon, current_sesh:
     };
 }
 
-fn attach(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon) !void {
+const AttachArgs = struct {
+    /// Session name, or "" when the caller did not name one.
+    session_name: []const u8 = "",
+    /// Index of the first word of the session command.
+    command_start: usize = 0,
+    /// `--labels "k=v ..."`: labels to apply once the session exists, in the
+    /// same space-separated form `zmx set` takes.
+    labels: ?[]const u8 = null,
+    want_help: bool = false,
+    /// `--labels` was given with nothing to apply.
+    missing_labels_value: bool = false,
+};
+
+/// Parses the arguments that follow `zmx attach`. Flags are only recognized
+/// before the session name, so everything after it stays part of the command
+/// handed to the session.
+fn parseAttachArgs(argv: []const []const u8) AttachArgs {
+    const labels_flag = "--labels";
+    var parsed: AttachArgs = .{};
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            parsed.want_help = true;
+            return parsed;
+        }
+        if (std.mem.startsWith(u8, arg, labels_flag ++ "=")) {
+            parsed.labels = arg[labels_flag.len + 1 ..];
+            continue;
+        }
+        if (std.mem.eql(u8, arg, labels_flag)) {
+            if (i + 1 >= argv.len) {
+                parsed.missing_labels_value = true;
+                parsed.command_start = argv.len;
+                return parsed;
+            }
+            i += 1;
+            parsed.labels = argv[i];
+            continue;
+        }
+        parsed.session_name = arg;
+        i += 1;
+        break;
+    }
+    parsed.command_start = i;
+    return parsed;
+}
+
+fn attach(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon, labels: ?[]const u8) !void {
     const sesh = socket.getSeshNameFromEnv();
     if (sesh.len > 0) {
         return switchSesh(gpa, io, daemon, sesh);
@@ -1295,6 +1366,14 @@ fn attach(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon) !void {
 
     const is_daemon_proc = try daemon.ensureSession(io);
     if (is_daemon_proc) return;
+
+    // The session exists now, so labels land before the client takes over the
+    // terminal. Doing it here rather than in a follow-up `zmx set` keeps a
+    // supervisor from leaving an unlabelled session behind if it dies in
+    // between the two calls.
+    if (labels) |kvs| {
+        try labelSet(gpa, io, daemon.cfg, daemon.session_name, kvs);
+    }
 
     const client_sock = try socket.sessionConnect(daemon.socket_path);
     std.log.info("attached session={s}", .{daemon.session_name});
@@ -1373,7 +1452,7 @@ fn attach(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon) !void {
                 std.log.info("switching to new session cwd={s}", .{switch_cwd});
                 target_daemon.setCwd(switch_cwd);
                 target_daemon.shell = daemon.shell;
-                return attach(gpa, io, &target_daemon);
+                return attach(gpa, io, &target_daemon, null);
             }
         },
     }
@@ -1613,4 +1692,61 @@ fn run(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon, detached: bool, comm
 
     const exit_code = try tail(gpa, fds, detached, true);
     lib_posix.exit(exit_code);
+}
+
+test "parseAttachArgs reads a bare session name" {
+    const parsed = parseAttachArgs(&.{"dev"});
+    try std.testing.expectEqualStrings("dev", parsed.session_name);
+    try std.testing.expect(!parsed.want_help);
+    try std.testing.expectEqual(@as(usize, 1), parsed.command_start);
+}
+
+test "parseAttachArgs keeps the session command intact" {
+    const argv: []const []const u8 = &.{ "dev", "vim", "-n" };
+    const parsed = parseAttachArgs(argv);
+    try std.testing.expectEqualStrings("dev", parsed.session_name);
+    // -n after the session name belongs to the command, not to zmx.
+    try std.testing.expectEqualSlices([]const u8, argv[1..], argv[parsed.command_start..]);
+}
+
+test "parseAttachArgs reports help before the session name" {
+    try std.testing.expect(parseAttachArgs(&.{"--help"}).want_help);
+    try std.testing.expect(parseAttachArgs(&.{"-h"}).want_help);
+    try std.testing.expect(parseAttachArgs(&.{ "--labels", "a=1", "--help" }).want_help);
+    // Once a session name is read, -h belongs to the command.
+    try std.testing.expect(!parseAttachArgs(&.{ "dev", "-h" }).want_help);
+}
+
+test "parseAttachArgs reads --labels in both forms" {
+    for ([_][]const []const u8{
+        &.{ "--labels", "a=1 b=2", "build" },
+        &.{ "--labels=a=1 b=2", "build" },
+    }) |argv| {
+        const parsed = parseAttachArgs(argv);
+        try std.testing.expectEqualStrings("a=1 b=2", parsed.labels.?);
+        try std.testing.expectEqualStrings("build", parsed.session_name);
+        try std.testing.expect(!parsed.missing_labels_value);
+        try std.testing.expectEqual(argv.len, parsed.command_start);
+    }
+}
+
+test "parseAttachArgs combines --labels with a session command" {
+    const argv: []const []const u8 = &.{ "--labels", "a=1", "build", "make", "--labels" };
+    const parsed = parseAttachArgs(argv);
+    try std.testing.expectEqualStrings("a=1", parsed.labels.?);
+    try std.testing.expectEqualStrings("build", parsed.session_name);
+    // --labels after the session name belongs to the command.
+    try std.testing.expectEqualSlices([]const u8, argv[3..], argv[parsed.command_start..]);
+}
+
+test "parseAttachArgs reports --labels with no value" {
+    const parsed = parseAttachArgs(&.{"--labels"});
+    try std.testing.expect(parsed.missing_labels_value);
+    try std.testing.expectEqual(@as(?[]const u8, null), parsed.labels);
+}
+
+test "parseAttachArgs leaves labels unset when the flag is absent" {
+    const parsed = parseAttachArgs(&.{"dev"});
+    try std.testing.expectEqual(@as(?[]const u8, null), parsed.labels);
+    try std.testing.expect(!parsed.missing_labels_value);
 }
