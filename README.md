@@ -121,6 +121,25 @@ Commands:
   [h]elp                                   Show this help
 ```
 
+## nested sessions
+
+Nested sessions are not supported. Inside a session `ZMX_SESSION` is set, and
+`attach` reads it: instead of creating another client it switches the calling
+terminal to the session you named.
+
+That matters when the variable is inherited rather than chosen. A script, build
+tool, or coding agent started inside a session runs with `ZMX_SESSION` set, so
+`zmx attach other` from there moves the terminal somebody was using, and the
+session it was showing is left with no client.
+
+Unset it in anything that attaches on its own behalf:
+
+```bash
+env -u ZMX_SESSION zmx attach other
+```
+
+For non-interactive work prefer `zmx run`, which never switches the caller.
+
 ## shell prompt
 
 When you attach to a `zmx` session, we don't provide any indication that you are inside `zmx`. We do provide an environment variable `ZMX_SESSION` which contains the session name.
