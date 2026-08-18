@@ -26,6 +26,7 @@ pub const Tag = enum(u8) {
     EnvGet = 19,
     EnvSet = 20,
     EnvData = 21,
+    Snapshot = 22,
     // Non-exhaustive: this enum comes off the wire via bytesToValue and
     // @enumFromInt, so out-of-range values are representable
     // rather than UB. Switches must handle `_` (unknown tag).

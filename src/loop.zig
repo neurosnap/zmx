@@ -12,10 +12,17 @@ const signal = @import("signal.zig");
 const assert = std.debug.assert;
 const daemonize = @import("daemonize.zig");
 const builtin = @import("builtin");
+const snapshot = @import("snapshot.zig");
 
 /// clientLoop sends ipc commands to its corresponding daemon.  It uses poll() as its non-blocking
 /// mechanism. It will send stdin to the daemon and receive stdout from the daemon.
-pub fn clientLoop(client_sock_fd: i32, env_str: []const u8) !ClientResult {
+pub fn clientLoop(
+    io: std.Io,
+    client_sock_fd: i32,
+    snapshot_mode: bool,
+    init_snapshot: []const u8,
+    env_str: []const u8,
+) !ClientResult {
     std.log.info("client loop fd={d}", .{client_sock_fd});
     const gpa: std.mem.Allocator = blk: {
         if (builtin.mode == .Debug) {
@@ -45,9 +52,8 @@ pub fn clientLoop(client_sock_fd: i32, env_str: []const u8) !ClientResult {
         try ipc.appendMessage(gpa, &sock_write_buf, .EnvSet, env_str);
     }
 
-    // Send init message with terminal size (buffered)
-    const size = ipc.getTerminalSize(lib_posix.STDOUT_FILENO);
-    try ipc.appendMessage(gpa, &sock_write_buf, .Init, std.mem.asBytes(&size));
+    // Send init message with terminal snapshot (buffered)
+    try ipc.appendMessage(gpa, &sock_write_buf, .Init, init_snapshot);
 
     var poll_fds = try std.ArrayList(lib_posix.pollfd).initCapacity(gpa, 4);
     defer poll_fds.deinit(gpa);
@@ -118,12 +124,14 @@ pub fn clientLoop(client_sock_fd: i32, env_str: []const u8) !ClientResult {
 
             if (n_opt) |n| {
                 if (n > 0) {
-                    // Check for detach sequences (ctrl+\ as first byte or Kitty escape sequence)
-                    if (!detach_key_disabled and util.isCtrlBackslash(buf[0..n])) {
+                    const input_slice = buf[0..n];
+                    if (std.mem.indexOf(u8, input_slice, "\x1b_Gsnap=req\x1b\\")) |_| {
+                        // Drop snapshot request marker from Monstar so it isn't forwarded as shell keystrokes
+                    } else if (!detach_key_disabled and util.isCtrlBackslash(input_slice)) {
                         std.log.info("detach key detected", .{});
                         try ipc.appendMessage(gpa, &sock_write_buf, .Detach, "");
                     } else {
-                        try ipc.appendMessage(gpa, &sock_write_buf, .Input, buf[0..n]);
+                        try ipc.appendMessage(gpa, &sock_write_buf, .Input, input_slice);
                     }
                 } else {
                     std.log.info("eof stdin", .{});
@@ -154,6 +162,30 @@ pub fn clientLoop(client_sock_fd: i32, env_str: []const u8) !ClientResult {
                     .Output => {
                         if (msg.payload.len > 0) {
                             try stdout_buf.appendSlice(gpa, msg.payload);
+                        }
+                    },
+                    .Snapshot => {
+                        if (msg.payload.len > 0) {
+                            if (snapshot_mode) {
+                                try stdout_buf.appendSlice(gpa, msg.payload);
+                            } else {
+                                var reader: std.Io.Reader = .fixed(msg.payload);
+                                if (snapshot.startImport(gpa, io, &reader, 1024 * 1024)) |import_res| {
+                                    var mut_res = import_res;
+                                    defer mut_res.deinit(gpa);
+                                    var restored_term = mut_res.terminal;
+                                    defer restored_term.deinit(gpa);
+                                    while (snapshot.pumpHistory(gpa, &mut_res.decoder, &restored_term) catch false) {}
+                                    if (util.serializeTerminalState(gpa, &restored_term)) |term_output| {
+                                        defer gpa.free(term_output);
+                                        const restore_data = util.rewritePromptRedraw(gpa, term_output) orelse term_output;
+                                        defer if (restore_data.ptr != term_output.ptr) gpa.free(restore_data);
+                                        try stdout_buf.appendSlice(gpa, restore_data);
+                                    }
+                                } else |err| {
+                                    std.log.warn("failed to import snapshot in client err={s}", .{@errorName(err)});
+                                }
+                            }
                         }
                     },
                     .Resize => {
@@ -469,7 +501,7 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
                         .Input => try daemon.handleInput(gpa, client, msg.payload),
                         .Send => daemon.handleSend(gpa, msg.payload),
                         .Output => try daemon.handleOutput(gpa, msg.payload, &term, &vt_stream),
-                        .Init => try daemon.handleInit(gpa, client, pty_fd, &term, msg.payload),
+                        .Init => try daemon.handleInit(gpa, io, client, pty_fd, &term, msg.payload),
                         .Switch => try daemon.handleSwitch(gpa, msg.payload),
                         .Resize => try daemon.handleResize(gpa, client, pty_fd, &term, msg.payload),
                         .Detach => {
@@ -491,7 +523,7 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
                         .EnvSet => try daemon.handleEnvSet(gpa, client, msg.payload),
                         .History => try daemon.handleHistory(gpa, client, &term, msg.payload),
                         .Run => try daemon.handleRun(gpa, io, client, msg.payload),
-                        .Ack, .TaskComplete, .LabelData, .EnvData => {},
+                        .Ack, .TaskComplete, .LabelData, .EnvData, .Snapshot => {},
                         .Write => try daemon.handleWrite(gpa, client, msg.payload),
                         _ => std.log.warn(
                             "ignoring unknown IPC tag={d}",
@@ -950,31 +982,61 @@ pub const Daemon = struct {
     pub fn handleInit(
         self: *Daemon,
         gpa: std.mem.Allocator,
+        io: std.Io,
         client: *Client,
         pty_fd: i32,
         term: *ghostty_vt.Terminal,
         payload: []const u8,
     ) !void {
-        if (payload.len != @sizeOf(ipc.Resize)) return;
-
         client.is_terminal = true;
 
         if (self.leader_client_fd == null) {
             try self.setLeader(gpa, client);
         }
         const is_leader = self.leader_client_fd == client.socket_fd;
-        const resize = std.mem.bytesToValue(ipc.Resize, payload);
 
-        // Resize our terminal (not yet the PTY) to the leader's size before
-        // serializing, so the snapshot is laid out for the width the client
-        // will render it at instead of being wrapped a second time on arrival.
-        // Cursor position stays consistent because it is serialized from the
-        // same, already-resized terminal; the PTY is resized below, so the
-        // shell's own SIGWINCH redraw still arrives after the snapshot.
-        if (is_leader) {
-            try resizeTerm(gpa, term, resize.cols, resize.rows);
+        var rows: u16 = 24;
+        var cols: u16 = 80;
+        var xpixel: u16 = 0;
+        var ypixel: u16 = 0;
+
+        if (payload.len == @sizeOf(ipc.Resize)) {
+            const resize = std.mem.bytesToValue(ipc.Resize, payload);
+            rows = resize.rows;
+            cols = resize.cols;
+            xpixel = resize.xpixel;
+            ypixel = resize.ypixel;
+        } else {
+            var reader: std.Io.Reader = .fixed(payload);
+            if (snapshot.startImport(gpa, io, &reader, 1024 * 1024)) |import_res| {
+                var mut_res = import_res;
+                defer mut_res.deinit(gpa);
+                var imported_term = mut_res.terminal;
+                defer imported_term.deinit(gpa);
+
+                rows = imported_term.rows;
+                cols = imported_term.cols;
+                xpixel = @as(u16, @intCast(@min(std.math.maxInt(u16), imported_term.width_px)));
+                ypixel = @as(u16, @intCast(@min(std.math.maxInt(u16), imported_term.height_px)));
+
+                // First client attaching seeds the base session theme, cursor style/blink, modes, and pixel geometry
+                if (!self.has_had_client) {
+                    term.colors = imported_term.colors;
+                    term.screens.active.cursor.cursor_style = imported_term.screens.active.cursor.cursor_style;
+                    term.screens.active.kitty_keyboard = imported_term.screens.active.kitty_keyboard;
+                    term.modes = imported_term.modes;
+                    term.width_px = imported_term.width_px;
+                    term.height_px = imported_term.height_px;
+                }
+            } else |err| {
+                std.log.warn("failed to import client init snapshot err={s}", .{@errorName(err)});
+                return;
+            }
         }
 
+        // Export terminal snapshot BEFORE resize to capture correct cursor position.
+        // Resizing triggers reflow which can move the cursor, and the shell's
+        // SIGWINCH-triggered redraw will run after our snapshot is sent.
         // Only serialize on re-attach (has_had_client), not first attach, to avoid
         // interfering with shell initialization (DA1 queries, etc.)
         if (self.has_pty_output and self.has_had_client) {
@@ -983,16 +1045,16 @@ pub const Daemon = struct {
                 "cursor before serialize: x={d} y={d} pending_wrap={}",
                 .{ cursor.x, cursor.y, cursor.pending_wrap },
             );
-            if (util.serializeTerminalState(gpa, term)) |term_output| {
-                std.log.debug("serialize terminal state", .{});
-                // Rewrite OSC 133;A to include redraw=0 so the outer terminal
-                // does not clear prompt lines on resize (issue #111).
-                const restore_data = util.rewritePromptRedraw(gpa, term_output) orelse term_output;
-                defer gpa.free(term_output);
-                defer if (restore_data.ptr != term_output.ptr) gpa.free(restore_data);
-                ipc.appendMessage(gpa, &client.write_buf, .Output, restore_data) catch |err| {
+            var snap_buf: std.Io.Writer.Allocating = .init(gpa);
+            defer snap_buf.deinit();
+            snapshot.exportSnapshot(gpa, &snap_buf.writer, term, .{}) catch |err| {
+                std.log.warn("failed to export snapshot err={s}", .{@errorName(err)});
+            };
+            if (snap_buf.written().len > 0) {
+                std.log.debug("serialize terminal snapshot bytes={d}", .{snap_buf.written().len});
+                ipc.appendMessage(gpa, &client.write_buf, .Snapshot, snap_buf.written()) catch |err| {
                     std.log.warn(
-                        "failed to buffer terminal state for client err={s}",
+                        "failed to buffer snapshot for client err={s}",
                         .{@errorName(err)},
                     );
                 };
@@ -1002,7 +1064,12 @@ pub const Daemon = struct {
 
         // only resize if leader
         if (is_leader) {
-            var ws = resize.winsize();
+            var ws: cross.c.struct_winsize = .{
+                .ws_row = rows,
+                .ws_col = cols,
+                .ws_xpixel = xpixel,
+                .ws_ypixel = ypixel,
+            };
             _ = cross.c.ioctl(pty_fd, cross.c.TIOCSWINSZ, &ws);
 
             // On re-attach, deliver SIGWINCH to the foreground process group so
@@ -1016,10 +1083,23 @@ pub const Daemon = struct {
                 }
             }
 
+            // Disable prompt_redraw before resize. The daemon's internal terminal
+            // would otherwise clear prompt lines expecting the shell to redraw them,
+            // but the shell's redraw goes to the PTY (forwarded to clients), not to
+            // this daemon terminal. The clearing corrupts the daemon's snapshot state.
+            const saved_prompt_redraw = term.flags.shell_redraws_prompt;
+            term.flags.shell_redraws_prompt = .false;
+            defer term.flags.shell_redraws_prompt = saved_prompt_redraw;
+            const opts = ghostty_vt.Terminal.Resize{
+                .cols = cols,
+                .rows = rows,
+            };
+            try term.resize(gpa, opts);
+
             // Mark that we've had a client init, so subsequent clients get terminal state
             self.has_had_client = true;
 
-            std.log.debug("init resize rows={d} cols={d}", .{ resize.rows, resize.cols });
+            std.log.debug("init resize rows={d} cols={d}", .{ rows, cols });
         }
     }
 
