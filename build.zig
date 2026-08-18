@@ -20,7 +20,10 @@ pub fn build(b: *std.Build) void {
 
     const options = b.addOptions();
     options.addOption([]const u8, "version", version);
-    const ghostty_ver = build_zig_zon.dependencies.ghostty.hash;
+    const ghostty_ver = if (@hasField(@TypeOf(build_zig_zon.dependencies.ghostty), "hash"))
+        build_zig_zon.dependencies.ghostty.hash
+    else
+        "local-dev";
     options.addOption([]const u8, "ghostty_version", ghostty_ver);
 
     const exe_mod = b.createModule(.{
