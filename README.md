@@ -112,7 +112,6 @@ Commands:
   set <name> k=v ...                       Set session labels
   [un]set <name> key ...                   Remove session labels
   [cl]ear <name>                           Clear all session labels
-  term <name>                              Get terminal state as JSON
   [k]ill <name>... [--force]               Kill session and all attached clients
   [hi]story <name> [--vt|--html]           Output session scrollback
   [w]ait <name>...                         Wait for session tasks to complete
