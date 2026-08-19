@@ -11,6 +11,7 @@ const Cfg = @import("cfg.zig");
 const signal = @import("signal.zig");
 const assert = std.debug.assert;
 const daemonize = @import("daemonize.zig");
+const term_mod = @import("term.zig");
 const builtin = @import("builtin");
 
 /// clientLoop sends ipc commands to its corresponding daemon.  It uses poll() as its non-blocking
@@ -473,9 +474,10 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
                         .LabelGet => try daemon.handleLabelGet(gpa, client),
                         .LabelSet => try daemon.handleLabelSet(gpa, client, msg.payload),
                         .LabelClear => try daemon.handleLabelClear(gpa, client),
+                        .TermGet => try daemon.handleTermGet(gpa, client, &term),
                         .History => try daemon.handleHistory(gpa, client, &term, msg.payload),
                         .Run => try daemon.handleRun(gpa, io, client, msg.payload),
-                        .Ack, .TaskComplete, .LabelData => {},
+                        .Ack, .TaskComplete, .LabelData, .TermData => {},
                         .Write => try daemon.handleWrite(gpa, client, msg.payload),
                         _ => std.log.warn(
                             "ignoring unknown IPC tag={d}",
@@ -1300,6 +1302,21 @@ pub const Daemon = struct {
         }
         self.labels.clearRetainingCapacity();
         try ipc.appendMessage(gpa, &client.write_buf, .Ack, "");
+        client.has_pending_output = true;
+    }
+
+    fn handleTermGet(self: *Daemon, gpa: std.mem.Allocator, client: *Client, term: *ghostty_vt.Terminal) !void {
+        self.setPwd(term);
+        var info = std.mem.zeroes(ipc.Info);
+        info.clients_len = if (self.clients.items.len > 0) self.clients.items.len - 1 else 0;
+        info.pid = self.pid;
+        info.created_at = self.created_at;
+        info.task_ended_at = self.task_ended_at orelse 0;
+        info.task_exit_code = self.task_exit_code orelse 0;
+
+        const json = try term_mod.dumpState(gpa, term, &info);
+        defer gpa.free(json);
+        try ipc.appendMessage(gpa, &client.write_buf, .TermData, json);
         client.has_pending_output = true;
     }
 };

@@ -91,6 +91,12 @@ pub fn main(init: std.process.Init) !void {
         const sesh = try socket.resolveSessionOrEnv(gpa, io, sesh_name);
         defer gpa.free(sesh);
         return labelClear(gpa, io, &cfg, sesh);
+    } else if (std.mem.eql(u8, cmd, "term")) {
+        const sesh_name = args.next() orelse return error.SessionNameRequired;
+        if (detectHelp(sesh_name)) return help(io);
+        const sesh = try socket.resolveSessionOrEnv(gpa, io, sesh_name);
+        defer gpa.free(sesh);
+        return termGet(gpa, io, &cfg, sesh);
     } else if (std.mem.eql(u8, cmd, "completions") or std.mem.eql(u8, cmd, "c")) {
         const arg = args.next() orelse return;
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
@@ -421,6 +427,7 @@ fn help(io: std.Io) !void {
         \\  [g]et <name>                             Get session labels
         \\  set <name> k=v ...                     Set session labels (k= to remove)
         \\  [cl]ear <name>                           Clear all session labels
+        \\  term <name>                              Get terminal state as JSON
         \\  [k]ill <name>... [--force]               Kill session and all attached clients
         \\  [hi]story <name> [--vt|--html]           Output session scrollback
         \\  [w]ait <name>...                         Wait for session tasks to complete
@@ -1127,6 +1134,47 @@ fn labelClear(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []c
     _ = ipc.roundTripForTag(alloc, socket_path, .LabelClear, "", .Ack) catch |err| {
         printLabelError(io, session_name, err);
     };
+}
+
+fn printTermError(io: std.Io, session_name: []const u8, err: anyerror) noreturn {
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.File.stderr().writer(io, &buf);
+    switch (err) {
+        error.Timeout => w.interface.print(
+            "error: session \"{s}\" does not support term commands (daemon too old?)\n",
+            .{session_name},
+        ) catch {},
+        error.ConnectionRefused, error.Unexpected => w.interface.print(
+            "error: session \"{s}\" not found or unresponsive\n",
+            .{session_name},
+        ) catch {},
+        else => w.interface.print(
+            "error: {s}\n",
+            .{@errorName(err)},
+        ) catch {},
+    }
+    w.interface.flush() catch {};
+    std.process.exit(1);
+}
+
+fn termGet(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []const u8) !void {
+    std.log.info("term get session={s}", .{session_name});
+
+    const socket_path = socket.getSocketPath(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
+        error.NameTooLong => return socket.printSessionNameTooLong(io, session_name, cfg.socket_dir),
+        error.OutOfMemory => return err,
+    };
+    defer alloc.free(socket_path);
+
+    const payload = ipc.roundTripForTag(alloc, socket_path, .TermGet, "", .TermData) catch |err| {
+        printTermError(io, session_name, err);
+    };
+    defer alloc.free(payload);
+
+    var buf: [4096]u8 = undefined;
+    var stdout = std.Io.File.stdout().writer(io, &buf);
+    try stdout.interface.print("{s}", .{payload});
+    try stdout.interface.flush();
 }
 
 /// Fetch terminal history from a session socket, returning it as an allocated

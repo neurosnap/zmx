@@ -23,6 +23,8 @@ pub const Tag = enum(u8) {
     LabelClear = 16,
     LabelData = 17,
     Send = 18,
+    TermGet = 19,
+    TermData = 20,
     // Non-exhaustive: this enum comes off the wire via bytesToValue and
     // @enumFromInt, so out-of-range values are representable
     // rather than UB. Switches must handle `_` (unknown tag).
@@ -320,7 +322,7 @@ test "Tag wire values are frozen" {
         .{ Tag.Run, 9 },       .{ Tag.Ack, 10 },          .{ Tag.Switch, 11 },
         .{ Tag.Write, 12 },    .{ Tag.TaskComplete, 13 }, .{ Tag.LabelGet, 14 },
         .{ Tag.LabelSet, 15 }, .{ Tag.LabelClear, 16 },   .{ Tag.LabelData, 17 },
-        .{ Tag.Send, 18 },
+        .{ Tag.Send, 18 },     .{ Tag.TermGet, 19 },      .{ Tag.TermData, 20 },
     }) |p| try std.testing.expectEqual(@as(u8, p[1]), @intFromEnum(p[0]));
 }
 
@@ -344,13 +346,18 @@ pub fn roundTripForTag(
     var sb = SocketBuffer.init(alloc) catch return error.Unexpected;
     defer sb.deinit();
 
-    const n = sb.read(fd) catch return error.Unexpected;
-    if (n == 0) return error.Unexpected;
+    while (true) {
+        const n = sb.read(fd) catch return error.Unexpected;
+        if (n == 0) return error.Unexpected;
 
-    while (sb.next()) |msg| {
-        if (msg.header.tag == expected_tag) {
-            return alloc.dupe(u8, msg.payload) catch return error.Unexpected;
+        while (sb.next()) |msg| {
+            if (msg.header.tag == expected_tag) {
+                return alloc.dupe(u8, msg.payload) catch return error.Unexpected;
+            }
         }
+
+        const more = lib_posix.poll(&poll_fds, timeout_ms) catch break;
+        if (more == 0) return error.Timeout;
     }
     return error.Unexpected;
 }
