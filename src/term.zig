@@ -236,13 +236,6 @@ pub fn dumpState(alloc: Allocator, term: *const ghostty_vt.Terminal, daemon_info
     try jw.write(@tagName(active_screen.charset.gr));
     try jw.endObject();
 
-    // flags
-    try jw.objectField("flags");
-    try jw.beginObject();
-    try jw.objectField("focused");
-    try jw.write(term.flags.focused);
-    try jw.endObject();
-
     try jw.endObject();
 
     try out.writer.writeAll("\n");
