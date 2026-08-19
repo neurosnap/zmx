@@ -536,6 +536,7 @@ fn help(io: std.Io) !void {
         \\  XDG_RUNTIME_DIR      Socket directory (priority 2)
         \\  TMPDIR               Socket directory (priority 3)
         \\  ZMX_SESSION          Session name (injected automatically)
+        \\  ZMX_TASK             Set to 1 inside `run` sessions (injected automatically)
         \\  ZMX_SESSION_PREFIX   Prefix added to all session names
         \\  ZMX_DIR_MODE         Sets mode for socket and log directories (octal, defaults to 0750)
         \\  ZMX_LOG_MODE         Sets mode for log files (octal, defaults to 0640)

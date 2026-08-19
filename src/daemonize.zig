@@ -10,6 +10,7 @@ const cross = @import("cross.zig");
 const Cmd = struct {
     file: [*:0]const u8,
     argv_ptr: [*:null]const ?[*:0]const u8,
+    is_task_mode: bool,
 };
 
 pub fn createCmdZ(def_shell: []const u8, is_task_mode: bool, command: ?[]const []const u8) !Cmd {
@@ -23,6 +24,7 @@ pub fn createCmdZ(def_shell: []const u8, is_task_mode: bool, command: ?[]const [
         return .{
             .file = argv[0].?,
             .argv_ptr = argv.ptr,
+            .is_task_mode = is_task_mode,
         };
     }
 
@@ -37,6 +39,7 @@ pub fn createCmdZ(def_shell: []const u8, is_task_mode: bool, command: ?[]const [
     return .{
         .file = shell,
         .argv_ptr = argv,
+        .is_task_mode = is_task_mode,
     };
 }
 
@@ -69,6 +72,14 @@ fn exec(sesh_name: []const u8, cmd: Cmd) !noreturn {
         }
     } else {
         _ = cross.c.putenv(@constCast("TERM=xterm-256color"));
+    }
+
+    // Task sessions run a shell that nobody is watching, so shell configs
+    // want to skip prompts, greeters and other interactive-only output.
+    // ZMX_SESSION alone cannot express that: it is also set for `attach`.
+    if (cmd.is_task_mode) {
+        const task_env = try std.fmt.allocPrintSentinel(gpa, "ZMX_TASK=1", .{}, 0);
+        _ = cross.c.putenv(task_env.ptr);
     }
 
     const err = lib_posix.execvpeZ(cmd.file, cmd.argv_ptr, std.c.environ);
