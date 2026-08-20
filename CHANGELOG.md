@@ -9,6 +9,9 @@ Use spec: https://common-changelog.org/
 - We now track cwd changes via OSC7
 - Replay window title on attach
 - `ZMX_NO_DETACH_KEY` env var to disable `ctrl+\` keybinding
+- Added `--labels` flag to attach command
+  - e.g. `zmx attach --labels "project=pico env=prod" pico`
+  - e.g. `zmx attach --labels "$(zmx get pico)" pico.sub`
 
 ### Fixed
 
@@ -21,7 +24,7 @@ Use spec: https://common-changelog.org/
 - Upgraded to zig v0.16
 - `zmx list` replaced `start_dir` with `cwd`
 - Storing 2k lines of scrollback buffer (like tmux) for each session
-- ZMX_TASK_COMPLETED task marker now includes a 4ch hex id to ensure no collisions from nested task runs
+- `ZMX_TASK_COMPLETED` task marker now includes a 4ch hex id to ensure no collisions from nested task runs
   - `ZMX_TASK_COMPLETED:{id}:0`
 
 ## v0.7.0 - 2026-07-23
