@@ -45,6 +45,10 @@ pub const Resize = packed struct {
     cols: u16,
     xpixel: u16 = 0,
     ypixel: u16 = 0,
+
+    pub fn winsize(self: Resize) cross.c.struct_winsize {
+        return .{ .ws_row = self.rows, .ws_col = self.cols, .ws_xpixel = self.xpixel, .ws_ypixel = self.ypixel };
+    }
 };
 
 pub fn getTerminalSize(fd: i32) Resize {
