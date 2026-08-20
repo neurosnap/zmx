@@ -536,7 +536,7 @@ pub const Client = struct {
     has_pending_output: bool = false,
     read_buf: ipc.SocketBuffer,
     write_buf: std.ArrayList(u8),
-    env_map: std.StringHashMapUnmanaged([]u8) = .empty,
+    env_map: std.StringHashMapUnmanaged(?[]u8) = .empty,
 
     pub fn deinit(self: *Client, gpa: std.mem.Allocator) void {
         lib_posix.close(self.socket_fd);
@@ -545,32 +545,38 @@ pub const Client = struct {
         var it = self.env_map.iterator();
         while (it.next()) |entry| {
             gpa.free(entry.key_ptr.*);
-            gpa.free(entry.value_ptr.*);
+            if (entry.value_ptr.*) |val| {
+                gpa.free(val);
+            }
         }
         self.env_map.deinit(gpa);
     }
 
     fn setEnv(self: *Client, gpa: std.mem.Allocator, env_str: []const u8) !void {
-        var kvs = label.LabelIterator.init(env_str);
-        while (kvs.next()) |kv| {
-            if (kv.value.len == 0) {
-                if (self.env_map.fetchRemove(kv.key)) |existing| {
-                    gpa.free(existing.key);
-                    gpa.free(existing.value);
+        var it = std.mem.splitScalar(u8, env_str, '\n');
+        while (it.next()) |line| {
+            if (line.len == 0) continue;
+            if (line[0] == '-') {
+                const key = line[1..];
+                if (key.len == 0) continue;
+                const owned_key = try gpa.dupe(u8, key);
+                errdefer gpa.free(owned_key);
+                if (try self.env_map.fetchPut(gpa, owned_key, null)) |existing| {
+                    gpa.free(owned_key);
+                    if (existing.value) |v| gpa.free(v);
                 }
-                continue;
-            }
-
-            const owned_key = try gpa.dupe(u8, kv.key);
-            errdefer gpa.free(owned_key);
-            const owned_value = try gpa.dupe(u8, kv.value);
-            errdefer gpa.free(owned_value);
-            if (try self.env_map.fetchPut(gpa, owned_key, owned_value)) |existing| {
-                // fetchPut does NOT replace the key in the map, the old
-                // key pointer stays. So free the new (unused) key and the
-                // old value.
-                gpa.free(owned_key);
-                gpa.free(existing.value);
+            } else if (std.mem.indexOfScalar(u8, line, '=')) |eq_idx| {
+                const key = line[0..eq_idx];
+                const val = line[eq_idx + 1 ..];
+                if (key.len == 0) continue;
+                const owned_key = try gpa.dupe(u8, key);
+                errdefer gpa.free(owned_key);
+                const owned_value = try gpa.dupe(u8, val);
+                errdefer gpa.free(owned_value);
+                if (try self.env_map.fetchPut(gpa, owned_key, owned_value)) |existing| {
+                    gpa.free(owned_key);
+                    if (existing.value) |v| gpa.free(v);
+                }
             }
         }
     }
@@ -1305,9 +1311,36 @@ pub const Daemon = struct {
     fn handleEnvGet(self: *Daemon, gpa: std.mem.Allocator, client: *Client) !void {
         const leader_opt = self.getLeaderClient();
         if (leader_opt) |leader| {
-            const out = try label.labelsToU8(gpa, leader.env_map);
-            defer gpa.free(out);
-            try ipc.appendMessage(gpa, &client.write_buf, .EnvData, out);
+            var keys = std.ArrayList([]const u8).empty;
+            defer keys.deinit(gpa);
+            var it = leader.env_map.iterator();
+            while (it.next()) |entry| {
+                try keys.append(gpa, entry.key_ptr.*);
+            }
+            std.mem.sort([]const u8, keys.items, {}, struct {
+                fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+                    return std.mem.order(u8, a, b) == .lt;
+                }
+            }.lessThan);
+
+            var out = std.ArrayList(u8).empty;
+            defer out.deinit(gpa);
+
+            for (keys.items) |key| {
+                if (leader.env_map.get(key)) |val_opt| {
+                    if (val_opt) |val| {
+                        try out.appendSlice(gpa, key);
+                        try out.append(gpa, '=');
+                        try out.appendSlice(gpa, val);
+                        try out.append(gpa, '\n');
+                    } else {
+                        try out.append(gpa, '-');
+                        try out.appendSlice(gpa, key);
+                        try out.append(gpa, '\n');
+                    }
+                }
+            }
+            try ipc.appendMessage(gpa, &client.write_buf, .EnvData, out.items);
         } else {
             try ipc.appendMessage(gpa, &client.write_buf, .EnvData, "");
         }
@@ -1391,7 +1424,7 @@ test "send queues PTY input without changing leader" {
     try std.testing.expectEqualStrings("hello", daemon.pty_write_buf.items);
 }
 
-test "handleEnvGet returns leader client's environment variables" {
+test "handleEnvGet returns leader client's environment variables including unsets" {
     const alloc = std.testing.allocator;
     var cfg = Cfg{
         .socket_dir = "/tmp",
@@ -1418,7 +1451,7 @@ test "handleEnvGet returns leader client's environment variables" {
         .write_buf = std.ArrayList(u8).empty,
     };
     defer client1.deinit(alloc);
-    try client1.setEnv(alloc, "DISPLAY=:1 SSH_AUTH_SOCK=/tmp/ssh-1 KITTY_LISTEN_ON=unix:/tmp/kitty-1");
+    try client1.setEnv(alloc, "DISPLAY=:1\nSSH_AUTH_SOCK=/tmp/ssh-1\nKITTY_LISTEN_ON=unix:/tmp/kitty-1\n-WINDOWID\n");
 
     const fds2 = try lib_posix.pipe2(.{});
     defer lib_posix.close(fds2[1]);
@@ -1429,7 +1462,7 @@ test "handleEnvGet returns leader client's environment variables" {
         .write_buf = std.ArrayList(u8).empty,
     };
     defer client2.deinit(alloc);
-    try client2.setEnv(alloc, "SSH_AUTH_SOCK=/tmp/ssh-2 WINDOWID=12345 KITTY_LISTEN_ON=unix:/tmp/kitty-2");
+    try client2.setEnv(alloc, "SSH_AUTH_SOCK=/tmp/ssh-2\nWINDOWID=12345\nKITTY_LISTEN_ON=unix:/tmp/kitty-2\n-DISPLAY\n");
 
     const fds_req = try lib_posix.pipe2(.{});
     defer lib_posix.close(fds_req[1]);
@@ -1455,7 +1488,7 @@ test "handleEnvGet returns leader client's environment variables" {
     try daemon.handleEnvGet(alloc, &client_req);
     // Wire message: [Header][Payload]
     const pay1 = client_req.write_buf.items[@sizeOf(ipc.Header)..];
-    try std.testing.expectEqualStrings("DISPLAY=:1 KITTY_LISTEN_ON=unix:/tmp/kitty-1 SSH_AUTH_SOCK=/tmp/ssh-1", pay1);
+    try std.testing.expectEqualStrings("DISPLAY=:1\nKITTY_LISTEN_ON=unix:/tmp/kitty-1\nSSH_AUTH_SOCK=/tmp/ssh-1\n-WINDOWID\n", pay1);
     client_req.write_buf.clearRetainingCapacity();
 
     // Switch leader to client2
@@ -1463,12 +1496,12 @@ test "handleEnvGet returns leader client's environment variables" {
     try std.testing.expectEqual(@as(?i32, fds2[0]), daemon.leader_client_fd);
     try daemon.handleEnvGet(alloc, &client_req);
     const pay2 = client_req.write_buf.items[@sizeOf(ipc.Header)..];
-    try std.testing.expectEqualStrings("KITTY_LISTEN_ON=unix:/tmp/kitty-2 SSH_AUTH_SOCK=/tmp/ssh-2 WINDOWID=12345", pay2);
+    try std.testing.expectEqualStrings("-DISPLAY\nKITTY_LISTEN_ON=unix:/tmp/kitty-2\nSSH_AUTH_SOCK=/tmp/ssh-2\nWINDOWID=12345\n", pay2);
     client_req.write_buf.clearRetainingCapacity();
 
     // Client2 updates env
-    try daemon.handleEnvSet(alloc, &client2, "DISPLAY=:99");
+    try daemon.handleEnvSet(alloc, &client2, "DISPLAY=:99\n");
     try daemon.handleEnvGet(alloc, &client_req);
     const pay3 = client_req.write_buf.items[@sizeOf(ipc.Header)..];
-    try std.testing.expectEqualStrings("DISPLAY=:99 KITTY_LISTEN_ON=unix:/tmp/kitty-2 SSH_AUTH_SOCK=/tmp/ssh-2 WINDOWID=12345", pay3);
+    try std.testing.expectEqualStrings("DISPLAY=:99\nKITTY_LISTEN_ON=unix:/tmp/kitty-2\nSSH_AUTH_SOCK=/tmp/ssh-2\nWINDOWID=12345\n", pay3);
 }

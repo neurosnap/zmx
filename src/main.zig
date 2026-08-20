@@ -162,11 +162,11 @@ pub fn main(init: std.process.Init) !void {
         daemon.shell = shell_env;
         std.log.info("socket path={s}", .{daemon.socket_path});
 
-        var env_buf: [4096]u8 = undefined;
         const tracked_envs = try cfg.getTrackedEnvs(gpa);
         defer gpa.free(tracked_envs);
 
-        const env_str = try getTrackedEnvStr(&env_buf, tracked_envs, init.environ_map);
+        const env_str = try getTrackedEnvStr(gpa, tracked_envs, init.environ_map);
+        defer gpa.free(env_str);
 
         return attach(gpa, io, &daemon, env_str, parsed.labels);
     } else if (std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "r")) {
@@ -418,14 +418,25 @@ pub fn main(init: std.process.Init) !void {
         std.log.info("socket path={s}", .{daemon.socket_path});
         try writeFile(gpa, io, &daemon, file_path);
     } else if (std.mem.eql(u8, cmd, "print-env")) {
-        const sesh_name = args.next();
-        if (sesh_name) |name| {
-            if (detectHelp(name)) return help(io);
+        var shell_mode = false;
+        var session_name: ?[]const u8 = null;
+        var single_kv: []const u8 = "";
+
+        while (args.next()) |arg| {
+            if (detectHelp(arg)) return help(io);
+            if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--shell")) {
+                shell_mode = true;
+            } else if (session_name == null) {
+                session_name = arg;
+            } else if (single_kv.len == 0) {
+                single_kv = arg;
+            }
         }
-        const sesh = try socket.resolveSessionOrEnv(gpa, io, sesh_name);
+
+        const sesh_arg = session_name orelse return error.SessionNameRequired;
+        const sesh = try socket.resolveSessionOrEnv(gpa, io, sesh_arg);
         defer gpa.free(sesh);
-        const single_kv = args.next() orelse "";
-        return envGet(gpa, io, &cfg, sesh, single_kv);
+        return envGet(gpa, io, &cfg, sesh, single_kv, shell_mode);
     } else {
         return help(io);
     }
@@ -448,7 +459,7 @@ fn help(io: std.Io) !void {
         \\  [g]et <name>                                Get session labels
         \\  set <name> k=v ...                          Set session labels (k= to remove)
         \\  [cl]ear <name>                              Clear all session labels
-        \\  print-env [name] [key]                      Print tracked environment variables
+        \\  print-env [-s] <name> [key]                 Print tracked environment variables
         \\  [k]ill <name>... [--force]                  Kill session and all attached clients
         \\  [hi]story <name> [--vt|--html]              Output session scrollback
         \\  [w]ait <name>...                            Wait for session tasks to complete
@@ -566,11 +577,15 @@ fn help(io: std.Io) !void {
         \\Print-env:
         \\  Print tracked environment variables for the leader client of a session.
         \\
+        \\  Flags:
+        \\    -s, --shell       Output POSIX export/unset commands for eval
+        \\
         \\  Examples:
         \\    zmx print-env .
+        \\    zmx print-env -s .
         \\    zmx print-env dev
         \\    zmx print-env dev DISPLAY
-        \\    eval "$(zmx print-env)"    # inside shell session precmd hook
+        \\    eval "$(zmx print-env -s .)"    # inside shell session precmd hook
         \\
         \\Environment variables:
         \\  SHELL                Default shell for new sessions
@@ -1152,21 +1167,60 @@ fn assertLabels(io: std.Io, labels: []const u8) void {
 }
 
 fn getTrackedEnvStr(
-    buf: []u8,
+    alloc: std.mem.Allocator,
     tracked_envs: []const []const u8,
     env_map: *const std.process.Environ.Map,
-) ![]const u8 {
-    var offset: usize = 0;
+) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(alloc);
 
     for (tracked_envs) |env| {
         if (env_map.get(env)) |val| {
-            const prefix = if (offset > 0) " " else "";
-            const segment = try std.fmt.bufPrint(buf[offset..], "{s}{s}={s}", .{ prefix, env, val });
-            offset += segment.len;
+            try out.appendSlice(alloc, env);
+            try out.append(alloc, '=');
+            try out.appendSlice(alloc, val);
+            try out.append(alloc, '\n');
+        } else {
+            try out.append(alloc, '-');
+            try out.appendSlice(alloc, env);
+            try out.append(alloc, '\n');
         }
     }
 
-    return buf[0..offset];
+    return out.toOwnedSlice(alloc);
+}
+
+fn getEnvValue(key: []const u8, payload: []const u8) error{EnvVarNotFound}![]const u8 {
+    var it = std.mem.splitScalar(u8, payload, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        if (line[0] == '-') {
+            if (std.mem.eql(u8, line[1..], key)) {
+                return error.EnvVarNotFound;
+            }
+        } else if (std.mem.indexOfScalar(u8, line, '=')) |eq_idx| {
+            if (std.mem.eql(u8, line[0..eq_idx], key)) {
+                return line[eq_idx + 1 ..];
+            }
+        }
+    }
+    return error.EnvVarNotFound;
+}
+
+fn printEnvError(io: std.Io, session_name: []const u8, err: anyerror) noreturn {
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.File.stderr().writer(io, &buf);
+    switch (err) {
+        error.SessionNotFound => w.interface.print("error: session \"{s}\" not found\n", .{session_name}) catch {},
+        error.DaemonUnresponsive => w.interface.print("error: session \"{s}\" daemon unresponsive\n", .{session_name}) catch {},
+        error.EnvVarNotFound => w.interface.print("error: environment variable not found\n", .{}) catch {},
+        else => w.interface.print(
+            "error: could not communicate with session \"{s}\" err={s}\n",
+            .{ session_name, @errorName(err) },
+        ) catch {},
+    }
+    w.interface.flush() catch {};
+    std.process.exit(1);
 }
 
 fn envSet(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []const u8, env_str: []const u8) !void {
@@ -1179,11 +1233,11 @@ fn envSet(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []const
     defer alloc.free(socket_path);
 
     _ = ipc.roundTripForTag(alloc, socket_path, .EnvSet, env_str, .Ack) catch |err| {
-        printLabelError(io, session_name, err);
+        printEnvError(io, session_name, err);
     };
 }
 
-fn envGet(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []const u8, single_kv: []const u8) !void {
+fn envGet(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []const u8, single_kv: []const u8, shell_mode: bool) !void {
     std.log.info("env get session={s}", .{session_name});
 
     const socket_path = socket.getSocketPath(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
@@ -1193,20 +1247,47 @@ fn envGet(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []const
     defer alloc.free(socket_path);
 
     const payload = ipc.roundTripForTag(alloc, socket_path, .EnvGet, "", .EnvData) catch |err| {
-        printLabelError(io, session_name, err);
+        printEnvError(io, session_name, err);
     };
     defer alloc.free(payload);
 
     var buf: [4096]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(io, &buf);
-    if (single_kv.len == 0) {
-        try stdout.interface.print("{s}", .{payload});
+    if (single_kv.len > 0) {
+        const val = getEnvValue(single_kv, payload) catch |err| {
+            printEnvError(io, session_name, err);
+        };
+        try stdout.interface.print("{s}\n", .{val});
         try stdout.interface.flush();
         return;
     }
 
-    const val = try label.getLabelValueFromPairs(single_kv, payload);
-    try stdout.interface.print("{s}", .{val});
+    if (payload.len == 0) return;
+
+    if (shell_mode) {
+        var it = std.mem.splitScalar(u8, payload, '\n');
+        while (it.next()) |line| {
+            if (line.len == 0) continue;
+            if (line[0] == '-') {
+                const key = line[1..];
+                try stdout.interface.print("unset {s};\n", .{key});
+            } else if (std.mem.indexOfScalar(u8, line, '=')) |eq_idx| {
+                const key = line[0..eq_idx];
+                const val = line[eq_idx + 1 ..];
+                try stdout.interface.print("export {s}='", .{key});
+                for (val) |c| {
+                    if (c == '\'') {
+                        try stdout.interface.print("'\\''", .{});
+                    } else {
+                        try stdout.interface.print("{c}", .{c});
+                    }
+                }
+                try stdout.interface.print("';\n", .{});
+            }
+        }
+    } else {
+        try stdout.interface.print("{s}", .{payload});
+    }
     try stdout.interface.flush();
 }
 
@@ -1838,4 +1919,28 @@ test "parseAttachArgs leaves labels unset when the flag is absent" {
     const parsed = parseAttachArgs(&.{"dev"});
     try std.testing.expectEqual(@as(?[]const u8, null), parsed.labels);
     try std.testing.expect(!parsed.missing_labels_value);
+}
+
+test "getTrackedEnvStr includes set and unset entries" {
+    const alloc = std.testing.allocator;
+    var env_map = std.process.Environ.Map.init(alloc);
+    defer env_map.deinit();
+
+    try env_map.put("DISPLAY", ":1");
+    try env_map.put("SSH_AUTH_SOCK", "/tmp/ssh.sock");
+
+    const tracked = [_][]const u8{ "DISPLAY", "KITTY_WINDOW_ID", "SSH_AUTH_SOCK" };
+    const str = try getTrackedEnvStr(alloc, &tracked, &env_map);
+    defer alloc.free(str);
+
+    try std.testing.expectEqualStrings("DISPLAY=:1\n-KITTY_WINDOW_ID\nSSH_AUTH_SOCK=/tmp/ssh.sock\n", str);
+}
+
+test "getEnvValue extracts set value or returns EnvVarNotFound for unset" {
+    const payload = "DISPLAY=:1\n-KITTY_WINDOW_ID\nSSH_AUTH_SOCK=/tmp/ssh.sock\n";
+
+    try std.testing.expectEqualStrings(":1", try getEnvValue("DISPLAY", payload));
+    try std.testing.expectEqualStrings("/tmp/ssh.sock", try getEnvValue("SSH_AUTH_SOCK", payload));
+    try std.testing.expectError(error.EnvVarNotFound, getEnvValue("KITTY_WINDOW_ID", payload));
+    try std.testing.expectError(error.EnvVarNotFound, getEnvValue("NONEXISTENT", payload));
 }

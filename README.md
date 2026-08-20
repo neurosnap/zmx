@@ -111,7 +111,7 @@ Commands:
   [g]et <name>                             Get session labels
   set <name> k=v ...                       Set session labels
   [cl]ear <name>                           Clear all session labels
-  print-env [name] [key]                   Print tracked environment variables
+  print-env [-s] <name> [key]              Print tracked environment variables
   [k]ill <name>... [--force]               Kill session and all attached clients
   [hi]story <name> [--vt|--html]           Output session scrollback
   [w]ait <name>...                         Wait for session tasks to complete
@@ -218,8 +218,12 @@ A session's environment is initialized when the session is created. When re-atta
 `zmx` tracks these environment variables from attaching clients. You can inspect the current leader client's environment with `zmx print-env`:
 
 ```bash
-# Print all tracked environment variables as KEY=VALUE
-zmx print-env
+# Print all tracked environment variables (set variables as KEY=VALUE, unset as -KEY)
+zmx print-env .
+zmx print-env dev
+
+# Print POSIX shell commands (export ... / unset ...) suitable for eval
+zmx print-env -s .
 
 # Print a specific variable value
 zmx print-env . SSH_AUTH_SOCK
@@ -234,7 +238,7 @@ Add to `~/.bashrc`:
 ```bash
 _zmx_env_hook() {
   if [[ -n $ZMX_SESSION ]]; then
-    eval "$(zmx print-env)"
+    eval "$(zmx print-env -s .)"
   fi
 }
 PROMPT_COMMAND="_zmx_env_hook${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
@@ -247,7 +251,7 @@ Add to `~/.zshrc`:
 ```zsh
 precmd() {
   if [[ -n $ZMX_SESSION ]]; then
-    eval "$(zmx print-env)"
+    eval "$(zmx print-env -s .)"
   fi
 }
 ```
@@ -259,7 +263,7 @@ Add to `~/.config/fish/config.fish`:
 ```fish
 function _zmx_env_hook --on-event fish_prompt
   if test -n "$ZMX_SESSION"
-    for pair in (zmx print-env | string split " ")
+    for pair in (zmx print-env . | string split " ")
       set -gx (string split -m 1 "=" $pair)
     end
   end

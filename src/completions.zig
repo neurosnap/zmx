@@ -170,6 +170,7 @@ const fish_completions =
     \\complete -c zmx -n "__fish_seen_subcommand_from k kill" -l force -d 'Force kill'
     \\complete -c zmx -n "__fish_seen_subcommand_from hi history" -l vt -d 'History format for escape sequences'
     \\complete -c zmx -n "__fish_seen_subcommand_from hi history" -l html -d 'History format for escape sequences'
+    \\complete -c zmx -n "__fish_seen_subcommand_from print-env" -s s -l shell -d 'Output POSIX export/unset commands for eval'
 ;
 
 const nu_completions =
@@ -235,8 +236,9 @@ const nu_completions =
     \\]
     \\
     \\export extern "zmx print-env" [
-    \\    name?: string@"nu-complete zmx sessions"
+    \\    name: string@"nu-complete zmx sessions"
     \\    key?: string
+    \\    --shell(-s)
     \\]
     \\
     \\export extern "zmx help" []
