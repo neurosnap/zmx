@@ -1,4 +1,5 @@
 const std = @import("std");
+const Environ = std.process.Environ;
 const build_options = @import("build_options");
 const ghostty_vt = @import("ghostty-vt");
 const ipc = @import("ipc.zig");
@@ -160,7 +161,14 @@ pub fn main(init: std.process.Init) !void {
         daemon.setCwd(cwd);
         daemon.shell = shell_env;
         std.log.info("socket path={s}", .{daemon.socket_path});
-        return attach(gpa, io, &daemon, parsed.labels);
+
+        var env_buf: [4096]u8 = undefined;
+        const tracked_envs = try cfg.getTrackedEnvs(gpa);
+        defer gpa.free(tracked_envs);
+
+        const env_str = try getTrackedEnvStr(&env_buf, tracked_envs, init.environ_map);
+
+        return attach(gpa, io, &daemon, env_str, parsed.labels);
     } else if (std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "r")) {
         const session_name = args.next() orelse "";
         if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
@@ -409,6 +417,15 @@ pub fn main(init: std.process.Init) !void {
         daemon.shell = shell_env;
         std.log.info("socket path={s}", .{daemon.socket_path});
         try writeFile(gpa, io, &daemon, file_path);
+    } else if (std.mem.eql(u8, cmd, "print-env")) {
+        const sesh_name = args.next();
+        if (sesh_name) |name| {
+            if (detectHelp(name)) return help(io);
+        }
+        const sesh = try socket.resolveSessionOrEnv(gpa, io, sesh_name);
+        defer gpa.free(sesh);
+        const single_kv = args.next() orelse "";
+        return envGet(gpa, io, &cfg, sesh, single_kv);
     } else {
         return help(io);
     }
@@ -422,22 +439,23 @@ fn help(io: std.Io) !void {
         \\
         \\Commands:
         \\  [a]ttach [--labels kv] <name> [command...]  Attach to session, creating if needed
-        \\  [r]un <name> [-d] [command...]           Send command without attaching
-        \\  [s]end <name> <text...>                  Send raw input to session PTY
-        \\  [p]rint <name> <text...>                 Inject text into session display
-        \\  [wr]ite <name> <file_path>               Write stdin to file_path through the session
-        \\  [d]etach                                 Detach all clients (ctrl+\\ for current client)
-        \\  [l]ist|ls [--short|--where k=v]          List active sessions
-        \\  [g]et <name>                             Get session labels
-        \\  set <name> k=v ...                     Set session labels (k= to remove)
-        \\  [cl]ear <name>                           Clear all session labels
-        \\  [k]ill <name>... [--force]               Kill session and all attached clients
-        \\  [hi]story <name> [--vt|--html]           Output session scrollback
-        \\  [w]ait <name>...                         Wait for session tasks to complete
-        \\  [t]ail <name>...                         Follow session output
-        \\  [c]ompletions <shell>                    Shell completions (bash, zsh, fish, nu)
-        \\  [v]ersion                                Show version and metadata (socket dir, log dir)
-        \\  [h]elp                                   Show this help
+        \\  [r]un <name> [-d] [command...]              Send command without attaching
+        \\  [s]end <name> <text...>                     Send raw input to session PTY
+        \\  [p]rint <name> <text...>                    Inject text into session display
+        \\  [wr]ite <name> <file_path>                  Write stdin to file_path through the session
+        \\  [d]etach                                    Detach all clients (ctrl+\\ for current client)
+        \\  [l]ist|ls [--short|--where k=v]             List active sessions
+        \\  [g]et <name>                                Get session labels
+        \\  set <name> k=v ...                          Set session labels (k= to remove)
+        \\  [cl]ear <name>                              Clear all session labels
+        \\  print-env [name] [key]                      Print tracked environment variables
+        \\  [k]ill <name>... [--force]                  Kill session and all attached clients
+        \\  [hi]story <name> [--vt|--html]              Output session scrollback
+        \\  [w]ait <name>...                            Wait for session tasks to complete
+        \\  [t]ail <name>...                            Follow session output
+        \\  [c]ompletions <shell>                       Shell completions (bash, zsh, fish, nu)
+        \\  [v]ersion                                   Show version and metadata (socket dir, log dir)
+        \\  [h]elp                                      Show this help
         \\
         \\Attach:
         \\  This will spawn a login $SHELL with a PTY.  You can provide a
@@ -545,6 +563,15 @@ fn help(io: std.Io) !void {
         \\    zmx list | grep project=zmx
         \\    zmx clear dev
         \\
+        \\Print-env:
+        \\  Print tracked environment variables for the leader client of a session.
+        \\
+        \\  Examples:
+        \\    zmx print-env .
+        \\    zmx print-env dev
+        \\    zmx print-env dev DISPLAY
+        \\    eval "$(zmx print-env)"    # inside shell session precmd hook
+        \\
         \\Environment variables:
         \\  SHELL                Default shell for new sessions
         \\  ZMX_DIR              Socket directory (priority 1)
@@ -553,6 +580,8 @@ fn help(io: std.Io) !void {
         \\  ZMX_SESSION          Session name (injected automatically; makes attach
         \\                       switch this session)
         \\  ZMX_SESSION_PREFIX   Prefix added to all session names
+        \\  ZMX_TRACK_ENV        Comma-separated list of environment variables to track
+        \\                       from attaching clients
         \\  ZMX_DIR_MODE         Sets mode for socket and log directories (octal, defaults to 0750)
         \\  ZMX_LOG_MODE         Sets mode for log files (octal, defaults to 0640)
         \\  ZMX_NO_DETACH_KEY    Disables the ctrl+\ detach shortcut (set to any value)
@@ -1122,6 +1151,65 @@ fn assertLabels(io: std.Io, labels: []const u8) void {
     }
 }
 
+fn getTrackedEnvStr(
+    buf: []u8,
+    tracked_envs: []const []const u8,
+    env_map: *const std.process.Environ.Map,
+) ![]const u8 {
+    var offset: usize = 0;
+
+    for (tracked_envs) |env| {
+        if (env_map.get(env)) |val| {
+            const prefix = if (offset > 0) " " else "";
+            const segment = try std.fmt.bufPrint(buf[offset..], "{s}{s}={s}", .{ prefix, env, val });
+            offset += segment.len;
+        }
+    }
+
+    return buf[0..offset];
+}
+
+fn envSet(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []const u8, env_str: []const u8) !void {
+    std.log.info("env set session={s}", .{session_name});
+
+    const socket_path = socket.getSocketPath(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
+        error.NameTooLong => return socket.printSessionNameTooLong(io, session_name, cfg.socket_dir),
+        error.OutOfMemory => return err,
+    };
+    defer alloc.free(socket_path);
+
+    _ = ipc.roundTripForTag(alloc, socket_path, .EnvSet, env_str, .Ack) catch |err| {
+        printLabelError(io, session_name, err);
+    };
+}
+
+fn envGet(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []const u8, single_kv: []const u8) !void {
+    std.log.info("env get session={s}", .{session_name});
+
+    const socket_path = socket.getSocketPath(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
+        error.NameTooLong => return socket.printSessionNameTooLong(io, session_name, cfg.socket_dir),
+        error.OutOfMemory => return err,
+    };
+    defer alloc.free(socket_path);
+
+    const payload = ipc.roundTripForTag(alloc, socket_path, .EnvGet, "", .EnvData) catch |err| {
+        printLabelError(io, session_name, err);
+    };
+    defer alloc.free(payload);
+
+    var buf: [4096]u8 = undefined;
+    var stdout = std.Io.File.stdout().writer(io, &buf);
+    if (single_kv.len == 0) {
+        try stdout.interface.print("{s}", .{payload});
+        try stdout.interface.flush();
+        return;
+    }
+
+    const val = try label.getLabelValueFromPairs(single_kv, payload);
+    try stdout.interface.print("{s}", .{val});
+    try stdout.interface.flush();
+}
+
 fn labelSet(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []const u8, labels: []const u8) !void {
     std.log.info("label set session={s}", .{session_name});
 
@@ -1358,7 +1446,7 @@ fn parseAttachArgs(argv: []const []const u8) AttachArgs {
     return parsed;
 }
 
-fn attach(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon, labels: ?[]const u8) !void {
+fn attach(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon, env_str: []const u8, labels: ?[]const u8) !void {
     const sesh = socket.getSeshNameFromEnv();
     if (sesh.len > 0) {
         return switchSesh(gpa, io, daemon, sesh);
@@ -1425,7 +1513,7 @@ fn attach(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon, labels: ?[]const 
     const clear_seq = "\x1b[2J\x1b[H";
     _ = try lib_posix.write(lib_posix.STDOUT_FILENO, clear_seq);
 
-    const looper = try loop.clientLoop(client_sock);
+    const looper = try loop.clientLoop(client_sock, env_str);
     switch (looper.kind) {
         .detach => return,
         .switch_session => {
@@ -1453,7 +1541,7 @@ fn attach(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon, labels: ?[]const 
                 std.log.info("switching to new session cwd={s}", .{switch_cwd});
                 target_daemon.setCwd(switch_cwd);
                 target_daemon.shell = daemon.shell;
-                return attach(gpa, io, &target_daemon, null);
+                return attach(gpa, io, &target_daemon, env_str, null);
             }
         },
     }
