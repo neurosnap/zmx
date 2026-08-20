@@ -14,6 +14,7 @@ const Cfg = @import("cfg.zig");
 const loop = @import("loop.zig");
 const Client = loop.Client;
 const Daemon = loop.Daemon;
+const probe = @import("probe.zig");
 const version = build_options.version;
 const ghostty_version = build_options.ghostty_version;
 
@@ -160,7 +161,7 @@ pub fn main(init: std.process.Init) !void {
         daemon.setCwd(cwd);
         daemon.shell = shell_env;
         std.log.info("socket path={s}", .{daemon.socket_path});
-        return attach(gpa, io, &daemon, parsed.labels);
+        return attach(gpa, io, &daemon, parsed.labels, parsed.snapshot_mode);
     } else if (std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "r")) {
         const session_name = args.next() orelse "";
         if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
@@ -421,7 +422,7 @@ fn help(io: std.Io) !void {
         \\Usage: zmx <command> [args...]
         \\
         \\Commands:
-        \\  [a]ttach [--labels kv] <name> [command...]  Attach to session, creating if needed
+        \\  [a]ttach [-s|--snapshot] [--labels kv] <name> [command...] Attach to session, creating if needed
         \\  [r]un <name> [-d] [command...]           Send command without attaching
         \\  [s]end <name> <text...>                  Send raw input to session PTY
         \\  [p]rint <name> <text...>                 Inject text into session display
@@ -449,6 +450,7 @@ fn help(io: std.Io) !void {
         \\
         \\  Examples:
         \\    zmx attach dev
+        \\    zmx attach --snapshot dev
         \\    zmx attach dev vim
         \\    zmx attach --labels "project=api role=worker" build
         \\
@@ -1318,6 +1320,7 @@ const AttachArgs = struct {
     /// `--labels "k=v ..."`: labels to apply once the session exists, in the
     /// same space-separated form `zmx set` takes.
     labels: ?[]const u8 = null,
+    snapshot_mode: bool = false,
     want_help: bool = false,
     /// `--labels` was given with nothing to apply.
     missing_labels_value: bool = false,
@@ -1335,6 +1338,10 @@ fn parseAttachArgs(argv: []const []const u8) AttachArgs {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             parsed.want_help = true;
             return parsed;
+        }
+        if (std.mem.eql(u8, arg, "--snapshot") or std.mem.eql(u8, arg, "-s")) {
+            parsed.snapshot_mode = true;
+            continue;
         }
         if (std.mem.startsWith(u8, arg, labels_flag ++ "=")) {
             parsed.labels = arg[labels_flag.len + 1 ..];
@@ -1358,7 +1365,7 @@ fn parseAttachArgs(argv: []const []const u8) AttachArgs {
     return parsed;
 }
 
-fn attach(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon, labels: ?[]const u8) !void {
+fn attach(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon, labels: ?[]const u8, snapshot_mode: bool) !void {
     const sesh = socket.getSeshNameFromEnv();
     if (sesh.len > 0) {
         return switchSesh(gpa, io, daemon, sesh);
@@ -1389,7 +1396,7 @@ fn attach(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon, labels: ?[]const 
     // skip terminal setup entirely rather than applying undefined stack bytes
     // via tcsetattr.
     var orig_termios: cross.c.termios = undefined;
-    const stdin_is_tty = cross.c.tcgetattr(lib_posix.STDIN_FILENO, &orig_termios) == 0;
+    const stdin_is_tty = !snapshot_mode and cross.c.tcgetattr(lib_posix.STDIN_FILENO, &orig_termios) == 0;
 
     // RIS, OSC 10/11/12
     const restore_seq = "\x1bc\x1b]110\x1b\\\x1b]111\x1b\\\x1b]112\x1b\\";
@@ -1398,8 +1405,10 @@ fn attach(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon, labels: ?[]const 
         if (stdin_is_tty) {
             _ = cross.c.tcsetattr(lib_posix.STDIN_FILENO, cross.c.TCSAFLUSH, &orig_termios);
         }
-        // Reset terminal modes on detach
-        _ = lib_posix.write(lib_posix.STDOUT_FILENO, restore_seq) catch {};
+        if (!snapshot_mode) {
+            // Reset terminal modes on detach
+            _ = lib_posix.write(lib_posix.STDOUT_FILENO, restore_seq) catch {};
+        }
     }
 
     if (stdin_is_tty) {
@@ -1420,18 +1429,36 @@ fn attach(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon, labels: ?[]const 
         _ = cross.c.tcsetattr(lib_posix.STDIN_FILENO, cross.c.TCSANOW, &raw_termios);
     }
 
-    // Clear screen before attaching. This provides a clean slate before
-    // the session restore.
-    const clear_seq = "\x1b[2J\x1b[H";
-    _ = try lib_posix.write(lib_posix.STDOUT_FILENO, clear_seq);
+    // Probe outer terminal (if TTY) and create init snapshot
+    const size = ipc.getTerminalSize(lib_posix.STDOUT_FILENO);
+    const init_snap = try probe.probeAndSnapshot(
+        io,
+        gpa,
+        size.rows,
+        size.cols,
+        size.xpixel,
+        size.ypixel,
+        stdin_is_tty,
+        probe.DEFAULT_PROBE_TIMEOUT_MS,
+    );
+    defer gpa.free(init_snap);
 
-    const looper = try loop.clientLoop(client_sock);
+    if (!snapshot_mode) {
+        // Clear screen before attaching. This provides a clean slate before
+        // the session restore.
+        const clear_seq = "\x1b[2J\x1b[H";
+        _ = try lib_posix.write(lib_posix.STDOUT_FILENO, clear_seq);
+    }
+
+    const looper = try loop.clientLoop(io, client_sock, snapshot_mode, init_snap);
     switch (looper.kind) {
         .detach => return,
         .switch_session => {
             if (looper.session_name) |session_name| {
-                // Reset terminal modes when switching sessions
-                _ = lib_posix.write(lib_posix.STDOUT_FILENO, restore_seq) catch {};
+                if (!snapshot_mode) {
+                    // Reset terminal modes when switching sessions
+                    _ = lib_posix.write(lib_posix.STDOUT_FILENO, restore_seq) catch {};
+                }
 
                 const target_path = socket.getSocketPath(
                     gpa,
@@ -1453,7 +1480,7 @@ fn attach(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon, labels: ?[]const 
                 std.log.info("switching to new session cwd={s}", .{switch_cwd});
                 target_daemon.setCwd(switch_cwd);
                 target_daemon.shell = daemon.shell;
-                return attach(gpa, io, &target_daemon, null);
+                return attach(gpa, io, &target_daemon, null, snapshot_mode);
             }
         },
     }
@@ -1750,4 +1777,18 @@ test "parseAttachArgs leaves labels unset when the flag is absent" {
     const parsed = parseAttachArgs(&.{"dev"});
     try std.testing.expectEqual(@as(?[]const u8, null), parsed.labels);
     try std.testing.expect(!parsed.missing_labels_value);
+}
+
+test "parseAttachArgs reads snapshot flag" {
+    for ([_][]const []const u8{
+        &.{ "--snapshot", "dev" },
+        &.{ "-s", "dev" },
+        &.{ "--snapshot", "--labels", "k=v", "dev" },
+    }) |argv| {
+        const parsed = parseAttachArgs(argv);
+        try std.testing.expect(parsed.snapshot_mode);
+        try std.testing.expectEqualStrings("dev", parsed.session_name);
+    }
+    const parsed = parseAttachArgs(&.{"dev"});
+    try std.testing.expect(!parsed.snapshot_mode);
 }
