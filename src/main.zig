@@ -23,7 +23,18 @@ pub const std_options: std.Options = .{
     .log_level = .debug,
 };
 
-/// This is the entry point for the CLI.
+fn detectHelp(arg: []const u8) bool {
+    return (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h"));
+}
+
+/// Prints an error message to stderr and exits with status 1.
+fn printError(io: std.Io, comptime fmt: []const u8, args: anytype) noreturn {
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.File.stderr().writer(io, &buf);
+    w.interface.print("error: " ++ fmt ++ "\n", args) catch {};
+    w.interface.flush() catch {};
+    std.process.exit(1);
+}
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -65,14 +76,18 @@ pub fn main(init: std.process.Init) !void {
         }
         return list(gpa, io, &cfg, short);
     } else if (std.mem.eql(u8, cmd, "get") or std.mem.eql(u8, cmd, "g")) {
-        const sesh_name = args.next() orelse return error.SessionNameRequired;
+        const sesh_name = args.next() orelse {
+            return printError(io, "session name required (or run inside a zmx session)", .{});
+        };
         if (detectHelp(sesh_name)) return help(io);
         const sesh = try socket.resolveSessionOrEnv(gpa, io, sesh_name);
         defer gpa.free(sesh);
         const single_kv = args.next() orelse "";
         return labelGet(gpa, io, &cfg, sesh, single_kv);
     } else if (std.mem.eql(u8, cmd, "set")) {
-        const sesh_name = args.next() orelse return error.SessionNameRequired;
+        const sesh_name = args.next() orelse {
+            return printError(io, "session name required (or run inside a zmx session)", .{});
+        };
         if (detectHelp(sesh_name)) return help(io);
         const sesh = try socket.resolveSessionOrEnv(gpa, io, sesh_name);
         defer gpa.free(sesh);
@@ -85,19 +100,28 @@ pub fn main(init: std.process.Init) !void {
             try kvs.appendSlice(gpa, arg);
             first = false;
         }
+        if (kvs.items.len == 0) {
+            return printError(io, "at least one key=value pair required", .{});
+        }
         return labelSet(gpa, io, &cfg, sesh, kvs.items);
-    } else if (std.mem.eql(u8, cmd, "clear")) {
-        const sesh_name = args.next() orelse return error.SessionNameRequired;
+    } else if (std.mem.eql(u8, cmd, "clear") or std.mem.eql(u8, cmd, "cl")) {
+        const sesh_name = args.next() orelse {
+            return printError(io, "session name required (or run inside a zmx session)", .{});
+        };
         if (detectHelp(sesh_name)) return help(io);
         const sesh = try socket.resolveSessionOrEnv(gpa, io, sesh_name);
         defer gpa.free(sesh);
         return labelClear(gpa, io, &cfg, sesh);
     } else if (std.mem.eql(u8, cmd, "completions") or std.mem.eql(u8, cmd, "c")) {
-        const arg = args.next() orelse return;
+        const arg = args.next() orelse {
+            return printError(io, "completions requires a shell argument (bash, zsh, fish, nu)", .{});
+        };
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             return help(io);
         }
-        const shell = completions.Shell.fromString(arg) orelse return;
+        const shell = completions.Shell.fromString(arg) orelse {
+            return printError(io, "unknown shell \"{s}\" (valid: bash, zsh, fish, nu)", .{arg});
+        };
         return printCompletions(io, shell);
     } else if (std.mem.eql(u8, cmd, "detach") or std.mem.eql(u8, cmd, "d")) {
         return detachAll(gpa, io, &cfg);
@@ -116,7 +140,10 @@ pub fn main(init: std.process.Init) !void {
             }
         }
         const sesh_env = socket.getSeshNameFromEnv();
-        const sesh = try socket.getSeshName(gpa, session_name orelse sesh_env);
+        const raw_name = session_name orelse (if (sesh_env.len > 0) sesh_env else {
+            return printError(io, "session name required (or run inside a zmx session)", .{});
+        });
+        const sesh = try socket.getSeshName(gpa, raw_name);
         defer gpa.free(sesh);
         return history(gpa, io, &cfg, sesh, format);
     } else if (std.mem.eql(u8, cmd, "attach") or std.mem.eql(u8, cmd, "a")) {
@@ -131,11 +158,7 @@ pub fn main(init: std.process.Init) !void {
             return help(io);
         }
         if (parsed.missing_labels_value) {
-            var buf: [4096]u8 = undefined;
-            var w = std.Io.File.stderr().writer(io, &buf);
-            w.interface.print("error: --labels requires \"key=value ...\"\n", .{}) catch {};
-            w.interface.flush() catch {};
-            std.process.exit(1);
+            return printError(io, "--labels requires \"key=value ...\"", .{});
         }
         // Before ensureSession, so a rejected label does not leave a session
         // behind that the caller never asked for.
@@ -206,7 +229,9 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
             return help(io);
         }
-        if (session_name.len == 0) return error.SessionNameRequired;
+        if (session_name.len == 0) {
+            return printError(io, "session name required", .{});
+        }
 
         var text_parts: std.ArrayList([]const u8) = .empty;
         defer text_parts.deinit(gpa);
@@ -220,13 +245,18 @@ pub fn main(init: std.process.Init) !void {
             error.NameTooLong => return socket.printSessionNameTooLong(io, sesh, cfg.socket_dir),
             error.OutOfMemory => return err,
         };
-        return send(gpa, io, &cfg, sesh, socket_path, text_parts.items, .Send);
+        send(gpa, io, &cfg, sesh, socket_path, text_parts.items, .Send) catch |err| {
+            if (err == error.SessionUnresponsive) std.process.exit(1);
+            return printError(io, "send failed: {s}", .{@errorName(err)});
+        };
     } else if (std.mem.eql(u8, cmd, "print") or std.mem.eql(u8, cmd, "p")) {
         const session_name = args.next() orelse "";
         if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
             return help(io);
         }
-        if (session_name.len == 0) return error.SessionNameRequired;
+        if (session_name.len == 0) {
+            return printError(io, "session name required", .{});
+        }
 
         var text_parts: std.ArrayList([]const u8) = .empty;
         defer text_parts.deinit(gpa);
@@ -240,7 +270,10 @@ pub fn main(init: std.process.Init) !void {
             error.NameTooLong => return socket.printSessionNameTooLong(io, sesh, cfg.socket_dir),
             error.OutOfMemory => return err,
         };
-        return send(gpa, io, &cfg, sesh, socket_path, text_parts.items, .Output);
+        send(gpa, io, &cfg, sesh, socket_path, text_parts.items, .Output) catch |err| {
+            if (err == error.SessionUnresponsive) std.process.exit(1);
+            return printError(io, "print failed: {s}", .{@errorName(err)});
+        };
     } else if (std.mem.eql(u8, cmd, "kill") or std.mem.eql(u8, cmd, "k")) {
         var stderr_buffer: [1024]u8 = undefined;
         var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
@@ -266,7 +299,7 @@ pub fn main(init: std.process.Init) !void {
             try matchers.append(gpa, m);
         }
         if (matchers.items.len == 0) {
-            return error.SessionNameRequired;
+            return printError(io, "session name required", .{});
         }
         var sessions = try util.get_session_entries(gpa, io, cfg.socket_dir);
         defer {
@@ -276,21 +309,35 @@ pub fn main(init: std.process.Init) !void {
             sessions.deinit(gpa);
         }
 
+        var killed_any = false;
         for (sessions.items) |session| {
             for (matchers.items) |m| {
-                if (!m.matches(session.name)) {
-                    continue;
-                }
-
+                if (!m.matches(session.name)) continue;
                 kill(gpa, io, &cfg, session.name, force) catch |err| {
-                    try stderr.print(
-                        "failed to kill session={s}: {s}\n",
-                        .{ session.name, @errorName(err) },
-                    );
+                    if (err == error.SessionNotFound and force) {
+                        killed_any = true;
+                        continue;
+                    }
+                    try stderr.print("failed to kill session={s}: {s}\n", .{ session.name, @errorName(err) });
                     try stderr.flush();
                 };
+                killed_any = true;
                 break;
             }
+        }
+        if (!killed_any) {
+            for (matchers.items) |m| {
+                if (m.is_prefix) continue;
+                kill(gpa, io, &cfg, m.name, force) catch |err| {
+                    if (err == error.SessionNotFound and force) {
+                        killed_any = true;
+                        continue;
+                    }
+                    return printError(io, "failed to kill session={s}: {s}", .{ m.name, @errorName(err) });
+                };
+                killed_any = true;
+            }
+            if (!killed_any) return printError(io, "no matching sessions found", .{});
         }
     } else if (std.mem.eql(u8, cmd, "wait") or std.mem.eql(u8, cmd, "w")) {
         var matchers: std.ArrayList(socket.SessionMatch) = .empty;
@@ -308,7 +355,7 @@ pub fn main(init: std.process.Init) !void {
             try matchers.append(gpa, m);
         }
         if (matchers.items.len == 0) {
-            return error.SessionNameRequired;
+            return printError(io, "session name required", .{});
         }
         return wait(gpa, io, &cfg, matchers);
     } else if (std.mem.eql(u8, cmd, "tail") or std.mem.eql(u8, cmd, "t")) {
@@ -327,7 +374,7 @@ pub fn main(init: std.process.Init) !void {
             try matchers.append(gpa, m);
         }
         if (matchers.items.len == 0) {
-            return error.SessionNameRequired;
+            return printError(io, "session name required", .{});
         }
 
         // Resolve matchers against session list to get actual session names.
@@ -371,6 +418,10 @@ pub fn main(init: std.process.Init) !void {
             }
         }
 
+        if (resolved_names.items.len == 0) {
+            return printError(io, "no matching sessions found", .{});
+        }
+
         var client_socket_fds = try std.ArrayList(i32).initCapacity(gpa, resolved_names.items.len);
         defer {
             for (client_socket_fds.items) |client_fd| {
@@ -384,7 +435,9 @@ pub fn main(init: std.process.Init) !void {
                 error.NameTooLong => return socket.printSessionNameTooLong(init.io, session_name, cfg.socket_dir),
                 error.OutOfMemory => return err,
             };
-            const client_sock = try socket.sessionConnect(socket_path);
+            const client_sock = socket.sessionConnect(socket_path) catch |err| {
+                return printError(io, "cannot connect to session \"{s}\": {s}", .{ session_name, @errorName(err) });
+            };
             try client_socket_fds.append(gpa, client_sock);
         }
         _ = try tail(gpa, client_socket_fds, false, false);
@@ -393,12 +446,16 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
             return help(io);
         }
-        if (session_name.len == 0) return error.SessionNameRequired;
+        if (session_name.len == 0) {
+            return printError(io, "session name required", .{});
+        }
         const file_path = args.next() orelse "";
         if (std.mem.eql(u8, file_path, "--help") or std.mem.eql(u8, file_path, "-h")) {
             return help(io);
         }
-        if (file_path.len == 0) return error.FilePathRequired;
+        if (file_path.len == 0) {
+            return printError(io, "file path required", .{});
+        }
 
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
         const cwd_len = std.process.currentPath(io, &cwd_buf) catch 0;
@@ -414,7 +471,10 @@ pub fn main(init: std.process.Init) !void {
         daemon.setCwd(cwd);
         daemon.shell = shell_env;
         std.log.info("socket path={s}", .{daemon.socket_path});
-        try writeFile(gpa, io, &daemon, file_path);
+        writeFile(gpa, io, &daemon, file_path) catch |err| {
+            if (err == error.SessionUnresponsive) std.process.exit(1);
+            return printError(io, "write failed: {s}", .{@errorName(err)});
+        };
     } else if (std.mem.eql(u8, cmd, "print-env")) {
         var shell_mode = false;
         var session_name: ?[]const u8 = null;
@@ -431,12 +491,14 @@ pub fn main(init: std.process.Init) !void {
             }
         }
 
-        const sesh_arg = session_name orelse return error.SessionNameRequired;
+        const sesh_arg = session_name orelse {
+            return printError(io, "session name required (or run inside a zmx session)", .{});
+        };
         const sesh = try socket.resolveSessionOrEnv(gpa, io, sesh_arg);
         defer gpa.free(sesh);
         return envGet(gpa, io, &cfg, sesh, single_kv, shell_mode);
     } else {
-        return help(io);
+        return printError(io, "unknown command \"{s}\"", .{cmd});
     }
 }
 
@@ -622,10 +684,6 @@ fn printCompletions(io: std.Io, shell: completions.Shell) !void {
     var w = std.Io.File.stdout().writer(io, &buf);
     try w.interface.print("{s}\n", .{script});
     try w.interface.flush();
-}
-
-fn detectHelp(arg: []const u8) bool {
-    return (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h"));
 }
 
 fn tail(alloc: std.mem.Allocator, client_socket_fds: std.ArrayList(i32), detached: bool, is_run_cmd: bool) !u8 {
@@ -1002,8 +1060,7 @@ fn list(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, short: bool) !void {
 fn detachAll(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg) !void {
     const session_name = socket.getSeshNameFromEnv();
     if (session_name.len == 0) {
-        std.log.err("ZMX_SESSION env var not found: are you inside a zmx session?", .{});
-        return;
+        return printError(io, "not inside a zmx session (ZMX_SESSION not set)", .{});
     }
     std.log.info("detach all session={s}", .{session_name});
 
@@ -1040,27 +1097,20 @@ fn kill(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []const u
 
     const exists = try socket.sessionExists(io, dir, session_name);
     if (!exists) {
-        var buf: [4096]u8 = undefined;
-        var w = std.Io.File.stderr().writer(io, &buf);
-        w.interface.print("error: session \"{s}\" does not exist\n", .{session_name}) catch {};
-        w.interface.flush() catch {};
         return error.SessionNotFound;
     }
     const fd = ipc.connectSession(socket_path) catch |err| {
         std.log.err("session unresponsive: {s}", .{@errorName(err)});
-        var buf: [4096]u8 = undefined;
-        var w = std.Io.File.stdout().writer(io, &buf);
         if (force or err == error.ConnectionRefused) {
             socket.cleanupStaleSocket(io, dir, session_name);
-            w.interface.print("cleaned up stale session {s}\n", .{session_name}) catch {};
+            var ebuf: [4096]u8 = undefined;
+            var ew = std.Io.File.stderr().writer(io, &ebuf);
+            ew.interface.print("cleaned up stale session {s}\n", .{session_name}) catch {};
+            ew.interface.flush() catch {};
+            return;
         } else {
-            w.interface.print(
-                "session {s} is unresponsive ({s})\ndaemon may be busy: try again, add `--force` flag, or kill the process directly\n",
-                .{ session_name, @errorName(err) },
-            ) catch {};
+            return error.SessionUnresponsive;
         }
-        w.interface.flush() catch {};
-        return;
     };
 
     defer lib_posix.close(fd);
@@ -1129,7 +1179,9 @@ fn labelGet(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []con
         return;
     }
 
-    const val = try label.getLabelValueFromPairs(single_kv, payload);
+    const val = label.getLabelValueFromPairs(single_kv, payload) catch |err| switch (err) {
+        error.LabelKeyNotFound => return printError(io, "label key \"{s}\" not found in session \"{s}\"", .{ single_kv, session_name }),
+    };
     try stdout.interface.print("{s}", .{val});
     try stdout.interface.flush();
 }
@@ -1332,10 +1384,7 @@ fn fetchHistory(
 ) ![]const u8 {
     std.log.info("fetch history session={s}", .{session_name});
     const socket_path = socket.getSocketPath(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
-        error.NameTooLong => {
-            socket.printSessionNameTooLong(io, session_name, cfg.socket_dir);
-            return error.NameTooLong;
-        },
+        error.NameTooLong => return error.NameTooLong,
         error.OutOfMemory => return err,
     };
     defer alloc.free(socket_path);
@@ -1402,16 +1451,12 @@ fn history(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []cons
 
     const exists = try socket.sessionExists(io, dir, session_name);
     if (!exists) {
-        var buf: [4096]u8 = undefined;
-        var w = std.Io.File.stderr().writer(io, &buf);
-        w.interface.print("error: session \"{s}\" does not exist\n", .{session_name}) catch {};
-        w.interface.flush() catch {};
-        return error.SessionNotFound;
+        return printError(io, "session \"{s}\" does not exist", .{session_name});
     }
     const fd = ipc.connectSession(socket_path) catch |err| {
         std.log.err("session unresponsive: {s}", .{@errorName(err)});
         if (err == error.ConnectionRefused) socket.cleanupStaleSocket(io, dir, session_name);
-        return;
+        return printError(io, "session \"{s}\" is unresponsive ({s})", .{ session_name, @errorName(err) });
     };
     defer lib_posix.close(fd);
 
@@ -1461,16 +1506,12 @@ fn switchSesh(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon, current_sesh:
 
     const exists = try socket.sessionExists(io, dir, current_sesh);
     if (!exists) {
-        var buf: [4096]u8 = undefined;
-        var w = std.Io.File.stderr().writer(io, &buf);
-        w.interface.print("error: session \"{s}\" does not exist\n", .{current_sesh}) catch {};
-        w.interface.flush() catch {};
-        return error.SessionNotFound;
+        return printError(io, "session \"{s}\" does not exist", .{current_sesh});
     }
     const fd = ipc.connectSession(socket_path) catch |err| {
         std.log.err("session unresponsive: {s}", .{@errorName(err)});
         if (err == error.ConnectionRefused) socket.cleanupStaleSocket(io, dir, current_sesh);
-        return;
+        return printError(io, "session \"{s}\" is unresponsive ({s})", .{ current_sesh, @errorName(err) });
     };
     defer lib_posix.close(fd);
 
@@ -1545,7 +1586,9 @@ fn attach(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon, env_str: []const 
         try labelSet(gpa, io, daemon.cfg, daemon.session_name, kvs);
     }
 
-    const client_sock = try socket.sessionConnect(daemon.socket_path);
+    const client_sock = socket.sessionConnect(daemon.socket_path) catch |err| {
+        return printError(io, "cannot connect to session \"{s}\": {s}", .{ daemon.session_name, @errorName(err) });
+    };
     std.log.info("attached session={s}", .{daemon.session_name});
     //  This is typically used with tcsetattr() to modify terminal settings.
     //      - you first get the current settings with tcgetattr()
@@ -1666,18 +1709,19 @@ fn writeFile(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon, file_path: []c
     defer dir.close(io);
 
     const result = ipc.probeSession(gpa, socket_path) catch |err| {
-        std.log.err("session unresponsive: {s}", .{@errorName(err)});
+        var errbuf: [4096]u8 = undefined;
+        var ew = std.Io.File.stderr().writer(io, &errbuf);
         if (err == error.ConnectionRefused) {
             socket.cleanupStaleSocket(io, dir, daemon.session_name);
-            w.interface.print("cleaned up stale session {s}\n", .{daemon.session_name}) catch {};
+            ew.interface.print("cleaned up stale session {s}\n", .{daemon.session_name}) catch {};
         } else {
-            w.interface.print(
+            ew.interface.print(
                 "session {s} is unresponsive ({s})\ndaemon may be busy: try again\n",
                 .{ daemon.session_name, @errorName(err) },
             ) catch {};
         }
-        w.interface.flush() catch {};
-        return;
+        ew.interface.flush() catch {};
+        return error.SessionUnresponsive;
     };
 
     defer result.deinit();
@@ -1717,8 +1761,6 @@ fn writeFile(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon, file_path: []c
 
 fn send(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []const u8, socket_path: []const u8, text_parts: [][]const u8, tag: ipc.Tag) !void {
     std.log.info("send session={s}", .{session_name});
-    var buf: [4096]u8 = undefined;
-    var w = std.Io.File.stdout().writer(io, &buf);
 
     var payload = std.ArrayList(u8).empty;
     defer payload.deinit(alloc);
@@ -1750,24 +1792,28 @@ fn send(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []const u
         }
     }
 
-    if (payload.items.len == 0) return error.TextRequired;
+    if (payload.items.len == 0) {
+        return printError(io, "text argument required (or pipe input via stdin)", .{});
+    }
 
     var dir = try std.Io.Dir.openDirAbsolute(io, cfg.socket_dir, .{});
     defer dir.close(io);
 
     const probe_result = ipc.probeSession(alloc, socket_path) catch |err| {
         std.log.err("session unresponsive: {s}", .{@errorName(err)});
+        var errbuf: [4096]u8 = undefined;
+        var ew = std.Io.File.stderr().writer(io, &errbuf);
         if (err == error.ConnectionRefused) {
             socket.cleanupStaleSocket(io, dir, session_name);
-            try w.interface.print("cleaned up stale session {s}\n", .{session_name});
+            ew.interface.print("cleaned up stale session {s}\n", .{session_name}) catch {};
         } else {
-            try w.interface.print(
+            ew.interface.print(
                 "session {s} is unresponsive ({s})\ndaemon may be busy: try again\n",
                 .{ session_name, @errorName(err) },
-            );
+            ) catch {};
         }
-        try w.interface.flush();
-        return;
+        ew.interface.flush() catch {};
+        return error.SessionUnresponsive;
     };
     defer probe_result.deinit();
 
@@ -1840,12 +1886,12 @@ fn run(gpa: std.mem.Allocator, io: std.Io, daemon: *Daemon, detached: bool, comm
     }
 
     if (cmd_to_send == null) {
-        return error.CommandRequired;
+        return printError(io, "run requires a command (or pipe input via stdin)", .{});
     }
 
     const client_sock = ipc.connectSession(daemon.socket_path) catch |err| {
         std.log.err("session not ready: {s}", .{@errorName(err)});
-        return error.SessionNotReady;
+        return printError(io, "session not ready: {s}", .{@errorName(err)});
     };
     defer lib_posix.close(client_sock);
 
