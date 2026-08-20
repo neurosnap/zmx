@@ -87,6 +87,38 @@ load test_helper
   [ -z "$output" ]
 }
 
+@test "clear: cl alias works" {
+  "$ZMX" run test-clear-alias -d sleep 30
+  wait_for_session test-clear-alias
+
+  run "$ZMX" set test-clear-alias x=1 y=2
+  run "$ZMX" cl test-clear-alias
+  [ "$status" -eq 0 ]
+
+  run "$ZMX" get test-clear-alias
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "set: missing key-value pairs exits non-zero" {
+  "$ZMX" run test-nokv -d sleep 30
+  wait_for_session test-nokv
+
+  run "$ZMX" set test-nokv
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"key=value"* ]]
+}
+
+@test "get: missing key in existing session exits non-zero" {
+  "$ZMX" run test-getkey -d sleep 30
+  wait_for_session test-getkey
+
+  run "$ZMX" set test-getkey a=1
+  run "$ZMX" get test-getkey b
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not found"* ]]
+}
+
 @test "get: no session prints error" {
   run "$ZMX" get nonexistent
   [ "$status" -ne 0 ]
@@ -95,5 +127,7 @@ load test_helper
 
 @test "get: no args prints error" {
   run env -u ZMX_SESSION "$ZMX" get
-  [[ "$output" == *"SessionNameRequired"* ]]
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"session name required"* ]]
 }
+
