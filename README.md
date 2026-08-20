@@ -440,10 +440,10 @@ Each session gets its own unix socket file. The default location depends on your
 
 You can configure the permissions for the socket directory and log files using the following environment variables:
 
-- `ZMX_DIR_MODE` => sets the mode for the socket and log directories (octal, defaults to `0750`)
-- `ZMX_LOG_MODE` => sets the mode for the log files (octal, defaults to `0640`)
+- `ZMX_DIR_MODE` => sets the mode for the socket and log directories (octal, defaults to `0700`)
+- `ZMX_LOG_MODE` => sets the mode for the log files (octal, defaults to `0600`)
 
-This is particularly useful when running `zmx` as a system service with a shared group. For example, setting `ZMX_DIR_MODE=0770` and `ZMX_LOG_MODE=0660` allows group members to attach to the session.
+Session sockets are created with `ZMX_DIR_MODE` minus its execute bits, so they default to `0600` and follow the directory when you widen it. This is particularly useful when running `zmx` as a system service with a shared group. For example, setting `ZMX_DIR_MODE=0770` and `ZMX_LOG_MODE=0660` allows group members to attach to the session.
 
 ## debugging
 
