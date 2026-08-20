@@ -15,7 +15,7 @@ const builtin = @import("builtin");
 
 /// clientLoop sends ipc commands to its corresponding daemon.  It uses poll() as its non-blocking
 /// mechanism. It will send stdin to the daemon and receive stdout from the daemon.
-pub fn clientLoop(client_sock_fd: i32) !ClientResult {
+pub fn clientLoop(client_sock_fd: i32, env_str: []const u8) !ClientResult {
     std.log.info("client loop fd={d}", .{client_sock_fd});
     const gpa: std.mem.Allocator = blk: {
         if (builtin.mode == .Debug) {
@@ -40,6 +40,10 @@ pub fn clientLoop(client_sock_fd: i32) !ClientResult {
     // Buffer for outgoing socket writes
     var sock_write_buf = try std.ArrayList(u8).initCapacity(gpa, 4096);
     defer sock_write_buf.deinit(gpa);
+
+    if (env_str.len > 0) {
+        try ipc.appendMessage(gpa, &sock_write_buf, .EnvSet, env_str);
+    }
 
     // Send init message with terminal size (buffered)
     const size = ipc.getTerminalSize(lib_posix.STDOUT_FILENO);
@@ -473,9 +477,11 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
                         .LabelGet => try daemon.handleLabelGet(gpa, client),
                         .LabelSet => try daemon.handleLabelSet(gpa, client, msg.payload),
                         .LabelClear => try daemon.handleLabelClear(gpa, client),
+                        .EnvGet => try daemon.handleEnvGet(gpa, client),
+                        .EnvSet => try daemon.handleEnvSet(gpa, client, msg.payload),
                         .History => try daemon.handleHistory(gpa, client, &term, msg.payload),
                         .Run => try daemon.handleRun(gpa, io, client, msg.payload),
-                        .Ack, .TaskComplete, .LabelData => {},
+                        .Ack, .TaskComplete, .LabelData, .EnvData => {},
                         .Write => try daemon.handleWrite(gpa, client, msg.payload),
                         _ => std.log.warn(
                             "ignoring unknown IPC tag={d}",
@@ -530,11 +536,18 @@ pub const Client = struct {
     has_pending_output: bool = false,
     read_buf: ipc.SocketBuffer,
     write_buf: std.ArrayList(u8),
+    env_str: ?[]u8 = null,
 
-    pub fn deinit(self: *Client) void {
+    pub fn deinit(self: *Client, gpa: std.mem.Allocator) void {
         lib_posix.close(self.socket_fd);
         self.read_buf.deinit();
         self.write_buf.deinit(self.alloc);
+        if (self.env_str) |s| gpa.free(s);
+    }
+
+    fn setEnv(self: *Client, gpa: std.mem.Allocator, env_str: []const u8) !void {
+        if (self.env_str) |s| gpa.free(s);
+        self.env_str = if (env_str.len > 0) try gpa.dupe(u8, env_str) else null;
     }
 };
 
@@ -611,7 +624,7 @@ pub const Daemon = struct {
         self.running = false;
 
         for (self.clients.items) |client| {
-            client.deinit();
+            client.deinit(gpa);
             gpa.destroy(client);
         }
         self.clients.clearRetainingCapacity();
@@ -627,7 +640,7 @@ pub const Daemon = struct {
             );
             self.leader_client_fd = null;
         }
-        client.deinit();
+        client.deinit(gpa);
         gpa.destroy(client);
         _ = self.clients.orderedRemove(i);
         std.log.info("client disconnected fd={d} remaining={d}", .{ fd, self.clients.items.len });
@@ -810,6 +823,15 @@ pub const Daemon = struct {
         // so we can resize the pty and ghostty state.
         try ipc.appendMessage(gpa, &client.write_buf, .Resize, "");
         client.has_pending_output = true;
+    }
+
+    fn getLeaderClient(self: *Daemon) ?*Client {
+        for (self.clients.items) |client| {
+            if (self.leader_client_fd == client.socket_fd) {
+                return client;
+            }
+        }
+        return null;
     }
 
     const PTY_WRITE_BUF_MAX = 256 * 1024;
@@ -1013,7 +1035,7 @@ pub const Daemon = struct {
     pub fn handleDetachAll(self: *Daemon, gpa: std.mem.Allocator) void {
         std.log.info("detach all clients={d}", .{self.clients.items.len});
         for (self.clients.items) |client_to_close| {
-            client_to_close.deinit();
+            client_to_close.deinit(gpa);
             gpa.destroy(client_to_close);
         }
         self.clients.clearRetainingCapacity();
@@ -1255,6 +1277,21 @@ pub const Daemon = struct {
         );
     }
 
+    fn handleEnvGet(self: *Daemon, gpa: std.mem.Allocator, client: *Client) !void {
+        const leader_opt = self.getLeaderClient();
+        const payload = if (leader_opt) |leader| leader.env_str orelse "" else "";
+        try ipc.appendMessage(gpa, &client.write_buf, .EnvData, payload);
+        client.has_pending_output = true;
+    }
+
+    fn handleEnvSet(_: *Daemon, gpa: std.mem.Allocator, client: *Client, env_str: []const u8) !void {
+        std.log.info("handle env set payload={s}", .{env_str});
+        try client.setEnv(gpa, env_str);
+
+        try ipc.appendMessage(gpa, &client.write_buf, .Ack, "");
+        client.has_pending_output = true;
+    }
+
     fn handleLabelGet(self: *Daemon, gpa: std.mem.Allocator, client: *Client) !void {
         const out = try label.labelsToU8(gpa, self.labels);
         defer gpa.free(out);
@@ -1322,4 +1359,86 @@ test "send queues PTY input without changing leader" {
 
     try std.testing.expectEqual(@as(?i32, 42), daemon.leader_client_fd);
     try std.testing.expectEqualStrings("hello", daemon.pty_write_buf.items);
+}
+
+test "handleEnvGet returns leader client's environment variables including unsets" {
+    const alloc = std.testing.allocator;
+    var cfg = Cfg{
+        .socket_dir = "/tmp",
+        .log_dir = "/tmp",
+    };
+
+    var daemon = Daemon{
+        .cfg = &cfg,
+        .clients = .empty,
+        .session_name = "test",
+        .socket_path = try alloc.dupe(u8, ""),
+        .running = true,
+        .pid = 0,
+        .created_at = 0,
+    };
+    defer daemon.deinit(alloc);
+
+    const fds1 = try lib_posix.pipe2(.{});
+    defer lib_posix.close(fds1[1]);
+    var client1 = Client{
+        .alloc = alloc,
+        .socket_fd = fds1[0],
+        .read_buf = try ipc.SocketBuffer.init(alloc),
+        .write_buf = std.ArrayList(u8).empty,
+    };
+    defer client1.deinit(alloc);
+    try client1.setEnv(alloc, "DISPLAY=:1\nSSH_AUTH_SOCK=/tmp/ssh-1\nKITTY_LISTEN_ON=unix:/tmp/kitty-1\n-WINDOWID\n");
+
+    const fds2 = try lib_posix.pipe2(.{});
+    defer lib_posix.close(fds2[1]);
+    var client2 = Client{
+        .alloc = alloc,
+        .socket_fd = fds2[0],
+        .read_buf = try ipc.SocketBuffer.init(alloc),
+        .write_buf = std.ArrayList(u8).empty,
+    };
+    defer client2.deinit(alloc);
+    try client2.setEnv(alloc, "SSH_AUTH_SOCK=/tmp/ssh-2\nWINDOWID=12345\nKITTY_LISTEN_ON=unix:/tmp/kitty-2\n-DISPLAY\n");
+
+    const fds_req = try lib_posix.pipe2(.{});
+    defer lib_posix.close(fds_req[1]);
+    var client_req = Client{
+        .alloc = alloc,
+        .socket_fd = fds_req[0],
+        .read_buf = try ipc.SocketBuffer.init(alloc),
+        .write_buf = std.ArrayList(u8).empty,
+    };
+    defer client_req.deinit(alloc);
+
+    try daemon.clients.append(alloc, &client1);
+    try daemon.clients.append(alloc, &client2);
+
+    // No leader yet -> handleEnvGet returns empty string payload
+    try daemon.handleEnvGet(alloc, &client_req);
+    try std.testing.expect(client_req.write_buf.items.len > 0);
+    client_req.write_buf.clearRetainingCapacity();
+
+    // Set client1 as leader
+    try daemon.setLeader(alloc, &client1);
+    try std.testing.expectEqual(@as(?i32, fds1[0]), daemon.leader_client_fd);
+    try daemon.handleEnvGet(alloc, &client_req);
+    // Wire message: [Header][Payload]
+    const pay1 = client_req.write_buf.items[@sizeOf(ipc.Header)..];
+    try std.testing.expectEqualStrings("DISPLAY=:1\nSSH_AUTH_SOCK=/tmp/ssh-1\nKITTY_LISTEN_ON=unix:/tmp/kitty-1\n-WINDOWID\n", pay1);
+    client_req.write_buf.clearRetainingCapacity();
+
+    // Switch leader to client2
+    try daemon.setLeader(alloc, &client2);
+    try std.testing.expectEqual(@as(?i32, fds2[0]), daemon.leader_client_fd);
+    try daemon.handleEnvGet(alloc, &client_req);
+    const pay2 = client_req.write_buf.items[@sizeOf(ipc.Header)..];
+    try std.testing.expectEqualStrings("SSH_AUTH_SOCK=/tmp/ssh-2\nWINDOWID=12345\nKITTY_LISTEN_ON=unix:/tmp/kitty-2\n-DISPLAY\n", pay2);
+    client_req.write_buf.clearRetainingCapacity();
+
+    // Client2 updates env
+    try daemon.handleEnvSet(alloc, &client2, "DISPLAY=:99\n");
+    try daemon.handleEnvGet(alloc, &client_req);
+    const pay3 = client_req.write_buf.items[@sizeOf(ipc.Header)..];
+    try std.testing.expectEqualStrings("DISPLAY=:99\n", pay3);
 }

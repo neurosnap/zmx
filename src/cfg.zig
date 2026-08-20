@@ -12,6 +12,7 @@ log_dir: []const u8,
 max_scrollback_lines: usize = 2_000, // same default as tmux
 dir_mode: u32 = 0o750,
 log_mode: u32 = 0o640,
+tracked_envs: []const u8 = "DISPLAY,SSH_AUTH_SOCK,SSH_AGENT_PID,SSH_CONNECTION,WINDOWID,XAUTHORITY,KITTY_LISTEN_ON,KITTY_PID,KITTY_WINDOW_ID",
 
 pub fn init(alloc: std.mem.Allocator, io: std.Io) !Cfg {
     const socket_dir = try socketDir(alloc);

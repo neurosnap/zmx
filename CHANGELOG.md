@@ -12,6 +12,7 @@ Use spec: https://common-changelog.org/
 - Added `--labels` flag to attach command
   - e.g. `zmx attach --labels "project=pico env=prod" pico`
   - e.g. `zmx attach --labels "$(zmx get pico)" pico.sub`
+- New command `zmx print-env` which prints the leader's tracked env vars
 
 ### Fixed
 
