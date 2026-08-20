@@ -137,7 +137,7 @@ pub fn getSocketPath(
     return fname;
 }
 
-pub fn printSessionNameTooLong(io: std.Io, session_name: []const u8, socket_dir: []const u8) void {
+pub fn printSessionNameTooLong(io: std.Io, session_name: []const u8, socket_dir: []const u8) noreturn {
     var buf: [4096]u8 = undefined;
     var w = std.Io.File.stderr().writer(io, &buf);
     if (maxSessionNameLen(socket_dir)) |max_len| {
@@ -152,6 +152,7 @@ pub fn printSessionNameTooLong(io: std.Io, session_name: []const u8, socket_dir:
         ) catch {};
     }
     w.interface.flush() catch {};
+    std.process.exit(1);
 }
 
 /// Returns the maximum session name length for a given socket directory,
