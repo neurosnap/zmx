@@ -12,6 +12,7 @@ log_dir: []const u8,
 max_scrollback_lines: usize = 2_000, // same default as tmux
 dir_mode: u32 = 0o750,
 log_mode: u32 = 0o640,
+tracked_envs: []const u8 = "DISPLAY,SSH_AUTH_SOCK,SSH_AGENT_PID,SSH_CONNECTION,WINDOWID,XAUTHORITY,KITTY_LISTEN_ON,KITTY_PID,KITTY_WINDOW_ID",
 
 pub fn init(alloc: std.mem.Allocator, io: std.Io) !Cfg {
     const socket_dir = try socketDir(alloc);
@@ -84,6 +85,23 @@ pub fn mkdir(self: *Cfg, io: std.Io) !void {
     try mkdirAll(io, self.log_dir, log_perms);
 }
 
+pub fn getTrackedEnvs(self: *Cfg, gpa: std.mem.Allocator) ![][]const u8 {
+    const env_keys = lib_posix.getenv("ZMX_TRACK_ENV") orelse self.tracked_envs;
+
+    var env_arr: std.ArrayList([]const u8) = .empty;
+    errdefer env_arr.deinit(gpa);
+
+    var iter = std.mem.splitScalar(u8, env_keys, ',');
+    while (iter.next()) |entry| {
+        const cur = std.mem.trim(u8, entry, " \t\r\n");
+        if (cur.len > 0) {
+            try env_arr.append(gpa, cur);
+        }
+    }
+
+    return try env_arr.toOwnedSlice(gpa);
+}
+
 fn mkdirAll(io: std.Io, sub_dir_path: []const u8, permissions: std.Io.Dir.Permissions) !void {
     var it = std.fs.path.componentIterator(sub_dir_path);
     var component = it.last() orelse return error.BadPathName;
@@ -130,4 +148,27 @@ test "Cfg.init uses custom modes from env vars" {
 
     try std.testing.expectEqual(@as(u32, 0o770), cfg.dir_mode);
     try std.testing.expectEqual(@as(u32, 0o660), cfg.log_mode);
+}
+
+test "Cfg.getTrackedEnvs defaults and custom" {
+    const alloc = std.testing.allocator;
+
+    _ = cross.c.unsetenv("ZMX_TRACK_ENV");
+    var cfg = try Cfg.init(alloc, std.testing.io);
+    defer cfg.deinit(alloc);
+
+    const default_envs = try cfg.getTrackedEnvs(alloc);
+    defer alloc.free(default_envs);
+    try std.testing.expectEqual(9, default_envs.len);
+    try std.testing.expectEqualStrings("DISPLAY", default_envs[0]);
+
+    _ = cross.c.setenv("ZMX_TRACK_ENV", "FOO, BAR,BAZ", 1);
+    defer _ = cross.c.unsetenv("ZMX_TRACK_ENV");
+
+    const custom_envs = try cfg.getTrackedEnvs(alloc);
+    defer alloc.free(custom_envs);
+    try std.testing.expectEqual(3, custom_envs.len);
+    try std.testing.expectEqualStrings("FOO", custom_envs[0]);
+    try std.testing.expectEqualStrings("BAR", custom_envs[1]);
+    try std.testing.expectEqualStrings("BAZ", custom_envs[2]);
 }
