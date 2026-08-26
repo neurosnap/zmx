@@ -31,6 +31,16 @@ pub fn build(b: *std.Build) void {
     });
     exe_mod.addOptions("build_options", options);
 
+    // Public library module exposed to package consumers. It intentionally
+    // has neither build_options nor ghostty-vt so embedders can link the zmx
+    // session surface without pulling in terminal-emulator dependencies.
+    const zmx_mod = b.addModule("zmx", .{
+        .root_source_file = b.path("src/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
     const dep = b.dependency("ghostty", .{
         .target = target,
         .optimize = optimize,
@@ -63,9 +73,33 @@ pub fn build(b: *std.Build) void {
         run_step.dependOn(&run_cmd.step);
     }
 
-    // Test
+    // Dependency-free compile-time oracle: if the zmx module surface that
+    // embedders consume ever reaches ghostty-vt or build_options, this object
+    // fails to compile. It is intentionally an object, not a test target,
+    // because a test build also analyses dependency-coupled test blocks.
     {
+        const check_mod = b.createModule(.{
+            .root_source_file = b.path("src/lib_check.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        check_mod.addImport("zmx", zmx_mod);
+
+        const check_step = b.step(
+            "check-lib-deps",
+            "Verify the zmx module surface has no ghostty-vt/build_options dependency",
+        );
+        const check_obj = b.addObject(.{
+            .name = "lib_check",
+            .root_module = check_mod,
+        });
+        check_step.dependOn(&check_obj.step);
+
+        // Wired into the default test step so it cannot be skipped.
         const test_step = b.step("test", "Run unit tests");
+        test_step.dependOn(check_step);
+
         const test_module = b.addModule("test", .{
             .root_source_file = b.path("src/test.zig"),
             .target = target,
@@ -107,6 +141,13 @@ pub fn build(b: *std.Build) void {
         // by ZLS and automatically enable Build-On-Save.
         // If you copy this into your `build.zig`, make sure to rename 'foo'
         check.dependOn(&exe_check.step);
+    }
+
+    // Formatting gate
+    {
+        const fmt_step = b.step("fmt", "Check source formatting");
+        const fmt = b.addFmt(.{ .paths = &.{ "src", "build.zig" }, .check = true });
+        fmt_step.dependOn(&fmt.step);
     }
 
     // Release step - cross-compile to all targets from any host
