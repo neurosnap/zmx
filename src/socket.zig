@@ -98,7 +98,7 @@ pub fn sessionExists(io: std.Io, dir: std.Io.Dir, name: []const u8) !bool {
     return true;
 }
 
-pub fn createSocket(sesh: []const u8) !lib_posix.socket_t {
+pub fn createSocket(io: std.Io, dir: std.Io.Dir, sesh: []const u8, sesh_name: []const u8, socket_mode: u32) !lib_posix.socket_t {
     // AF.UNIX: Unix domain socket for local IPC with client processes
     // SOCK.STREAM: Reliable, bidirectional communication
     // SOCK.NONBLOCK: Set socket to non-blocking
@@ -111,6 +111,13 @@ pub fn createSocket(sesh: []const u8) !lib_posix.socket_t {
 
     var unix_addr = try lib_posix.initUnix(sesh);
     try lib_posix.bind(fd, &unix_addr.any, unix_addr.getOsSockLen());
+    try std.Io.Dir.setFilePermissions(
+        dir,
+        io,
+        sesh_name,
+        std.Io.File.Permissions.fromMode(@intCast(socket_mode)),
+        .{ .follow_symlinks = false },
+    );
     try lib_posix.listen(fd, 128);
     return fd;
 }
