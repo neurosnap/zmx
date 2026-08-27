@@ -4,6 +4,12 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
+## v0.7.1 - 2026-08-27
+
+### Fixed
+
+- Prevent `v0.6.0` daemons from hanging when connecting from `v0.7.0` clients
+
 ## v0.7.0 - 2026-07-23
 
 ### Added

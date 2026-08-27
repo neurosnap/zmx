@@ -34,8 +34,8 @@ NEW_VERSION="${PICI_TAG#v}"
 
 zmx run semver sed -i "s/\.version = \"[^\"]*\"/.version = \"$NEW_VERSION\"/" build.zig.zon && cat build.zig.zon
 zmx run update-readme sed -i "s/zmx-[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*/zmx-$NEW_VERSION/g" README.md
-zmx run build-release -d docker run --rm -t zig-zmx:latest zig build release
-zmx run brew -d bash gen-brew.sh "$NEW_VERSION"
+zmx run build-release docker run --rm -t -v "$(pwd)":/app zig-zmx:latest zig build release
+zmx run brew bash gen-brew.sh "$NEW_VERSION"
 
 echo "distributing bins"
 zmx run upload docker run --rm \
