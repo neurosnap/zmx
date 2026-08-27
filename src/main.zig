@@ -427,7 +427,7 @@ fn help(io: std.Io) !void {
         \\  [p]rint <name> <text...>                 Inject text into session display
         \\  [wr]ite <name> <file_path>               Write stdin to file_path through the session
         \\  [d]etach                                 Detach all clients (ctrl+\\ for current client)
-        \\  [l]ist|ls [--short|--where k=v]          List active sessions
+        \\  [l]ist|ls [--short]                      List active sessions
         \\  [g]et <name>                             Get session labels
         \\  set <name> k=v ...                     Set session labels (k= to remove)
         \\  [cl]ear <name>                           Clear all session labels

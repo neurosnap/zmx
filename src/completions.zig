@@ -164,7 +164,6 @@ const fish_completions =
     \\complete -c zmx -n "__fish_seen_subcommand_from r run" -s d -d 'Detach from the calling terminal; use `wait` to track its status'
     \\complete -c zmx -n "__fish_seen_subcommand_from r run" -l fish -d 'Required when the session runs fish shell'
     \\complete -c zmx -n "__fish_seen_subcommand_from l list" -l short -d 'Short output'
-    \\complete -c zmx -n "__fish_seen_subcommand_from l list" -l where -d 'Filter by label (key=value)' -r
     \\complete -c zmx -n "__fish_seen_subcommand_from k kill" -l force -d 'Force kill'
     \\complete -c zmx -n "__fish_seen_subcommand_from hi history" -l vt -d 'History format for escape sequences'
     \\complete -c zmx -n "__fish_seen_subcommand_from hi history" -l html -d 'History format for escape sequences'
