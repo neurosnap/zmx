@@ -27,6 +27,12 @@ Use spec: https://common-changelog.org/
 - `ZMX_TASK_COMPLETED` task marker now includes a 4ch hex id to ensure no collisions from nested task runs
   - `ZMX_TASK_COMPLETED:{id}:0`
 
+## v0.7.1 - 2026-08-27
+
+### Fixed
+
+- Prevent `v0.6.0` daemons from hanging when connecting from `v0.7.0` clients
+
 ## v0.7.0 - 2026-07-23
 
 ### Added
