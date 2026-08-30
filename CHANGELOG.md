@@ -19,6 +19,8 @@ Use spec: https://common-changelog.org/
 - Clear screen when switching sessions to prevent term state corruption
 - Stray NUL byte in the OSC 7 sequence replayed on attach
 - The OSC 7 cwd is now decoded before the chdir, so a new session can start in a directory whose name needed percent-encoding
+- CLI commands now respond with correct error exist codes
+- Various re-attach handling bugs
 
 ### Changed
 
