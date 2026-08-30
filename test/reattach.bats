@@ -48,20 +48,19 @@ count() { "$ZMX" history "$1" | grep -o "$2" | wc -l | tr -d ' '; }
   fake_attach test-da2 24 80 5 &
   wait_for_output test-da2 "DA1_TIMEOUT" 5
   kill %1 2>/dev/null || true
-  wait
 }
 
-@test "re-attach at the same size still delivers SIGWINCH" {
+@test "re-attach at the same size delivers SIGWINCH to foreground process" {
   # The trap prints a word assembled at runtime so it can't be confused with
   # the echoed command line in history.
   "$ZMX" run test-winch -d bash -c 'trap "printf \"GOT_%s\n\" WINCH" WINCH; echo READY; while :; do sleep 0.1; done'
   wait_for_output test-winch "READY"
 
-  fake_attach test-winch 24 80       # first attach: sets the size, no bounce
+  fake_attach test-winch 24 80       # first attach: sets the initial size
   sleep 0.5
   before=$(count test-winch GOT_WINCH)
 
-  fake_attach test-winch 24 80       # same size again
+  fake_attach test-winch 24 80       # re-attach at the same size
   for _ in $(seq 30); do
     after=$(count test-winch GOT_WINCH)
     [ "$after" -gt "$before" ] && break

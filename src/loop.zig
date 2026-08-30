@@ -469,7 +469,7 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
                         .Input => try daemon.handleInput(gpa, client, msg.payload),
                         .Send => daemon.handleSend(gpa, msg.payload),
                         .Output => try daemon.handleOutput(gpa, msg.payload, &term, &vt_stream),
-                        .Init => try daemon.handleInit(gpa, io, client, pty_fd, &term, msg.payload),
+                        .Init => try daemon.handleInit(gpa, client, pty_fd, &term, msg.payload),
                         .Switch => try daemon.handleSwitch(gpa, msg.payload),
                         .Resize => try daemon.handleResize(gpa, client, pty_fd, &term, msg.payload),
                         .Detach => {
@@ -649,22 +649,6 @@ pub const Daemon = struct {
         term.flags.shell_redraws_prompt = .false;
         defer term.flags.shell_redraws_prompt = saved;
         try term.resize(gpa, .{ .cols = cols, .rows = rows });
-    }
-
-    /// If the PTY is already at `ws`, briefly shrink it by one row so the
-    /// program receives a SIGWINCH and redraws (setting an identical size
-    /// raises no signal). Rows rather than cols so nothing re-wraps. The pause
-    /// lets the program read the intermediate size before the caller restores
-    /// it; programs react in well under 1ms, 5ms is margin.
-    fn forceSigwinchIfUnchanged(io: std.Io, pty_fd: i32, ws: cross.c.struct_winsize) void {
-        var cur: cross.c.struct_winsize = undefined;
-        if (cross.c.ioctl(pty_fd, cross.c.TIOCGWINSZ, &cur) != 0) return;
-        if (cur.ws_row != ws.ws_row or cur.ws_col != ws.ws_col or
-            cur.ws_xpixel != ws.ws_xpixel or cur.ws_ypixel != ws.ws_ypixel) return;
-        if (cur.ws_row < 2) return;
-        cur.ws_row -= 1;
-        _ = cross.c.ioctl(pty_fd, cross.c.TIOCSWINSZ, &cur);
-        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(5), .real) catch {};
     }
 
     /// True while a client that sent .Init (a real `zmx attach`) is connected.
@@ -966,7 +950,6 @@ pub const Daemon = struct {
     pub fn handleInit(
         self: *Daemon,
         gpa: std.mem.Allocator,
-        io: std.Io,
         client: *Client,
         pty_fd: i32,
         term: *ghostty_vt.Terminal,
@@ -1020,14 +1003,18 @@ pub const Daemon = struct {
         // only resize if leader
         if (is_leader) {
             var ws = resize.winsize();
-            // On re-attach the program should redraw, since what's on screen
-            // is now our replay rather than what it last drew. A size change
-            // makes it do that via SIGWINCH, but the kernel sends none when the
-            // size is unchanged, so force one in that case.
-            if (self.has_pty_output and self.has_had_client) {
-                forceSigwinchIfUnchanged(io, pty_fd, ws);
-            }
             _ = cross.c.ioctl(pty_fd, cross.c.TIOCSWINSZ, &ws);
+
+            // On re-attach, deliver SIGWINCH to the foreground process group so
+            // incremental renderers (Ink, Claude Code, etc.) know to repaint.
+            // If the size changed, TIOCSWINSZ above already sent SIGWINCH; if the size
+            // was unchanged, the kernel suppressed it, so signal the pgrp explicitly.
+            if (self.has_pty_output and self.has_had_client) {
+                var pgrp: lib_posix.pid_t = 0;
+                if (cross.c.ioctl(pty_fd, cross.c.TIOCGPGRP, &pgrp) == 0 and pgrp > 0) {
+                    lib_posix.kill(-pgrp, .WINCH) catch {};
+                }
+            }
 
             // Mark that we've had a client init, so subsequent clients get terminal state
             self.has_had_client = true;

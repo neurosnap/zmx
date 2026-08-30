@@ -26,7 +26,7 @@ else switch (native_os) {
 
 const E = system.E;
 const PATH_MAX = system.PATH_MAX;
-const pid_t = system.pid_t;
+pub const pid_t = system.pid_t;
 const lfs64_abi = native_os == .linux and builtin.link_libc and (builtin.abi.isGnu() or builtin.abi.isAndroid());
 const uid_t = system.uid_t;
 const mode_t = system.mode_t;
