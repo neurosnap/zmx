@@ -4,6 +4,8 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
+## v0.8.0 - 2026-09-03
+
 ### Added
 
 - We now track cwd changes via OSC7
