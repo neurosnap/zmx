@@ -214,6 +214,15 @@ pub fn clientLoop(client_sock_fd: i32, env_str: []const u8) !ClientResult {
     }
 }
 
+fn initTerminal(gpa: std.mem.Allocator, io: std.Io, size: ipc.Resize, cfg: *const Cfg) !ghostty_vt.Terminal {
+    return ghostty_vt.Terminal.init(io, gpa, .{
+        .cols = size.cols,
+        .rows = size.rows,
+        .max_scrollback_lines = cfg.max_scrollback_lines,
+        .max_scrollback_bytes = null, // Let the line limit control scrollback.
+    });
+}
+
 /// dameonLoop is what the daemon runs to send and receive ipc commands from its corresponding
 /// clients.  It uses poll() as its non-blocking mechanism.
 fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_fd: lib_posix.socket_t, pty_fd: i32) !void {
@@ -225,11 +234,7 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
     defer poll_fds.deinit(gpa);
 
     const init_size = ipc.getTerminalSize(pty_fd);
-    var term = try ghostty_vt.Terminal.init(io, gpa, .{
-        .cols = init_size.cols,
-        .rows = init_size.rows,
-        .max_scrollback_lines = daemon.cfg.max_scrollback_lines,
-    });
+    var term = try initTerminal(gpa, io, init_size, daemon.cfg);
     defer term.deinit(gpa);
     var vt_stream = term.vtStream();
     defer vt_stream.deinit();
@@ -1353,6 +1358,31 @@ pub const Daemon = struct {
         client.has_pending_output = true;
     }
 };
+
+test "terminal retains the configured scrollback without the default byte cap" {
+    const alloc = std.testing.allocator;
+    const cfg = Cfg{ .socket_dir = "", .log_dir = "" };
+    var term = try initTerminal(alloc, std.testing.io, .{ .cols = 80, .rows = 24 }, &cfg);
+    defer term.deinit(alloc);
+    var stream = term.vtStream();
+    defer stream.deinit();
+
+    stream.nextSlice("first line\r\n");
+    for (1..cfg.max_scrollback_lines) |_| stream.nextSlice("more output\r\n");
+
+    const history = util.serializeTerminal(alloc, &term, .plain) orelse return error.TestUnexpectedNull;
+    defer alloc.free(history);
+    try std.testing.expect(std.mem.startsWith(u8, history, "first line\n"));
+
+    // Exceed the limit comfortably because Ghostty prunes whole pages.
+    for (0..cfg.max_scrollback_lines) |_| stream.nextSlice("more output\r\n");
+    stream.nextSlice("latest line\r\n");
+
+    const pruned_history = util.serializeTerminal(alloc, &term, .plain) orelse return error.TestUnexpectedNull;
+    defer alloc.free(pruned_history);
+    try std.testing.expect(std.mem.indexOf(u8, pruned_history, "first line") == null);
+    try std.testing.expect(std.mem.indexOf(u8, pruned_history, "latest line") != null);
+}
 
 fn testDaemon() Daemon {
     return .{
