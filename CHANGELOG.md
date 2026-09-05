@@ -4,6 +4,12 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
+## v0.8.1 - 2026-09-05
+
+### Fixed
+
+- Make ghostty's max_scrollback_lines canonical source of scrollback buffer
+
 ## v0.8.0 - 2026-09-03
 
 ### Added

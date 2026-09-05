@@ -34,10 +34,10 @@
 
 ### binaries
 
-- https://zmx.sh/a/zmx-0.8.0-linux-aarch64.tar.gz
-- https://zmx.sh/a/zmx-0.8.0-linux-x86_64.tar.gz
-- https://zmx.sh/a/zmx-0.8.0-macos-aarch64.tar.gz
-- https://zmx.sh/a/zmx-0.8.0-macos-x86_64.tar.gz
+- https://zmx.sh/a/zmx-0.8.1-linux-aarch64.tar.gz
+- https://zmx.sh/a/zmx-0.8.1-linux-x86_64.tar.gz
+- https://zmx.sh/a/zmx-0.8.1-macos-aarch64.tar.gz
+- https://zmx.sh/a/zmx-0.8.1-macos-x86_64.tar.gz
 
 ### homebrew
 
