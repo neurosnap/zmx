@@ -9,7 +9,7 @@ const cross = @import("cross.zig");
 
 socket_dir: []const u8,
 log_dir: []const u8,
-max_scrollback_lines: usize = 2_000, // same default as tmux
+max_scrollback_lines: usize = 10_000,
 dir_mode: u32 = 0o750,
 log_mode: u32 = 0o640,
 tracked_envs: []const u8 = "DISPLAY,SSH_AUTH_SOCK,SSH_AGENT_PID,SSH_CONNECTION,WINDOWID,XAUTHORITY,KITTY_LISTEN_ON,KITTY_PID,KITTY_WINDOW_ID",
