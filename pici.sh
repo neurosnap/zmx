@@ -8,9 +8,10 @@ BRANCH="${PICI_BRANCH:-tmp}"
 echo "running ci event=${EVENT} session=${ZMX_SESSION_PREFIX}"
 
 zmx run build docker build -t zig-zmx .
+zmx run build-release docker run --rm -v "$(pwd):/app" -t zig-zmx:latest zig build release
+
 zmx run fmt -d docker run --rm -v "$(pwd):/app" -t zig-zmx:latest zig fmt --check .
 zmx run test -d docker run --rm -v "$(pwd):/app" -t zig-zmx:latest zig build test
-zmx run bin -d docker run --rm -v "$(pwd):/app" -t zig-zmx:latest zig build
 zmx run integration -d docker run --rm -v "$(pwd):/app" -t zig-zmx:latest bats --jobs 1 test/*.bats
 zmx wait "*"
 
@@ -33,9 +34,6 @@ fi
 TAG="${PICI_TAG}"
 NEW_VERSION="${PICI_TAG#v}"
 
-zmx run semver sed -i "s/\.version = \"[^\"]*\"/.version = \"$NEW_VERSION\"/" build.zig.zon && cat build.zig.zon
-zmx run update-readme sed -i "s/zmx-[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*/zmx-$NEW_VERSION/g" README.md
-zmx run build-release docker run --rm -v "$(pwd):/app" -t zig-zmx:latest zig build release
 zmx run brew bash gen-brew.sh "$NEW_VERSION"
 
 echo "distributing bins"
