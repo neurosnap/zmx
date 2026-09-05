@@ -1222,6 +1222,7 @@ pub const Daemon = struct {
 
     fn setPwd(self: *Daemon, term: *ghostty_vt.Terminal) void {
         const pwd = term.getPwd() orelse return;
+        if (std.mem.eql(u8, self.cwd, pwd)) return;
         self.setCwd(pwd);
     }
 

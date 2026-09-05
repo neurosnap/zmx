@@ -74,3 +74,30 @@ osc7_session() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"/zmx spaced dir"* ]]
 }
+
+@test "unchanged OSC 7 is not logged again after output or queries" {
+  local name=test-cwd-unchanged uri=file://localhost/tmp
+  "$ZMX" run "$name" -d sh -c \
+    'printf "\033]7;file://localhost/tmp\007cwd-ready\n"; cat'
+  wait_for_output "$name" cwd-ready
+  wait_for_cwd "$name" "cwd=$uri"
+
+  "$ZMX" send "$name" $'ordinary-output\n'
+  wait_for_output "$name" ordinary-output
+  printf '\033]7;%s\007repeated-cwd\n' "$uri" | "$ZMX" print "$name"
+  wait_for_output "$name" repeated-cwd
+  wait_for_cwd "$name" "cwd=$uri"
+
+  [ "$(grep -Fc "set cwd=$uri path=/tmp" "$ZMX_DIR/logs/$name.log")" -eq 1 ]
+}
+
+@test "OSC 7 tracks changed directories and returning to a previous directory" {
+  local name=test-cwd-changes uri
+  "$ZMX" run "$name" -d cat
+  wait_for_session "$name"
+
+  for uri in file://localhost/tmp/a%20b file://some-remote-box/home/me file://localhost/tmp/a%20b; do
+    printf '\033]7;%s\007' "$uri" | "$ZMX" print "$name"
+    wait_for_cwd "$name" "cwd=$uri"
+  done
+}
