@@ -41,6 +41,7 @@ env:
     .github/workflows/assert-no-drift.yml
     .github/downstream/0001-cast-log_mode-to-mode_t-for-macos.patch
     .github/downstream/0002-use-portable-sig-type-in-wake-handler.patch
+    .github/downstream/0003-feat-let-a-client-claim-leadership-without-sending-i.patch
   # How far behind upstream HEAD the fork's base may fall before the sync is
   # presumed broken. A daily sync should keep this at 0–1 days.
   MAX_AGE_DAYS: "4"

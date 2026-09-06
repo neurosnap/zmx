@@ -1,0 +1,535 @@
+From 10e72df09f311cad0be6d83ec4fb00e77f9f4466 Mon Sep 17 00:00:00 2001
+From: Ethan Lee <ethantlee21@gmail.com>
+Date: Sun, 6 Sep 2026 15:25:40 -0400
+Subject: [PATCH] feat: let a client claim leadership without sending input
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+zmx hands leadership to any client that sends real user input, which is the
+right rule for a human at a keyboard. It leaves no way for a GUI frontend
+showing one session in two panes to say "size the pty from this one" when the
+user clicks or focuses it: the only lever is typing, and the keystroke would
+reach their running program.
+
+Adds an IPC Claim tag and an APC sequence the client excises from stdin. APC
+because no keyboard produces one and terminals discard unknown APC, so a stray
+sequence reaching a program that predates this is inert. The Tag enum is
+non-exhaustive by design, so an old daemon ignores the message.
+
+The filter is deliberately not shaped like isCtrlBackslash, which returns a
+bool and lets its caller drop the entire read. A detach key is a keystroke and
+arrives alone; a claim is written programmatically and can land in the same
+4096-byte read as whatever the user is typing, so an all-or-nothing match would
+swallow their keystrokes. ClaimFilter excises occurrences and forwards the rest.
+
+It also carries a partial sequence between reads, since a pty write can be
+split anywhere. The carry has a floor of three bytes: a trailing one- or
+two-byte partial is a bare ESC or ESC `_`, and Escape is pressed constantly in
+a TUI — holding it back until the user's next keystroke would be visible input
+lag. Three bytes is already a sequence no keyboard produces. The cost is a
+claim split within its first two bytes being dropped rather than rejoined,
+which needs the split to land exactly there and which the next keystroke
+recovers from anyway.
+
+Also fixes handleDetachAll leaving a stale leader_client_fd. closeClient nils
+it per client, but that path clears the list wholesale, so the next client to
+attach found it non-null: handleInit neither made it leader nor resized the
+pty, and the session stayed at the detached client's size until someone typed.
+Worse if the kernel recycled the fd number, which makes an unrelated client
+leader by coincidence.
+
+test/claim_leader.py drives two real PTYs at different sizes to prove the two
+properties the in-process tests cannot reach: a second client attaching does
+not resize the pty, and a claim does — with no keystroke reaching the program.
+---
+ src/ipc.zig          |   3 +
+ src/loop.zig         | 119 ++++++++++++++++++++++++++++++++-
+ src/util.zig         | 155 +++++++++++++++++++++++++++++++++++++++++++
+ test/claim_leader.py |  97 +++++++++++++++++++++++++++
+ test/leader.bats     |  20 ++++++
+ 5 files changed, 393 insertions(+), 1 deletion(-)
+ create mode 100644 test/claim_leader.py
+ create mode 100644 test/leader.bats
+
+diff --git a/src/ipc.zig b/src/ipc.zig
+index 5cd3eeb..700219b 100644
+--- a/src/ipc.zig
++++ b/src/ipc.zig
+@@ -23,6 +23,9 @@ pub const Tag = enum(u8) {
+     LabelClear = 16,
+     LabelData = 17,
+     Send = 18,
++    /// A client asking to become the session's leader without sending input
++    /// (see util.ClaimFilter).
++    Claim = 19,
+     // Non-exhaustive: this enum comes off the wire via bytesToValue and
+     // @enumFromInt, so out-of-range values are representable
+     // rather than UB. Switches must handle `_` (unknown tag).
+diff --git a/src/loop.zig b/src/loop.zig
+index 7785395..15ea850 100644
+--- a/src/loop.zig
++++ b/src/loop.zig
+@@ -64,6 +64,8 @@ pub fn clientLoop(client_sock_fd: i32) !ClientResult {
+     defer _ = lib_posix.fcntl(stdin_fd, lib_posix.F.SETFL, stdin_orig_flags) catch {};
+ 
+     const detach_key_disabled = util.isDetachKeyDisabled();
++    // Outside the loop: it carries a partial sequence between reads.
++    var claim_filter: util.ClaimFilter = .{};
+ 
+     while (true) {
+         poll_fds.clearRetainingCapacity();
+@@ -119,7 +121,18 @@ pub fn clientLoop(client_sock_fd: i32) !ClientResult {
+                         std.log.info("detach key detected", .{});
+                         try ipc.appendMessage(gpa, &sock_write_buf, .Detach, "");
+                     } else {
+-                        try ipc.appendMessage(gpa, &sock_write_buf, .Input, buf[0..n]);
++                        // Excise any leadership claims and forward the rest.
++                        // Unlike the detach key this cannot drop the whole
++                        // read: a claim is written programmatically and may
++                        // share a read with the user's keystrokes.
++                        const filtered = claim_filter.feed(buf[0..n]);
++                        for (0..filtered.claims) |_| {
++                            std.log.info("leadership claim detected", .{});
++                            try ipc.appendMessage(gpa, &sock_write_buf, .Claim, "");
++                        }
++                        if (filtered.forward.len > 0) {
++                            try ipc.appendMessage(gpa, &sock_write_buf, .Input, filtered.forward);
++                        }
+                     }
+                 } else {
+                     std.log.info("eof stdin", .{});
+@@ -458,6 +471,7 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
+                         .Init => try daemon.handleInit(gpa, client, pty_fd, &term, msg.payload),
+                         .Switch => try daemon.handleSwitch(gpa, msg.payload),
+                         .Resize => try daemon.handleResize(gpa, client, pty_fd, &term, msg.payload),
++                        .Claim => try daemon.handleClaim(gpa, client),
+                         .Detach => {
+                             daemon.handleDetach(gpa, client, i);
+                             break :clients_loop;
+@@ -857,6 +871,18 @@ pub const Daemon = struct {
+         }
+     }
+ 
++    /// Make this client the leader without it having to send input.
++    ///
++    /// `handleInput` already switches leadership on any real keystroke, which
++    /// is what a human at a keyboard does. A GUI frontend showing one session
++    /// in two panes needs to say "size the pty from this one" when the user
++    /// merely clicks or focuses it — and it cannot do that by typing, because
++    /// the keystroke would reach the running program.
++    pub fn handleClaim(self: *Daemon, gpa: std.mem.Allocator, client: *Client) !void {
++        if (self.leader_client_fd == client.socket_fd) return;
++        try self.setLeader(gpa, client);
++    }
++
+     /// Queue input from `zmx send` without changing interactive client leadership.
+     pub fn handleSend(self: *Daemon, gpa: std.mem.Allocator, payload: []const u8) void {
+         self.queuePtyInput(gpa, payload);
+@@ -1014,6 +1040,14 @@ pub const Daemon = struct {
+             gpa.destroy(client_to_close);
+         }
+         self.clients.clearRetainingCapacity();
++        // Drop the leader with them. closeClient does this per client, but
++        // this path clears the list wholesale and used to leave a dangling fd
++        // behind: the next client to attach found leader_client_fd non-null,
++        // so handleInit neither made it leader nor resized the pty, and the
++        // session stayed stuck at the detached client's size until someone
++        // typed. Worse if the kernel recycled that fd number, which makes an
++        // unrelated client leader by coincidence.
++        self.leader_client_fd = null;
+     }
+ 
+     pub fn handleKill(self: *Daemon, gpa: std.mem.Allocator, io: std.Io) void {
+@@ -1257,6 +1291,89 @@ pub const Daemon = struct {
+     }
+ };
+ 
++test "claim makes a non-leader client the leader" {
++    const alloc = std.testing.allocator;
++    var daemon = Daemon{
++        .cfg = undefined,
++        .clients = .empty,
++        .leader_client_fd = 42,
++        .session_name = "test",
++        .socket_path = "",
++        .running = true,
++        .pid = 0,
++        .created_at = 0,
++    };
++    // Built by hand rather than through Client.deinit's teardown: that closes
++    // socket_fd, and this fd number is a stand-in, not a real socket.
++    var client = Client{
++        .alloc = alloc,
++        .socket_fd = 7,
++        .read_buf = try ipc.SocketBuffer.init(alloc),
++        .write_buf = .empty,
++    };
++    defer client.read_buf.deinit();
++    defer client.write_buf.deinit(alloc);
++
++    try daemon.handleClaim(alloc, &client);
++
++    try std.testing.expectEqual(@as(?i32, 7), daemon.leader_client_fd);
++    // setLeader asks the new leader for its size, which is what resizes the
++    // pty — a claim that did not would leave the session at the old geometry.
++    try std.testing.expect(client.write_buf.items.len > 0);
++    try std.testing.expect(client.has_pending_output);
++}
++
++test "claim by the existing leader is a no-op" {
++    const alloc = std.testing.allocator;
++    var daemon = Daemon{
++        .cfg = undefined,
++        .clients = .empty,
++        .leader_client_fd = 7,
++        .session_name = "test",
++        .socket_path = "",
++        .running = true,
++        .pid = 0,
++        .created_at = 0,
++    };
++    // Built by hand rather than through Client.deinit's teardown: that closes
++    // socket_fd, and this fd number is a stand-in, not a real socket.
++    var client = Client{
++        .alloc = alloc,
++        .socket_fd = 7,
++        .read_buf = try ipc.SocketBuffer.init(alloc),
++        .write_buf = .empty,
++    };
++    defer client.read_buf.deinit();
++    defer client.write_buf.deinit(alloc);
++
++    try daemon.handleClaim(alloc, &client);
++
++    try std.testing.expectEqual(@as(?i32, 7), daemon.leader_client_fd);
++    // No size request: re-asking a leader for a size it already set would
++    // make every focus change a redundant pty resize and TUI redraw.
++    try std.testing.expectEqual(@as(usize, 0), client.write_buf.items.len);
++}
++
++test "detach all clears the leader" {
++    const alloc = std.testing.allocator;
++    var daemon = Daemon{
++        .cfg = undefined,
++        .clients = .empty,
++        .leader_client_fd = 42,
++        .session_name = "test",
++        .socket_path = "",
++        .running = true,
++        .pid = 0,
++        .created_at = 0,
++    };
++
++    daemon.handleDetachAll(alloc);
++
++    // A stale fd here means the next client to attach is neither made leader
++    // nor allowed to resize, stranding the session at the old size.
++    try std.testing.expectEqual(@as(?i32, null), daemon.leader_client_fd);
++}
++
+ test "send queues PTY input without changing leader" {
+     const alloc = std.testing.allocator;
+     var daemon = Daemon{
+diff --git a/src/util.zig b/src/util.zig
+index fcc0213..ba012db 100644
+--- a/src/util.zig
++++ b/src/util.zig
+@@ -418,6 +418,89 @@ pub fn stripAnsi(alloc: std.mem.Allocator, data: []const u8) ![]const u8 {
+ }
+ 
+ /// Dcts Ctrl+\ across raw, Kitty CSI u, and xterm modifyOtherKeys encodings.
++/// Filters Macterm's leadership-claim sequence out of a client's stdin.
++///
++/// zmx only ever hands leadership to a client that sends real user input
++/// (`isUserInput`), which is the right rule for a human at a keyboard but
++/// leaves a GUI frontend showing one session in two panes no way to say "size
++/// the pty from this one" without typing into the user's program. The claim is
++/// an APC string — no keyboard produces one, and terminals discard unknown APC
++/// — so it is inert if it ever reaches a program that predates this.
++///
++/// Deliberately NOT shaped like `isCtrlBackslash`, which returns a bool and
++/// lets its caller drop the whole read. A detach key is a keystroke and
++/// arrives alone; a claim is written programmatically and can land in the same
++/// 4096-byte read as whatever the user is typing, so an all-or-nothing match
++/// would swallow their keystrokes. This excises occurrences and forwards the
++/// rest.
++///
++/// It also carries a partial sequence across reads: a pty write can be split
++/// anywhere, so a claim can arrive as two halves. The carry is bounded by the
++/// sequence length, so a stream of ESCs cannot grow it.
++pub const ClaimFilter = struct {
++    pub const sequence = "\x1b_zmx;claim\x1b\\";
++    /// Matches the client's stdin read buffer; `feed` asserts on more.
++    pub const max_input = 4096;
++    /// Shortest trailing partial sequence worth holding back for the next
++    /// read. Anything shorter is forwarded immediately, because a partial of
++    /// 1-2 bytes is a bare ESC or ESC `_` — Escape is a key people press
++    /// constantly in a TUI, and delaying it until their NEXT keystroke would
++    /// be a visible input lag. Three bytes (ESC `_` `z`) is already a sequence
++    /// no keyboard produces. The cost is a claim split within its first two
++    /// bytes being dropped rather than rejoined; that needs the split to land
++    /// exactly there, and the user's next keystroke re-establishes leadership
++    /// anyway.
++    pub const min_carry = 3;
++
++    carry: [sequence.len - 1]u8 = undefined,
++    carry_len: usize = 0,
++    work: [max_input + sequence.len - 1]u8 = undefined,
++
++    pub const Result = struct {
++        /// How many complete claim sequences were consumed.
++        claims: usize,
++        /// The bytes to forward to the daemon as Input. Borrowed from the
++        /// filter and valid until the next `feed`.
++        forward: []const u8,
++    };
++
++    pub fn feed(self: *ClaimFilter, input: []const u8) Result {
++        std.debug.assert(input.len <= max_input);
++
++        // Carried partial prefix first, so a split sequence rejoins.
++        @memcpy(self.work[0..self.carry_len], self.carry[0..self.carry_len]);
++        @memcpy(self.work[self.carry_len..][0..input.len], input);
++        const buf = self.work[0 .. self.carry_len + input.len];
++        self.carry_len = 0;
++
++        var claims: usize = 0;
++        var out: usize = 0;
++        var i: usize = 0;
++        while (i < buf.len) {
++            if (buf.len - i >= sequence.len and
++                std.mem.eql(u8, buf[i..][0..sequence.len], sequence))
++            {
++                claims += 1;
++                i += sequence.len;
++                continue;
++            }
++            // A proper prefix of the sequence running to the end of the buffer
++            // may be the front half of a claim split across reads: hold it.
++            if (buf.len - i >= min_carry and buf.len - i < sequence.len and
++                std.mem.eql(u8, buf[i..], sequence[0 .. buf.len - i]))
++            {
++                self.carry_len = buf.len - i;
++                @memcpy(self.carry[0..self.carry_len], buf[i..]);
++                break;
++            }
++            buf[out] = buf[i];
++            out += 1;
++            i += 1;
++        }
++        return .{ .claims = claims, .forward = buf[0..out] };
++    }
++};
++
+ pub fn isCtrlBackslash(buf: []const u8) bool {
+     if (buf.len == 0) return false;
+     return buf[0] == 0x1C or isKeyPressed(buf, 0x5c, 0b100) or isModifyOtherKey(buf, 0x5c, 0b100);
+@@ -1776,3 +1859,75 @@ test "stripAnsi: only escape sequences" {
+     defer alloc.free(result);
+     try testing.expectEqualStrings("", result);
+ }
++
++test "ClaimFilter: a lone claim is consumed and forwards nothing" {
++    var f: ClaimFilter = .{};
++    const r = f.feed(ClaimFilter.sequence);
++    try testing.expectEqual(@as(usize, 1), r.claims);
++    try testing.expectEqualStrings("", r.forward);
++}
++
++test "ClaimFilter: plain input passes through untouched" {
++    var f: ClaimFilter = .{};
++    const r = f.feed("ls -la\r");
++    try testing.expectEqual(@as(usize, 0), r.claims);
++    try testing.expectEqualStrings("ls -la\r", r.forward);
++}
++
++test "ClaimFilter: a claim sharing a read with keystrokes keeps them" {
++    // The bug the all-or-nothing isCtrlBackslash shape would have: a claim is
++    // written programmatically and can land in the same read as typing.
++    var f: ClaimFilter = .{};
++    const r = f.feed("abc" ++ ClaimFilter.sequence ++ "def");
++    try testing.expectEqual(@as(usize, 1), r.claims);
++    try testing.expectEqualStrings("abcdef", r.forward);
++}
++
++test "ClaimFilter: several claims in one read are all counted" {
++    var f: ClaimFilter = .{};
++    const r = f.feed(ClaimFilter.sequence ++ "x" ++ ClaimFilter.sequence);
++    try testing.expectEqual(@as(usize, 2), r.claims);
++    try testing.expectEqualStrings("x", r.forward);
++}
++
++test "ClaimFilter: a claim split across two reads is rejoined" {
++    var f: ClaimFilter = .{};
++    const seq = ClaimFilter.sequence;
++    const first = f.feed("hi" ++ seq[0..5]);
++    try testing.expectEqual(@as(usize, 0), first.claims);
++    try testing.expectEqualStrings("hi", first.forward);
++
++    const second = f.feed(seq[5..] ++ "there");
++    try testing.expectEqual(@as(usize, 1), second.claims);
++    try testing.expectEqualStrings("there", second.forward);
++}
++
++test "ClaimFilter: a trailing escape is forwarded immediately, not held" {
++    // Escape is pressed constantly in a TUI; holding it back until the user's
++    // NEXT keystroke would be visible input lag.
++    var f: ClaimFilter = .{};
++    const r = f.feed("\x1b");
++    try testing.expectEqual(@as(usize, 0), r.claims);
++    try testing.expectEqualStrings("\x1b", r.forward);
++    try testing.expectEqual(@as(usize, 0), f.carry_len);
++}
++
++test "ClaimFilter: a held partial that turns out not to be a claim is not lost" {
++    var f: ClaimFilter = .{};
++    const first = f.feed("\x1b_z");
++    try testing.expectEqualStrings("", first.forward);
++    try testing.expectEqual(@as(usize, 3), f.carry_len);
++
++    const second = f.feed("nope");
++    try testing.expectEqual(@as(usize, 0), second.claims);
++    try testing.expectEqualStrings("\x1b_znope", second.forward);
++}
++
++test "ClaimFilter: an escape-heavy stream cannot grow the carry" {
++    var f: ClaimFilter = .{};
++    for (0..64) |_| {
++        const r = f.feed("\x1b\x1b\x1b\x1b");
++        try testing.expectEqual(@as(usize, 0), r.claims);
++        try testing.expect(f.carry_len < ClaimFilter.sequence.len);
++    }
++}
+diff --git a/test/claim_leader.py b/test/claim_leader.py
+new file mode 100644
+index 0000000..5700d35
+--- /dev/null
++++ b/test/claim_leader.py
+@@ -0,0 +1,97 @@
++"""Leadership claim: two clients at different sizes, driven over real PTYs.
++
++Exercises the whole wire — client stdin -> util.ClaimFilter -> IPC Claim ->
++Daemon.handleClaim -> setLeader -> size request -> TIOCSWINSZ — and asserts the
++two properties the unit tests cannot reach from inside a single process:
++
++  1. a second client attaching does NOT resize the pty (handleInit sets a
++     leader only when there is none), so opening another view of a session is
++     non-disruptive;
++  2. a claim DOES resize it, without any keystroke reaching the program.
++
++Python rather than pure bash because the test needs two PTYs at known,
++different window sizes, which `bats` has no way to allocate.
++
++Usage: claim_leader.py <zmx-binary> <zmx-dir>
++"""
++
++import fcntl
++import os
++import pty
++import re
++import signal
++import struct
++import subprocess
++import sys
++import termios
++import time
++
++CLAIM = b"\x1b_zmx;claim\x1b\\"
++SESSION = "claim-leader-test"
++
++
++def attach(zmx, env, cols, rows):
++    pid, fd = pty.fork()
++    if pid == 0:
++        os.execve(zmx, [zmx, "attach", SESSION, "/bin/sh"], env)
++    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
++    return pid, fd
++
++
++def drain(fd, secs):
++    end = time.time() + secs
++    out = b""
++    os.set_blocking(fd, False)
++    while time.time() < end:
++        try:
++            out += os.read(fd, 65536)
++        except (BlockingIOError, OSError):
++            time.sleep(0.05)
++    return out
++
++
++def pty_size(fd):
++    """What the session's shell believes the size is, as (rows, cols)."""
++    drain(fd, 0.4)
++    os.write(fd, b"stty size\n")
++    time.sleep(1.2)
++    text = drain(fd, 1.2).decode(errors="replace")
++    # Guard the digit run against ANSI parameters (CSI ... ; ... m).
++    hits = re.findall(r"(?<![\d;])(\d{1,4}) (\d{1,4})(?![\d;])", text)
++    if not hits:
++        raise AssertionError(f"no `stty size` output found in:\n{text!r}")
++    return tuple(int(n) for n in hits[-1])
++
++
++def main():
++    zmx, zmx_dir = sys.argv[1], sys.argv[2]
++    env = {**os.environ, "ZMX_DIR": zmx_dir}
++    pids = []
++    try:
++        a_pid, a = attach(zmx, env, cols=100, rows=30)
++        pids.append(a_pid)
++        time.sleep(2.5)
++        assert pty_size(a) == (30, 100), "first client should size the pty"
++
++        b_pid, b = attach(zmx, env, cols=40, rows=12)
++        pids.append(b_pid)
++        time.sleep(2.5)
++        assert pty_size(a) == (30, 100), "a second client must not resize the pty"
++
++        os.write(b, CLAIM)
++        time.sleep(2.5)
++        assert pty_size(b) == (12, 40), "a claim must hand the pty size over"
++    finally:
++        for pid in pids:
++            try:
++                os.kill(pid, signal.SIGKILL)
++            except OSError:
++                pass
++        subprocess.run(
++            [zmx, "kill", SESSION, "--force"], env=env, capture_output=True
++        )
++    print("ok")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/test/leader.bats b/test/leader.bats
+new file mode 100644
+index 0000000..9586948
+--- /dev/null
++++ b/test/leader.bats
+@@ -0,0 +1,20 @@
++#!/usr/bin/env bats
++# Leadership tests: which attached client's window size drives the pty.
++#
++# zmx allows several clients per session but only one leader. `handleInput`
++# already hands leadership to any client that sends real user input, which
++# suits a human at a keyboard — but a GUI frontend showing one session in two
++# panes needs to say "size the pty from this one" on a click, without the
++# keystroke reaching the running program. That is the Claim message.
++#
++# The real work is in claim_leader.py: the test needs two PTYs at known,
++# different window sizes, which bats cannot allocate on its own.
++
++load test_helper
++
++@test "claim: a second client is non-disruptive, a claim moves the pty" {
++  command -v python3 >/dev/null || skip "python3 needed to allocate test PTYs"
++  run python3 "$BATS_TEST_DIRNAME/claim_leader.py" "$ZMX" "$ZMX_DIR"
++  [ "$status" -eq 0 ]
++  [[ "$output" == *"ok"* ]]
++}
+-- 
+2.53.0
+
