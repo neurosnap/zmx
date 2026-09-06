@@ -26,6 +26,9 @@ pub const Tag = enum(u8) {
     EnvGet = 19,
     EnvSet = 20,
     EnvData = 21,
+    /// Scoped history: the active screen plus a bounded number of
+    /// preceding scrollback rows. Request payload is `Capture`.
+    Capture = 22,
     // Non-exhaustive: this enum comes off the wire via bytesToValue and
     // @enumFromInt, so out-of-range values are representable
     // rather than UB. Switches must handle `_` (unknown tag).
@@ -52,6 +55,14 @@ pub const Resize = packed struct {
     pub fn winsize(self: Resize) cross.c.struct_winsize {
         return .{ .ws_row = self.rows, .ws_col = self.cols, .ws_xpixel = self.xpixel, .ws_ypixel = self.ypixel };
     }
+};
+
+/// Request payload for `Tag.Capture`. `format` is a `util.HistoryFormat`
+/// and `rows` is how many scrollback rows to include above the active
+/// screen; zero returns only the screen.
+pub const Capture = packed struct {
+    format: u8,
+    rows: u32,
 };
 
 pub fn getTerminalSize(fd: i32) Resize {
@@ -344,7 +355,8 @@ test "Tag wire values are frozen" {
         .{ Tag.Run, 9 },       .{ Tag.Ack, 10 },          .{ Tag.Switch, 11 },
         .{ Tag.Write, 12 },    .{ Tag.TaskComplete, 13 }, .{ Tag.LabelGet, 14 },
         .{ Tag.LabelSet, 15 }, .{ Tag.LabelClear, 16 },   .{ Tag.LabelData, 17 },
-        .{ Tag.Send, 18 },
+        .{ Tag.Send, 18 },     .{ Tag.EnvGet, 19 },       .{ Tag.EnvSet, 20 },
+        .{ Tag.EnvData, 21 },  .{ Tag.Capture, 22 },
     }) |p| try std.testing.expectEqual(@as(u8, p[1]), @intFromEnum(p[0]));
 }
 

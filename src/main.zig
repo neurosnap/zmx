@@ -128,6 +128,7 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, cmd, "history") or std.mem.eql(u8, cmd, "hi")) {
         var session_name: ?[]const u8 = null;
         var format: util.HistoryFormat = .plain;
+        var scrollback_rows: ?u32 = null;
         while (args.next()) |arg| {
             if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
                 return help(io);
@@ -135,6 +136,13 @@ pub fn main(init: std.process.Init) !void {
                 format = .vt;
             } else if (std.mem.eql(u8, arg, "--html")) {
                 format = .html;
+            } else if (std.mem.eql(u8, arg, "--screen")) {
+                if (scrollback_rows != null) return printError(io, "--screen and --scrollback may only be specified once", .{});
+                scrollback_rows = 0;
+            } else if (std.mem.eql(u8, arg, "--scrollback")) {
+                if (scrollback_rows != null) return printError(io, "--screen and --scrollback may only be specified once", .{});
+                const count = args.next() orelse return printError(io, "--scrollback requires a row count", .{});
+                scrollback_rows = std.fmt.parseInt(u32, count, 10) catch return printError(io, "invalid scrollback row count: {s}", .{count});
             } else if (session_name == null) {
                 session_name = arg;
             }
@@ -145,7 +153,7 @@ pub fn main(init: std.process.Init) !void {
         });
         const sesh = try socket.getSeshName(gpa, raw_name);
         defer gpa.free(sesh);
-        return history(gpa, io, &cfg, sesh, format);
+        return history(gpa, io, &cfg, sesh, format, scrollback_rows);
     } else if (std.mem.eql(u8, cmd, "attach") or std.mem.eql(u8, cmd, "a")) {
         var attach_args: std.ArrayList([]const u8) = .empty;
         defer attach_args.deinit(gpa);
@@ -545,8 +553,14 @@ fn help(io: std.Io) !void {
         \\  This should generally be used with `tail` to print the last lines
         \\  of the session's scrollback history.
         \\
+        \\  --screen outputs only the active screen, and --scrollback N adds up
+        \\  to N rows of scrollback above it, so pollers can skip formatting
+        \\  history they would discard. Both work with --vt and --html.
+        \\
         \\  Examples:
         \\    zmx history <session> | tail -100
+        \\    zmx history --screen <session>
+        \\    zmx history --scrollback 512 <session>
         \\
         \\Run:
         \\  Commands run inside a PTY using bash
@@ -1437,7 +1451,7 @@ fn fetchHistory(
     return error.NoHistoryResponse;
 }
 
-fn history(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []const u8, format: util.HistoryFormat) !void {
+fn history(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []const u8, format: util.HistoryFormat, scrollback_rows: ?u32) !void {
     std.log.info("history session={s}", .{session_name});
 
     const socket_path = socket.getSocketPath(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
@@ -1460,11 +1474,29 @@ fn history(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []cons
     };
     defer lib_posix.close(fd);
 
-    const format_byte = [_]u8{@intFromEnum(format)};
-    ipc.send(fd, .History, &format_byte) catch |err| switch (err) {
-        error.BrokenPipe, error.ConnectionResetByPeer => return,
-        else => return err,
-    };
+    const reply_tag: ipc.Tag = if (scrollback_rows != null) .Capture else .History;
+    if (scrollback_rows) |rows| {
+        // zeroes() so asBytes() doesn't ship packed struct padding.
+        var request = std.mem.zeroes(ipc.Capture);
+        request.format = @intFromEnum(format);
+        request.rows = rows;
+        ipc.send(fd, .Capture, std.mem.asBytes(&request)) catch |err| switch (err) {
+            error.BrokenPipe, error.ConnectionResetByPeer => return,
+            else => return err,
+        };
+        // Requests are handled in connection order. Info is a compatibility
+        // barrier: old daemons ignore Capture but still answer Info.
+        ipc.send(fd, .Info, "") catch |err| switch (err) {
+            error.BrokenPipe, error.ConnectionResetByPeer => return,
+            else => return err,
+        };
+    } else {
+        const format_byte = [_]u8{@intFromEnum(format)};
+        ipc.send(fd, .History, &format_byte) catch |err| switch (err) {
+            error.BrokenPipe, error.ConnectionResetByPeer => return,
+            else => return err,
+        };
+    }
 
     var sb = try ipc.SocketBuffer.init(alloc);
     defer sb.deinit();
@@ -1481,9 +1513,12 @@ fn history(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []cons
         if (n == 0) return;
 
         while (sb.next()) |msg| {
-            if (msg.header.tag == .History) {
+            if (msg.header.tag == reply_tag) {
                 _ = lib_posix.write(lib_posix.STDOUT_FILENO, msg.payload) catch return;
                 return;
+            }
+            if (scrollback_rows != null and msg.header.tag == .Info) {
+                return printError(io, "session \"{s}\" does not support --screen/--scrollback (daemon too old?)", .{session_name});
             }
         }
     }
