@@ -23,6 +23,9 @@ pub const Tag = enum(u8) {
     LabelClear = 16,
     LabelData = 17,
     Send = 18,
+    /// A client asking to become the session's leader without sending input
+    /// (see util.ClaimFilter).
+    Claim = 19,
     // Non-exhaustive: this enum comes off the wire via bytesToValue and
     // @enumFromInt, so out-of-range values are representable
     // rather than UB. Switches must handle `_` (unknown tag).

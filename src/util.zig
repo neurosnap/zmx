@@ -418,6 +418,89 @@ pub fn stripAnsi(alloc: std.mem.Allocator, data: []const u8) ![]const u8 {
 }
 
 /// Dcts Ctrl+\ across raw, Kitty CSI u, and xterm modifyOtherKeys encodings.
+/// Filters Macterm's leadership-claim sequence out of a client's stdin.
+///
+/// zmx only ever hands leadership to a client that sends real user input
+/// (`isUserInput`), which is the right rule for a human at a keyboard but
+/// leaves a GUI frontend showing one session in two panes no way to say "size
+/// the pty from this one" without typing into the user's program. The claim is
+/// an APC string — no keyboard produces one, and terminals discard unknown APC
+/// — so it is inert if it ever reaches a program that predates this.
+///
+/// Deliberately NOT shaped like `isCtrlBackslash`, which returns a bool and
+/// lets its caller drop the whole read. A detach key is a keystroke and
+/// arrives alone; a claim is written programmatically and can land in the same
+/// 4096-byte read as whatever the user is typing, so an all-or-nothing match
+/// would swallow their keystrokes. This excises occurrences and forwards the
+/// rest.
+///
+/// It also carries a partial sequence across reads: a pty write can be split
+/// anywhere, so a claim can arrive as two halves. The carry is bounded by the
+/// sequence length, so a stream of ESCs cannot grow it.
+pub const ClaimFilter = struct {
+    pub const sequence = "\x1b_zmx;claim\x1b\\";
+    /// Matches the client's stdin read buffer; `feed` asserts on more.
+    pub const max_input = 4096;
+    /// Shortest trailing partial sequence worth holding back for the next
+    /// read. Anything shorter is forwarded immediately, because a partial of
+    /// 1-2 bytes is a bare ESC or ESC `_` — Escape is a key people press
+    /// constantly in a TUI, and delaying it until their NEXT keystroke would
+    /// be a visible input lag. Three bytes (ESC `_` `z`) is already a sequence
+    /// no keyboard produces. The cost is a claim split within its first two
+    /// bytes being dropped rather than rejoined; that needs the split to land
+    /// exactly there, and the user's next keystroke re-establishes leadership
+    /// anyway.
+    pub const min_carry = 3;
+
+    carry: [sequence.len - 1]u8 = undefined,
+    carry_len: usize = 0,
+    work: [max_input + sequence.len - 1]u8 = undefined,
+
+    pub const Result = struct {
+        /// How many complete claim sequences were consumed.
+        claims: usize,
+        /// The bytes to forward to the daemon as Input. Borrowed from the
+        /// filter and valid until the next `feed`.
+        forward: []const u8,
+    };
+
+    pub fn feed(self: *ClaimFilter, input: []const u8) Result {
+        std.debug.assert(input.len <= max_input);
+
+        // Carried partial prefix first, so a split sequence rejoins.
+        @memcpy(self.work[0..self.carry_len], self.carry[0..self.carry_len]);
+        @memcpy(self.work[self.carry_len..][0..input.len], input);
+        const buf = self.work[0 .. self.carry_len + input.len];
+        self.carry_len = 0;
+
+        var claims: usize = 0;
+        var out: usize = 0;
+        var i: usize = 0;
+        while (i < buf.len) {
+            if (buf.len - i >= sequence.len and
+                std.mem.eql(u8, buf[i..][0..sequence.len], sequence))
+            {
+                claims += 1;
+                i += sequence.len;
+                continue;
+            }
+            // A proper prefix of the sequence running to the end of the buffer
+            // may be the front half of a claim split across reads: hold it.
+            if (buf.len - i >= min_carry and buf.len - i < sequence.len and
+                std.mem.eql(u8, buf[i..], sequence[0 .. buf.len - i]))
+            {
+                self.carry_len = buf.len - i;
+                @memcpy(self.carry[0..self.carry_len], buf[i..]);
+                break;
+            }
+            buf[out] = buf[i];
+            out += 1;
+            i += 1;
+        }
+        return .{ .claims = claims, .forward = buf[0..out] };
+    }
+};
+
 pub fn isCtrlBackslash(buf: []const u8) bool {
     if (buf.len == 0) return false;
     return buf[0] == 0x1C or isKeyPressed(buf, 0x5c, 0b100) or isModifyOtherKey(buf, 0x5c, 0b100);
@@ -1775,4 +1858,76 @@ test "stripAnsi: only escape sequences" {
     const result = try stripAnsi(alloc, "\x1b[31m\x1b[1m\x1b[0m");
     defer alloc.free(result);
     try testing.expectEqualStrings("", result);
+}
+
+test "ClaimFilter: a lone claim is consumed and forwards nothing" {
+    var f: ClaimFilter = .{};
+    const r = f.feed(ClaimFilter.sequence);
+    try testing.expectEqual(@as(usize, 1), r.claims);
+    try testing.expectEqualStrings("", r.forward);
+}
+
+test "ClaimFilter: plain input passes through untouched" {
+    var f: ClaimFilter = .{};
+    const r = f.feed("ls -la\r");
+    try testing.expectEqual(@as(usize, 0), r.claims);
+    try testing.expectEqualStrings("ls -la\r", r.forward);
+}
+
+test "ClaimFilter: a claim sharing a read with keystrokes keeps them" {
+    // The bug the all-or-nothing isCtrlBackslash shape would have: a claim is
+    // written programmatically and can land in the same read as typing.
+    var f: ClaimFilter = .{};
+    const r = f.feed("abc" ++ ClaimFilter.sequence ++ "def");
+    try testing.expectEqual(@as(usize, 1), r.claims);
+    try testing.expectEqualStrings("abcdef", r.forward);
+}
+
+test "ClaimFilter: several claims in one read are all counted" {
+    var f: ClaimFilter = .{};
+    const r = f.feed(ClaimFilter.sequence ++ "x" ++ ClaimFilter.sequence);
+    try testing.expectEqual(@as(usize, 2), r.claims);
+    try testing.expectEqualStrings("x", r.forward);
+}
+
+test "ClaimFilter: a claim split across two reads is rejoined" {
+    var f: ClaimFilter = .{};
+    const seq = ClaimFilter.sequence;
+    const first = f.feed("hi" ++ seq[0..5]);
+    try testing.expectEqual(@as(usize, 0), first.claims);
+    try testing.expectEqualStrings("hi", first.forward);
+
+    const second = f.feed(seq[5..] ++ "there");
+    try testing.expectEqual(@as(usize, 1), second.claims);
+    try testing.expectEqualStrings("there", second.forward);
+}
+
+test "ClaimFilter: a trailing escape is forwarded immediately, not held" {
+    // Escape is pressed constantly in a TUI; holding it back until the user's
+    // NEXT keystroke would be visible input lag.
+    var f: ClaimFilter = .{};
+    const r = f.feed("\x1b");
+    try testing.expectEqual(@as(usize, 0), r.claims);
+    try testing.expectEqualStrings("\x1b", r.forward);
+    try testing.expectEqual(@as(usize, 0), f.carry_len);
+}
+
+test "ClaimFilter: a held partial that turns out not to be a claim is not lost" {
+    var f: ClaimFilter = .{};
+    const first = f.feed("\x1b_z");
+    try testing.expectEqualStrings("", first.forward);
+    try testing.expectEqual(@as(usize, 3), f.carry_len);
+
+    const second = f.feed("nope");
+    try testing.expectEqual(@as(usize, 0), second.claims);
+    try testing.expectEqualStrings("\x1b_znope", second.forward);
+}
+
+test "ClaimFilter: an escape-heavy stream cannot grow the carry" {
+    var f: ClaimFilter = .{};
+    for (0..64) |_| {
+        const r = f.feed("\x1b\x1b\x1b\x1b");
+        try testing.expectEqual(@as(usize, 0), r.claims);
+        try testing.expect(f.carry_len < ClaimFilter.sequence.len);
+    }
 }
