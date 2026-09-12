@@ -616,7 +616,7 @@ fn help(io: std.Io) !void {
         \\  sessions can be provided.
         \\
         \\  Examples:
-        \\    zmx run -d dev sleep 10
+        \\    zmx run dev -d sleep 10
         \\    zmx wait dev
         \\    zmx wait dev other
         \\
