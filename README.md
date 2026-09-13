@@ -121,6 +121,17 @@ Commands:
   [h]elp                                   Show this help
 ```
 
+### screen and scrollback capture
+
+`zmx history --screen <name>` prints only the active screen, and
+`zmx history --scrollback N <name>` adds up to `N` rows of scrollback above it.
+Both work with `--vt` and `--html`. The daemon selects the rows before
+formatting them, so a tool that polls a session's current state no longer
+receives and discards the whole history. Alternate screens have no scrollback,
+so they always return just the screen. Sessions whose daemon predates this
+feature keep serving plain `history`; the scoped flags report that the daemon
+is too old.
+
 ## nested sessions
 
 Nested sessions are not supported. Inside a session `ZMX_SESSION` is set, and `attach` reads it: instead of creating another client it switches the calling terminal to the session you named.

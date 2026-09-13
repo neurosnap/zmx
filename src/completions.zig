@@ -40,9 +40,13 @@ const bash_completions =
     \\  fi
     \\
     \\  case "$prev" in
-    \\    attach|run|send|print|write|kill|history|get|set|clear|print-env|wait|tail)
+    \\    attach|run|send|print|write|kill|get|set|clear|print-env|wait|tail)
     \\      local sessions=$(zmx list --short 2>/dev/null | tr '\n' ' ')
     \\      COMPREPLY=($(compgen -W "$sessions" -- "$cur"))
+    \\      ;;
+    \\    history)
+    \\      local sessions=$(zmx list --short 2>/dev/null | tr '\n' ' ')
+    \\      COMPREPLY=($(compgen -W "--screen --scrollback --vt --html $sessions" -- "$cur"))
     \\      ;;
     \\    completions)
     \\      COMPREPLY=($(compgen -W "bash zsh fish nu" -- "$cur"))
@@ -97,8 +101,12 @@ const zsh_completions =
     \\      ;;
     \\    args)
     \\      case $words[2] in
-    \\        attach|a|kill|k|run|r|send|s|print|p|write|wr|history|get|g|set|clear|print-env|hi|wait|w|tail|t)
+    \\        attach|a|kill|k|run|r|send|s|print|p|write|wr|get|g|set|clear|print-env|wait|w|tail|t)
     \\          _zmx_sessions
+    \\          ;;
+    \\        history|hi)
+    \\          _zmx_sessions
+    \\          _values 'options' '--screen' '--scrollback' '--vt' '--html'
     \\          ;;
     \\        completions|c)
     \\          _values 'shell' 'bash' 'zsh' 'fish' 'nu'
@@ -169,6 +177,8 @@ const fish_completions =
     \\complete -c zmx -n "__fish_seen_subcommand_from k kill" -l force -d 'Force kill'
     \\complete -c zmx -n "__fish_seen_subcommand_from hi history" -l vt -d 'History format for escape sequences'
     \\complete -c zmx -n "__fish_seen_subcommand_from hi history" -l html -d 'History format for escape sequences'
+    \\complete -c zmx -n "__fish_seen_subcommand_from hi history" -l screen -d 'Output only the active screen'
+    \\complete -c zmx -n "__fish_seen_subcommand_from hi history" -l scrollback -d 'Rows of scrollback to add above the screen' -r
     \\complete -c zmx -n "__fish_seen_subcommand_from print-env" -s s -l shell -d 'Output POSIX export/unset commands for eval'
 ;
 
@@ -216,7 +226,7 @@ const nu_completions =
     \\
     \\export extern "zmx detach" []
     \\export extern "zmx list" [--short]
-    \\export extern "zmx history" [name: string@"nu-complete zmx sessions", --vt, --html]
+    \\export extern "zmx history" [name: string@"nu-complete zmx sessions", --vt, --html, --screen, --scrollback: int]
     \\export extern "zmx wait" [...sessions: string@"nu-complete zmx sessions"]
     \\export extern "zmx tail" [...sessions: string@"nu-complete zmx sessions"]
     \\export extern "zmx version" []
