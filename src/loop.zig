@@ -1530,3 +1530,33 @@ test "handleEnvGet returns leader client's environment variables including unset
     const pay3 = client_req.write_buf.items[@sizeOf(ipc.Header)..];
     try std.testing.expectEqualStrings("DISPLAY=:99\n", pay3);
 }
+
+test "handleInit replays output that arrived before the first client" {
+    const alloc = std.testing.allocator;
+    const cfg = Cfg{ .socket_dir = "", .log_dir = "" };
+    var term = try initTerminal(alloc, std.testing.io, .{ .cols = 80, .rows = 24 }, &cfg);
+    defer term.deinit(alloc);
+    var stream = term.vtStream();
+    defer stream.deinit();
+
+    var daemon = testDaemon();
+    defer daemon.clients.deinit(alloc);
+    defer daemon.pty_write_buf.deinit(alloc);
+
+    // The command wrote before anyone connected: the VT saw the bytes, no
+    // client did. This is the state daemonLoop leaves after such a PTY read.
+    stream.nextSlice("EARLY_OUTPUT\r\n");
+    daemon.has_pty_output = true;
+
+    // Real fds (a pipe) so Client.deinit's close() and the pty ioctl are legal.
+    const fds = try lib_posix.pipe2(.{});
+    defer lib_posix.close(fds[1]);
+    const client = try testClient(alloc, fds[0], false);
+    try daemon.clients.append(alloc, client);
+    defer _ = daemon.closeClient(alloc, client, 0, false);
+
+    const size = ipc.Resize{ .rows = 24, .cols = 80 };
+    try daemon.handleInit(alloc, client, fds[1], &term, std.mem.asBytes(&size));
+
+    try std.testing.expect(std.mem.indexOf(u8, client.write_buf.items, "EARLY_OUTPUT") != null);
+}
