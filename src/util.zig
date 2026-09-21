@@ -706,7 +706,10 @@ pub fn isUserInput(payload: []const u8) bool {
                     // kitty keyboard: CSI ... u or CSI ... ~
                     // legacy modified keys: CSI 27 ; ... ~
                     // arrow/function keys with modifiers: CSI 1 ; <mod> A-D
-                    if (csi.final == 'u' or csi.final == '~') return true;
+                    // CSI ? flags u is the terminal's reply to a kitty keyboard status
+                    // query, not a key press; skip it and keep scanning the payload
+                    const status_reply = csi.final == 'u' and csi.intermediates.len > 0 and csi.intermediates[0] == '?';
+                    if (!status_reply and (csi.final == 'u' or csi.final == '~')) return true;
                     // modified arrow keys (e.g., Ctrl+F sends CSI 1;5C in legacy mode)
                     if (csi.final >= 'A' and csi.final <= 'D' and csi.params.len > 1) return true;
                     // mouse events: CSI M (basic) or CSI < (SGR extended) - EXCLUDE these
@@ -2190,4 +2193,16 @@ test "stripAnsi: only escape sequences" {
     const result = try stripAnsi(alloc, "\x1b[31m\x1b[1m\x1b[0m");
     defer alloc.free(result);
     try testing.expectEqualStrings("", result);
+}
+
+test "isUserInput: kitty keyboard status reply is a terminal response" {
+    // CSI ? flags u answers the program's CSI ? u query; no key was pressed
+    try testing.expect(!isUserInput("\x1b[?1u"));
+    try testing.expect(!isUserInput("\x1b[?0u"));
+    try testing.expect(!isUserInput("\x1b[?31u"));
+    // a real key coalesced with the reply still counts
+    try testing.expect(isUserInput("\x1b[?1ua"));
+    try testing.expect(isUserInput("\x1b[?1u\r"));
+    try testing.expect(isUserInput("\x1b[?1u\x1b[97;1u"));
+    try testing.expect(!isUserInput("\x1b[?1u\x1b[97;1:3u"));
 }

@@ -8,6 +8,10 @@ Use spec: https://common-changelog.org/
 
 - Completions for [`yash`](https://magicant.github.io/yash/)
 
+### Fixed
+
+- Stop classifying complete kitty keyboard status replies (`CSI ? flags u`) as user input for leader selection
+
 ## v0.8.1 - 2026-09-05
 
 ### Fixed
