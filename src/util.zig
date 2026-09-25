@@ -683,8 +683,23 @@ fn parseDecimal(buf: []const u8, pos: *usize) ?u32 {
     return value;
 }
 
+/// True when a CSI carries a private marker (`?`, `>`, `=`, `<`). Keyboard
+/// encodings never use one, but the replies a terminal sends on its own do:
+/// kitty keyboard flags (`CSI ? flags u`), DA1 (`CSI ? 62;22 c`), DA2
+/// (`CSI > 1;10;0 c`), DECRPM (`CSI ? 2026;2 $ y`), color scheme (`CSI ? 997;1 n`).
+fn hasPrivateMarker(csi: ghostty_vt.Parser.Action.CSI) bool {
+    for (csi.intermediates) |b| {
+        if (b == '?' or b == '>' or b == '=' or b == '<') return true;
+    }
+    return false;
+}
+
 /// Detect if the payload contains user input that should be printed to the screen or
 /// is a key combination like up-arrow, backspace, enter, ctrl+f, etc.
+///
+/// Terminal-generated replies must not count: every attached client's terminal
+/// answers the queries the app broadcasts, so a reply from a passive viewer
+/// would otherwise make it leader and resize the session to its window.
 pub fn isUserInput(payload: []const u8) bool {
     var parser = ghostty_vt.Parser.init();
     var i: usize = 0;
@@ -703,6 +718,9 @@ pub fn isUserInput(payload: []const u8) bool {
             switch (action) {
                 .print => return true, // printable characters
                 .csi_dispatch => |csi| {
+                    // A reply, not a key: skip it and keep scanning, since a
+                    // real keystroke can arrive in the same read.
+                    if (hasPrivateMarker(csi)) continue;
                     // kitty keyboard: CSI ... u or CSI ... ~
                     // legacy modified keys: CSI 27 ; ... ~
                     // arrow/function keys with modifiers: CSI 1 ; <mod> A-D
@@ -2114,6 +2132,27 @@ test "isUserInput: focus events excluded" {
     // Focus in/out are automatic terminal events, not user typing
     try testing.expect(!isUserInput("\x1b[I")); // focus in
     try testing.expect(!isUserInput("\x1b[O")); // focus out
+}
+
+test "isUserInput: terminal query replies excluded" {
+    // Replies every attached terminal sends to queries the app broadcasts.
+    try testing.expect(!isUserInput("\x1b[?5u")); // kitty keyboard flags
+    try testing.expect(!isUserInput("\x1b[?0u"));
+    try testing.expect(!isUserInput("\x1b[?62;22;52c")); // DA1
+    try testing.expect(!isUserInput("\x1b[>1;10;0c")); // DA2
+    try testing.expect(!isUserInput("\x1b[?2026;2$y")); // DECRPM
+    try testing.expect(!isUserInput("\x1b[?997;1n")); // color scheme
+    try testing.expect(!isUserInput("\x1b[12;40R")); // cursor position
+    try testing.expect(!isUserInput("\x1b[6;32;14t")); // cell size
+    // XTVERSION + kitty flags + DA1 in one read, as a passive Ghostty
+    // client sent it in the wild (it made that viewer the leader).
+    try testing.expect(!isUserInput("\x1bP>|ghostty 1.3.2-main+64f5cc175\x1b\\\x1b[?5u\x1b[?62;22;52c"));
+}
+
+test "isUserInput: key after a reply in the same read still counts" {
+    try testing.expect(isUserInput("\x1b[?5ux"));
+    try testing.expect(isUserInput("\x1b[?62;22c\x1b[99;5u")); // reply then kitty ctrl+c
+    try testing.expect(isUserInput("\x1b[?5u\x1b[3~")); // reply then delete
 }
 
 test "isUserInput: bracketed paste included" {
