@@ -1,8 +1,8 @@
 {
-  "ghostty-1.3.2-dev-5UdBCw7jLQVbzMzfCu-BNb7P4o6P3L9WjORwuelawrt6": {
+  "ghostty-1.3.2-dev-5UdBC4FtYAV-PdFOt-gceWieTHLri0H4ztHtd6Tr4dGj": {
     "name": "ghostty",
-    "url": "git+https://github.com/ghostty-org/ghostty/#aa21caeaa3a2feb6ef1251d20bd81b52f1da0940",
-    "hash": "sha256-zvEECFYZGNuxbemdHt0zXYW/G+sX6QvXS3MbCM19xro="
+    "url": "git+https://github.com/ghostty-org/ghostty#8af6897c0afc63037a8a3efee4162a380e3a4572",
+    "hash": "sha256-1JRtXTLcH0kQlAzTLpNpz9w6EHj51BqCgvMs1JlkN4g="
   },
   "translate_c-0.0.0-Q_BUWmU6BwB_9JKG2l2W7i_mhmYWeRseTGBEHi_YlV5f": {
     "name": "translate_c",
@@ -66,7 +66,7 @@
   },
   "gobject-0.3.2-Skun7F6HogCMynX2JqeSHS7xr-8pK4ob-qRFIcEasVi3": {
     "name": "gobject",
-    "url": "https://github.com/ghostty-org/zig-gobject/releases/download/0.10.0-2026-07-28-36-1/ghostty-gobject-0.10.0-2026-07-28-36-1.tar.zst",
+    "url": "https://deps.files.ghostty.org/gobject-2026-07-28-36-1.tar.zst",
     "hash": "sha256-RpusSyZqlfJjHNpz4orJyJ5KkQ9zxh4/9TXMxT88MvI="
   },
   "N-V-__8AANT61wB--nJ95Gj_ctmzAtcjloZ__hRqNw5lC1Kr": {
@@ -144,10 +144,10 @@
     "url": "https://deps.files.ghostty.org/breakpad-b99f444ba5f6b98cac261cbb391d8766b34a5918.tar.gz",
     "hash": "sha256-xLTrdwDuhV7g7/eHK+uZibTJKCKwFnV9XjgiZifC8Ps="
   },
-  "N-V-__8AAAzZywE3s51XfsLbP9eyEw57ae9swYB9aGB6fCMs": {
+  "N-V-__8AAP5JWgCGP_AD0teWpa4krRvE9VPZzvviGdbmN4jI": {
     "name": "wuffs",
-    "url": "https://deps.files.ghostty.org/wuffs-122037b39d577ec2db3fd7b2130e7b69ef6cc1807d68607a7c232c958315d381b5cd.tar.gz",
-    "hash": "sha256-dgQxAMZYjxB95uEAOKjF2SWiYGUwSkFD2dqMBQ4UUus="
+    "url": "https://deps.files.ghostty.org/wuffs-7411f488fe2e2c205c3d3b3d28638b7356522930.tar.gz",
+    "hash": "sha256-F4d9NG95iGUdbGLkWy47BchoCaZELF40YSN0sqlxmhw="
   },
   "N-V-__8AADYiAAB_80AWnH1AxXC0tql9thT-R-DYO1gBqTLc": {
     "name": "pixels",
@@ -189,9 +189,9 @@
     "url": "https://deps.files.ghostty.org/NerdFontsSymbolsOnly-3.4.0.tar.gz",
     "hash": "sha256-8IMPtO+BbyeJZ8RwJCHb3lGviwvP+Xbwd+c0sLwhioo="
   },
-  "N-V-__8AAGxKBAAjYkT1jYUiOZDXQuj0u34ndIjAWxiR1KX9": {
+  "N-V-__8AAGZkBACH0haGC9R-hfNPYWxu16hr-ydEsolad9GV": {
     "name": "iterm2_themes",
-    "url": "https://deps.files.ghostty.org/ghostty-themes-release-20260720-153658-97e244c.tgz",
-    "hash": "sha256-S/O/BjvpcyyYE45MB8DM/7AQVOBecCBQBgaTM+mvOMs="
+    "url": "https://deps.files.ghostty.org/ghostty-themes-release-20260824-153547-75c93ee.tgz",
+    "hash": "sha256-FJ13gDjQEPlXDOmGKQBMM09Dycu+Afsmzx/jnIIBArk="
   }
 }
