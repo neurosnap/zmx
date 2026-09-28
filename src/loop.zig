@@ -1,5 +1,9 @@
 const std = @import("std");
-const ghostty_vt = @import("ghostty-vt");
+const build_options = @import("build_options");
+const has_daemon = if (@hasDecl(build_options, "has_daemon")) build_options.has_daemon else true;
+const ghostty_vt = if (has_daemon) @import("ghostty-vt") else struct {
+    pub const Terminal = struct {};
+};
 const ipc = @import("ipc.zig");
 const log = @import("log.zig");
 const util = @import("util.zig");
@@ -625,6 +629,7 @@ pub const Daemon = struct {
     task_ended_at: ?u64 = null, // timestamp when task exited
     pty_fd: i32 = -1, // set by daemonLoop so handleRun can probe the foreground process
     shell: []const u8 = "/bin/sh",
+    quiet: bool = false,
 
     /// Create a Daemon. Caller is responsible for freeing all variables passed
     /// into the init fn.
@@ -759,7 +764,7 @@ pub const Daemon = struct {
     fn run(self: *Daemon, io: std.Io, dir: std.Io.Dir, sesh_name: []const u8) !bool {
         std.log.info("creating session={s}", .{sesh_name});
         const server_sock_fd: lib_posix.socket_t = try socket.createSocket(self.socket_path);
-        const log_fd = log.log_system.file.?.handle;
+        const log_fd = if (log.log_system.file) |f| f.handle else -1;
 
         var keep_fds_open = [_]i32{ server_sock_fd, dir.handle, log_fd };
         const cmd = try daemonize.createCmdZ(self.shell, self.is_task_mode, self.command);
@@ -788,10 +793,12 @@ pub const Daemon = struct {
             switch (err) {
                 error.IsClientProc => {
                     // send a msg to the client that the session was created.
-                    var w_buf: [2048]u8 = undefined;
-                    var w = std.Io.File.stdout().writer(io, &w_buf);
-                    try w.interface.print("session \"{s}\" created\n", .{sesh_name});
-                    try w.interface.flush();
+                    if (!self.quiet) {
+                        var w_buf: [2048]u8 = undefined;
+                        var w = std.Io.File.stdout().writer(io, &w_buf);
+                        try w.interface.print("session \"{s}\" created\n", .{sesh_name});
+                        try w.interface.flush();
+                    }
                     lib_posix.close(server_sock_fd);
                     return false;
                 },
