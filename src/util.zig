@@ -782,6 +782,7 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
     if (had_synchronized_output) {
         term.modes.set(.synchronized_output, false);
     }
+    defer if (had_synchronized_output) term.modes.set(.synchronized_output, true);
 
     // If state contains color override, restore it.
     writeColorOverrides(&builder.writer, term);
@@ -822,6 +823,14 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
                 std.log.warn("failed to format scrollback err={s}", .{@errorName(err)});
             };
         }
+
+        // The formatter leaves its final history rows in the viewport. Move
+        // every one into scrollback before clearing that viewport, including
+        // when the entire history is shorter than the terminal height.
+        for (0..pages.rows) |_| builder.writer.writeAll("\r\n") catch |err| {
+            std.log.warn("failed to preserve scrollback err={s}", .{@errorName(err)});
+            return null;
+        };
 
         // Clear visible screen after scrollback. \x1b[2J clears only the visible
         // rows (not the scrollback buffer). \x1b[H homes the cursor. \x1b[0m resets
@@ -881,11 +890,6 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
 
     const output = builder.writer.buffered();
     if (output.len == 0) return null;
-
-    // Restore the original synchronized_output mode before returning
-    if (had_synchronized_output) {
-        term.modes.set(.synchronized_output, true);
-    }
 
     return alloc.dupe(u8, output) catch |err| {
         std.log.warn("failed to allocate terminal state err={s}", .{@errorName(err)});
@@ -1789,6 +1793,44 @@ test "serializeTerminalState roundtrip preserves CUP-positioned markers" {
     try expectMarkerAtRow(alloc, &client, "MARK_C", 9);
     try expectMarkerAtRow(alloc, &client, "MARK_D", 13);
     try expectCursorAt(&client, 15, 19);
+}
+
+test "serializeTerminalState preserves all scrollback rows before clearing viewport" {
+    const alloc = testing.allocator;
+    const io = testing.io;
+    for ([_]u16{ 1, 3, 24 }) |rows| {
+        for ([_]usize{ 1, 2, 23, 24, 25, 80 }) |lines| {
+            var term = try testCreateTerminal(alloc, io, 40, rows, "");
+            defer term.deinit(alloc);
+            {
+                var stream = term.vtStream();
+                defer stream.deinit();
+                var buf: [32]u8 = undefined;
+                for (0..lines) |index| {
+                    stream.nextSlice(try std.fmt.bufPrint(&buf, "ROW_{d}\r\n", .{index}));
+                }
+                stream.nextSlice("\x1b[2J\x1b[Hvisible");
+            }
+            var restored = try serializeRoundtrip(alloc, io, &term);
+            defer restored.deinit(alloc);
+            const expected = try term.screens.active.dumpStringAlloc(alloc, .{ .screen = .{ .x = 0, .y = 0 } });
+            defer alloc.free(expected);
+            const actual = try restored.screens.active.dumpStringAlloc(alloc, .{ .screen = .{ .x = 0, .y = 0 } });
+            defer alloc.free(actual);
+            try testing.expectEqualStrings(expected, actual);
+            try expectCursorAt(&restored, term.screens.active.cursor.y, term.screens.active.cursor.x);
+        }
+    }
+}
+
+test "serializeTerminalState allocation failure preserves synchronized output mode" {
+    const alloc = testing.allocator;
+    var term = try testCreateTerminal(alloc, testing.io, 40, 3, "one\r\ntwo\r\nthree\r\nfour\r\n");
+    defer term.deinit(alloc);
+    term.modes.set(.synchronized_output, true);
+    var failing = testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    try testing.expect(serializeTerminalState(failing.allocator(), &term) == null);
+    try testing.expect(term.modes.get(.synchronized_output));
 }
 
 test "serializeTerminalState with scrollback preserves visible content" {
