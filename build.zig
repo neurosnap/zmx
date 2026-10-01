@@ -46,22 +46,34 @@ pub fn build(b: *std.Build) void {
         dep.module("ghostty-vt"),
     );
 
+    // libzmx module: programmatic interface for embedding or external tools
+    const libzmx = b.addModule("libzmx", .{
+        .root_source_file = b.path("src/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    libzmx.addImport("ghostty-vt", dep.module("ghostty-vt"));
+
+    // Also export as "zmx" for packages that depend on the package name
+    const zmx_pkg_mod = b.addModule("zmx", .{
+        .root_source_file = b.path("src/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    zmx_pkg_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
+
     // Contributed networking is opt-in; default installs and releases stay local.
     {
-        const core = b.createModule(.{
-            .root_source_file = b.path("src/contrib.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        });
-        core.addImport("ghostty-vt", dep.module("ghostty-vt"));
         const remote_mod = b.createModule(.{
             .root_source_file = b.path("contrib/zmosh/src/main.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
         });
-        remote_mod.addImport("zmx-core", core);
+        remote_mod.addImport("libzmx", libzmx);
+        remote_mod.addImport("zmx", zmx_pkg_mod);
         const remote = b.addExecutable(.{ .name = "zmosh", .root_module = remote_mod });
         const install_remote = b.addInstallArtifact(remote, .{});
         b.step("contrib-zmosh", "Build and install the contributed remote client").dependOn(&install_remote.step);
@@ -72,7 +84,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .link_libc = true,
         });
-        remote_tests.addImport("zmx-core", core);
+        remote_tests.addImport("libzmx", libzmx);
+        remote_tests.addImport("zmx", zmx_pkg_mod);
         const tests = b.addTest(.{ .root_module = remote_tests });
         b.step("test-contrib-zmosh", "Run contributed remote client tests").dependOn(&b.addRunArtifact(tests).step);
 

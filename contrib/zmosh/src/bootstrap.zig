@@ -1,8 +1,8 @@
 //! SSH bootstrap is deliberately separate from terminal and UDP handling.
 const std = @import("std");
-const core = @import("zmx-core");
-const p = core.posix;
-const c = core.cross.c;
+const zmx = @import("libzmx");
+const p = zmx.posix;
+const c = zmx.cross.c;
 const crypto = @import("crypto.zig");
 
 pub const RemoteSession = struct {
