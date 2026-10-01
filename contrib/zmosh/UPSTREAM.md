@@ -11,9 +11,9 @@ fork's integration into its own copy of zmx. The C library and Apple framework
 targets are not included.
 
 The port uses current zmx session, configuration, socket and terminal code
-through an internal module. It does not vendor a second daemon or Ghostty
-revision. The module is an in-tree implementation detail, not a stable plugin
-API.
+through the `libzmx` module (`src/lib.zig`). It does not vendor a second daemon or Ghostty
+revision.
+
 
 Notable adaptations:
 

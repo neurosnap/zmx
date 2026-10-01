@@ -1,9 +1,9 @@
 // Adapted from mmonad/zmosh, revision 71eba23416bfb443df755ad89d6d06e665ebcd95.
 // MIT license; see ../LICENSE and ../UPSTREAM.md.
 const std = @import("std");
-const core = @import("zmx-core");
-const p = core.posix;
-const c = core.cross.c;
+const zmx = @import("libzmx");
+const p = zmx.posix;
+const c = zmx.cross.c;
 const bootstrap = @import("bootstrap.zig");
 const udp = @import("udp.zig");
 const link_mod = @import("link.zig");
@@ -40,7 +40,7 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, session: bootstrap.RemoteSessio
     var output: link_mod.Queue = .{};
     defer output.deinit(alloc);
     if (tty) try output.append(alloc, "\x1b[2J\x1b[H");
-    const initial_size = wire.encodeSize(core.ipc.getTerminalSize(0));
+    const initial_size = wire.encodeSize(zmx.ipc.getTerminalSize(0));
     try link.enqueue(.Init, &initial_size);
     var last_stdout = udp.nanoNow(io);
     var detach_at: ?i64 = null;
@@ -56,7 +56,7 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, session: bootstrap.RemoteSessio
             detach_at = now;
         }
         if (runtime.resized.swap(false, .acq_rel) and detach_at == null and ended_at == null) {
-            const size = wire.encodeSize(core.ipc.getTerminalSize(0));
+            const size = wire.encodeSize(zmx.ipc.getTerminalSize(0));
             try link.enqueue(.Resize, &size);
         }
 
@@ -105,10 +105,10 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, session: bootstrap.RemoteSessio
             .{ .fd = link.socket.fd, .events = p.POLL.IN, .revents = 0 },
             .{ .fd = if (!input_closed and detach_at == null and ended_at == null and link.outgoing.room() >= 4096) 0 else -1, .events = p.POLL.IN, .revents = 0 },
             .{ .fd = if (output.data().len > 0) 1 else -1, .events = p.POLL.OUT, .revents = 0 },
-            .{ .fd = core.signal.sig_pipe[0], .events = p.POLL.IN, .revents = 0 },
+            .{ .fd = zmx.signal.sig_pipe[0], .events = p.POLL.IN, .revents = 0 },
         };
         _ = try p.poll(&fds, 20);
-        if (fds[3].revents != 0) core.signal.drainSignalPipe();
+        if (fds[3].revents != 0) zmx.signal.drainSignalPipe();
         if (fds[0].revents & p.POLL.IN != 0) try link.receive(udp.nanoNow(io));
         if (fds[2].revents & (p.POLL.HUP | p.POLL.ERR | p.POLL.NVAL) != 0) return error.StdoutClosed;
         if (fds[2].revents & p.POLL.OUT != 0) {

@@ -1,7 +1,7 @@
 // Adapted from mmonad/zmosh, revision 71eba23416bfb443df755ad89d6d06e665ebcd95.
 // MIT license; see ../LICENSE and ../UPSTREAM.md.
 const std = @import("std");
-const posix = @import("zmx-core").posix;
+const posix = @import("libzmx").posix;
 const crypto = @import("crypto.zig");
 
 const log = std.log.scoped(.udp);

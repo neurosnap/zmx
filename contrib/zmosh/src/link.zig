@@ -1,5 +1,6 @@
 //! Shared bounded scheduling for the fork-derived encrypted UDP transport.
 const std = @import("std");
+const posix = @import("libzmx").posix;
 const udp = @import("udp.zig");
 const crypto = @import("crypto.zig");
 const transport = @import("transport.zig");
@@ -169,8 +170,8 @@ test "lost terminal packet retransmits with fresh nonce and retains ordered Sess
     try link.tick(0);
     var raw: [1500]u8 = undefined;
     var plain: [1500]u8 = undefined;
-    var poll = [_]@import("zmx-core").posix.pollfd{.{ .fd = sink.fd, .events = @import("zmx-core").posix.POLL.IN, .revents = 0 }};
-    _ = try @import("zmx-core").posix.poll(&poll, 1000);
+    var poll = [_]posix.pollfd{.{ .fd = sink.fd, .events = posix.POLL.IN, .revents = 0 }};
+    _ = try posix.poll(&poll, 1000);
     const output = try sink.recvFrom(&raw);
     const output_decoded = try crypto.decodeDatagram(key, .to_server, raw[0..output.len], &plain);
     try std.testing.expectEqual(wire.Tag.Output, (try wire.decode((try transport.parsePacket(output_decoded.plaintext)).payload)).tag);
@@ -183,7 +184,7 @@ test "lost terminal packet retransmits with fresh nonce and retains ordered Sess
     try link.tick(std.time.ns_per_s - 1);
     try std.testing.expectError(error.WouldBlock, sink.recvFrom(&raw));
     try link.tick(std.time.ns_per_s);
-    _ = try @import("zmx-core").posix.poll(&poll, 1000);
+    _ = try posix.poll(&poll, 1000);
     const retry = try sink.recvFrom(&raw);
     const retry_decoded = try crypto.decodeDatagram(key, .to_server, raw[0..retry.len], &plain);
     try std.testing.expect(retry_decoded.seq > first_nonce);
@@ -209,11 +210,11 @@ test "authenticated heartbeat traffic cannot extend oldest reliable progress dea
     _ = try receiver.send.buildAndTrack(.reliable_ipc, "later", 0, 0, 0);
     var buf: [128]u8 = undefined;
     const heartbeat = try transport.buildUnreliable(.heartbeat, 0, 2, 0, "", &buf);
-    var poll = [_]@import("zmx-core").posix.pollfd{.{ .fd = receiver.socket.fd, .events = @import("zmx-core").posix.POLL.IN, .revents = 0 }};
+    var poll = [_]posix.pollfd{.{ .fd = receiver.socket.fd, .events = posix.POLL.IN, .revents = 0 }};
     for (1..11) |second| {
         const now: i64 = @intCast(second * std.time.ns_per_s);
         try peer.send(&source, heartbeat, now);
-        _ = try @import("zmx-core").posix.poll(&poll, 1000);
+        _ = try posix.poll(&poll, 1000);
         try receiver.receive(now);
         try std.testing.expectEqual(now, receiver.peer.last_recv_time);
         try std.testing.expectEqual(@as(i64, 0), receiver.last_progress);
@@ -248,15 +249,15 @@ test "unknown authenticated wire tag is rejected without receive admission" {
     message[0] = 255;
     var buf: [128]u8 = undefined;
     try peer.send(&source, try transport.buildUnreliable(.reliable_ipc, 1, 0, 0, &message, &buf), 1);
-    var poll = [_]@import("zmx-core").posix.pollfd{.{ .fd = receiver.socket.fd, .events = @import("zmx-core").posix.POLL.IN, .revents = 0 }};
-    _ = try @import("zmx-core").posix.poll(&poll, 1000);
+    var poll = [_]posix.pollfd{.{ .fd = receiver.socket.fd, .events = posix.POLL.IN, .revents = 0 }};
+    _ = try posix.poll(&poll, 1000);
     try std.testing.expectError(error.UnknownTag, receiver.receive(1));
     try std.testing.expectEqual(@as(u32, 0), receiver.recv.ack());
     try std.testing.expect(receiver.recv.peek() == null);
 }
 
 test "isolated route outage retains reliable data and recovers with fresh nonce" {
-    if (@import("zmx-core").posix.getenv("ZMOSH_TEST_NO_ROUTE") == null) return error.SkipZigTest;
+    if (posix.getenv("ZMOSH_TEST_NO_ROUTE") == null) return error.SkipZigTest;
     const key = [_]u8{0x55} ** crypto.key_length;
     const unavailable_address = udp.Address.initIp4(.{ 192, 0, 2, 1 }, 60000);
     var link = try Link.init(std.testing.allocator, try udp.UdpSocket.bindClient(unavailable_address), key, .to_server, 0);
