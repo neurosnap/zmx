@@ -90,7 +90,15 @@ fn mkdirAll(io: std.Io, sub_dir_path: []const u8, permissions: std.Io.Dir.Permis
     var component = it.last() orelse return error.BadPathName;
     while (true) {
         std.Io.Dir.createDirAbsolute(io, component.path, permissions) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
+            error.PathAlreadyExists => {
+                // Dangling symlinks return PathAlreadyExists on mkdir but fail on traversal,
+                // causing an infinite loop between previous() and next().
+                const stat = std.Io.Dir.cwd().statFile(io, component.path, .{}) catch |e| switch (e) {
+                    error.FileNotFound => return error.NotDir,
+                    else => |stat_err| return stat_err,
+                };
+                if (stat.kind != .directory) return error.NotDir;
+            },
             error.FileNotFound => |e| {
                 component = it.previous() orelse return e;
                 continue;
@@ -131,4 +139,21 @@ test "Cfg.init uses custom modes from env vars" {
 
     try std.testing.expectEqual(@as(u32, 0o770), cfg.dir_mode);
     try std.testing.expectEqual(@as(u32, 0o660), cfg.log_mode);
+}
+
+test "mkdirAll fails on dangling symlink instead of looping" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const alloc = std.testing.allocator;
+    const tmp_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(tmp_path);
+
+    try tmp.dir.symLink(std.testing.io, "nonexistent", "broken_link", .{});
+
+    const target_path = try std.fs.path.join(alloc, &.{ tmp_path, "broken_link", "sub" });
+    defer alloc.free(target_path);
+
+    const perms = std.Io.Dir.Permissions.fromMode(0o750);
+    try std.testing.expectError(error.NotDir, mkdirAll(std.testing.io, target_path, perms));
 }
