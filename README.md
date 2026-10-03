@@ -101,36 +101,25 @@ Run `zmx help` for more information on usage, with examples.
 Usage: zmx <command> [args...]
 
 Commands:
-  [a]ttach <name> [command...]             Attach to session, creating if needed
-  [r]un <name> [-d] [command...]           Send command without attaching
-  [s]end <name> <text...>                  Send raw input to session PTY
-  [p]rint <name> <text...>                 Inject text into session display
-  [wr]ite <name> <file_path>               Write stdin to file_path through the session
-  [d]etach                                 Detach all clients (ctrl+\\ for current client)
-  [l]ist|ls [--short]                      List active sessions
-  [g]et <name>                             Get session labels
-  set <name> k=v ...                       Set session labels
-  [cl]ear <name>                           Clear all session labels
-  print-env [-s] <name> [key]              Print tracked environment variables
-  [k]ill <name>... [--force]               Kill session and all attached clients
-  [hi]story <name> [--vt|--html]           Output session scrollback
-  [w]ait <name>...                         Wait for session tasks to complete
-  [t]ail <name>...                         Follow session output
-  [c]ompletions <shell>                    Shell completions (bash, zsh, fish, nu, yash)
-  [v]ersion                                Show version and metadata (socket dir, log dir)
-  [h]elp                                   Show this help
+  [a]ttach <name> [command...]                             Attach to session, creating if needed
+  [r]un <name> [-d] [command...]                           Send command without attaching
+  [s]end <name> <text...>                                  Send raw input to session PTY
+  [p]rint <name> <text...>                                 Inject text into session display
+  [wr]ite <name> <file_path>                               Write stdin to file_path through the session
+  [d]etach                                                 Detach all clients (ctrl+\\ for current client)
+  [l]ist|ls [--short]                                      List active sessions
+  [g]et <name>                                             Get session labels
+  set <name> k=v ...                                       Set session labels
+  [cl]ear <name>                                           Clear all session labels
+  print-env [-s] <name> [key]                              Print tracked environment variables
+  [k]ill <name>... [--force]                               Kill session and all attached clients
+  [hi]story <name> [--vt|--html] [--screen|scrollback]     Output session scrollback
+  [w]ait <name>...                                         Wait for session tasks to complete
+  [t]ail <name>...                                         Follow session output
+  [c]ompletions <shell>                                    Shell completions (bash, zsh, fish, nu, yash)
+  [v]ersion                                                Show version and metadata (socket dir, log dir)
+  [h]elp                                                   Show this help
 ```
-
-### screen and scrollback capture
-
-`zmx history --screen <name>` prints only the active screen, and
-`zmx history --scrollback N <name>` adds up to `N` rows of scrollback above it.
-Both work with `--vt` and `--html`. The daemon selects the rows before
-formatting them, so a tool that polls a session's current state no longer
-receives and discards the whole history. Alternate screens have no scrollback,
-so they always return just the screen. Sessions whose daemon predates this
-feature keep serving plain `history`; the scoped flags report that the daemon
-is too old.
 
 ## nested sessions
 

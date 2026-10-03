@@ -7,6 +7,7 @@ Use spec: https://common-changelog.org/
 ### Added
 
 - Completions for [`yash`](https://magicant.github.io/yash/)
+- History command now accepts --screen (print only active screen) and --scrollback (num of rows to print)
 
 ### Fixed
 

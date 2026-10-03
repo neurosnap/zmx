@@ -517,24 +517,24 @@ fn help(io: std.Io) !void {
         \\Usage: zmx <command> [args...]
         \\
         \\Commands:
-        \\  [a]ttach [--labels kv] <name> [command...]  Attach to session, creating if needed
-        \\  [r]un <name> [-d] [command...]              Send command without attaching
-        \\  [s]end <name> <text...>                     Send raw input to session PTY
-        \\  [p]rint <name> <text...>                    Inject text into session display
-        \\  [wr]ite <name> <file_path>                  Write stdin to file_path through the session
-        \\  [d]etach                                    Detach all clients (ctrl+\\ for current client)
-        \\  [l]ist|ls [--short]                         List active sessions
-        \\  [g]et <name>                                Get session labels
-        \\  set <name> k=v ...                          Set session labels (k= to remove)
-        \\  [cl]ear <name>                              Clear all session labels
-        \\  print-env [-s] <name> [key]                 Print tracked environment variables
-        \\  [k]ill <name>... [--force]                  Kill session and all attached clients
-        \\  [hi]story <name> [--vt|--html]              Output session scrollback
-        \\  [w]ait <name>...                            Wait for session tasks to complete
-        \\  [t]ail <name>...                            Follow session output
-        \\  [c]ompletions <shell>                       Shell completions (bash, zsh, fish, nu, yash)
-        \\  [v]ersion                                   Show version and metadata (socket dir, log dir)
-        \\  [h]elp                                      Show this help
+        \\  [a]ttach [--labels kv] <name> [command...]                 Attach to session, creating if needed
+        \\  [r]un <name> [-d] [command...]                             Send command without attaching
+        \\  [s]end <name> <text...>                                    Send raw input to session PTY
+        \\  [p]rint <name> <text...>                                   Inject text into session display
+        \\  [wr]ite <name> <file_path>                                 Write stdin to file_path through the session
+        \\  [d]etach                                                   Detach all clients (ctrl+\\ for current client)
+        \\  [l]ist|ls [--short]                                        List active sessions
+        \\  [g]et <name>                                               Get session labels
+        \\  set <name> k=v ...                                         Set session labels (k= to remove)
+        \\  [cl]ear <name>                                             Clear all session labels
+        \\  print-env [-s] <name> [key]                                Print tracked environment variables
+        \\  [k]ill <name>... [--force]                                 Kill session and all attached clients
+        \\  [hi]story <name> [--vt|--html] [--screen|--scrollback]     Output session scrollback
+        \\  [w]ait <name>...                                           Wait for session tasks to complete
+        \\  [t]ail <name>...                                           Follow session output
+        \\  [c]ompletions <shell>                                      Shell completions (bash, zsh, fish, nu, yash)
+        \\  [v]ersion                                                  Show version and metadata (socket dir, log dir)
+        \\  [h]elp                                                     Show this help
         \\
         \\Attach:
         \\  This will spawn a login $SHELL with a PTY.  You can provide a
