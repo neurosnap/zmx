@@ -208,7 +208,8 @@ pub fn main(init: std.process.Init) !void {
         defer cmd_args_raw.deinit(gpa);
         var detached = false;
         while (args.next()) |arg| {
-            if (std.mem.startsWith(u8, arg, "-d")) {
+            // Once the command has started, -d belongs to the command.
+            if (cmd_args_raw.items.len == 0 and std.mem.startsWith(u8, arg, "-d")) {
                 detached = true;
             } else {
                 try cmd_args_raw.append(gpa, arg);

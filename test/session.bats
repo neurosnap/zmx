@@ -45,6 +45,13 @@ load test_helper
   [[ "$output" == *"session \"test-blocking\" created"* ]]
 }
 
+@test "run: -d after the command is passed to the command" {
+  run timeout 5 "$ZMX" run test-dash-d printf 'arg=%s\n' -d
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"command sent"* ]]
+  wait_for_output test-dash-d "arg=-d"
+}
+
 @test "run: requires a command argument" {
   run "$ZMX" run test-nocmd
   [ "$status" -ne 0 ]
