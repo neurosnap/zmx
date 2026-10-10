@@ -493,6 +493,11 @@ pub fn stripAnsi(alloc: std.mem.Allocator, data: []const u8) ![]const u8 {
 
     var parser = ghostty_vt.Parser.init();
     for (data) |c| {
+        // Bytes >= 0x80 outside a sequence are UTF-8 text, not C1 controls.
+        if (c >= 0x80 and parser.state == .ground) {
+            result.append(alloc, c) catch unreachable;
+            continue;
+        }
         const actions = parser.next(c);
         for (actions) |action_opt| {
             const action = action_opt orelse continue;
@@ -2292,6 +2297,21 @@ test "stripAnsi: only escape sequences" {
     const result = try stripAnsi(alloc, "\x1b[31m\x1b[1m\x1b[0m");
     defer alloc.free(result);
     try testing.expectEqualStrings("", result);
+}
+
+test "stripAnsi: keeps UTF-8 text" {
+    const alloc = testing.allocator;
+    const result = try stripAnsi(alloc, "\x1b[1mcafé\x1b[0m – 日本 🎉\n");
+    defer alloc.free(result);
+    try testing.expectEqualStrings("café – 日本 🎉\n", result);
+}
+
+test "stripAnsi: UTF-8 bytes do not start escape sequences" {
+    const alloc = testing.allocator;
+    // Ý is C3 9D, and 0x9D on its own is the 8-bit OSC introducer
+    const result = try stripAnsi(alloc, "Ýmir\nline two\n");
+    defer alloc.free(result);
+    try testing.expectEqualStrings("Ýmir\nline two\n", result);
 }
 
 test "isUserInput: kitty keyboard status reply is a terminal response" {
