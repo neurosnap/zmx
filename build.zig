@@ -30,6 +30,9 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     exe_mod.addOptions("build_options", options);
+    if (target.result.os.tag == .openbsd) {
+        exe_mod.linkSystemLibrary("util", .{});
+    }
 
     const dep = b.dependency("ghostty", .{
         .target = target,
@@ -72,6 +75,9 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .link_libc = true,
         });
+        if (target.result.os.tag == .openbsd) {
+            test_module.linkSystemLibrary("util", .{});
+        }
         const test_dep = b.dependency("ghostty", .{
             .target = target,
             .optimize = optimize,
