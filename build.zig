@@ -44,10 +44,9 @@ pub fn build(b: *std.Build) void {
         .@"emit-xcframework" = false,
         .@"emit-macos-app" = false,
     });
-    exe_mod.addImport(
-        "ghostty-vt",
-        dep.module("ghostty-vt"),
-    );
+    const vt_mod = dep.module("ghostty-vt");
+    if (target.result.os.tag == .openbsd) vt_mod.sanitize_c = .off;
+    exe_mod.addImport("ghostty-vt", vt_mod);
 
     // Run
     {
