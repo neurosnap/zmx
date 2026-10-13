@@ -1,5 +1,6 @@
 const std = @import("std");
 const lib_posix = @import("posix.zig");
+const cross = @import("cross.zig");
 
 pub fn getSeshPrefix() []const u8 {
     return lib_posix.getenv("ZMX_SESSION_PREFIX") orelse "";
@@ -15,36 +16,47 @@ pub fn getSeshName(alloc: std.mem.Allocator, sesh: []const u8) ![]const u8 {
         return error.SessionNameRequired;
     }
     const full = try std.fmt.allocPrint(alloc, "{s}{s}", .{ prefix, sesh });
-    // Session names become filenames under socket_dir. Rejecting path
-    // separators and dot-dot prevents socket creation and stale-socket
-    // deletion from operating outside that directory.
-    if (std.mem.indexOfScalar(u8, full, '/') != null or
-        std.mem.indexOfScalar(u8, full, 0) != null or
-        std.mem.eql(u8, full, ".") or std.mem.eql(u8, full, ".."))
-    {
-        alloc.free(full);
-        return error.InvalidSessionName;
-    }
+    errdefer alloc.free(full);
+    try validateSessionName(full);
     return full;
 }
 
+/// Session names become filenames under socket_dir. Rejecting path
+/// separators and dot-dot prevents socket creation and stale-socket
+/// deletion from operating outside that directory.
+fn validateSessionName(name: []const u8) !void {
+    if (std.mem.indexOfScalar(u8, name, '/') != null or
+        std.mem.indexOfScalar(u8, name, 0) != null or
+        std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, ".."))
+    {
+        return error.InvalidSessionName;
+    }
+}
+
 pub fn resolveSessionOrEnv(alloc: std.mem.Allocator, io: std.Io, session_name: ?[]const u8) ![]const u8 {
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.File.stderr().writer(io, &buf);
+    if (session_name) |name| {
+        if (!std.mem.eql(u8, name, ".")) return getSeshName(alloc, name) catch |err| {
+            if (err == error.SessionNameRequired) {
+                w.interface.print("error: session name required\n", .{}) catch {};
+                w.interface.flush() catch {};
+            }
+            return err;
+        };
+    }
     const sesh_env = getSeshNameFromEnv();
-    const raw = if (session_name) |name|
-        if (std.mem.eql(u8, name, ".")) blk: {
-            if (sesh_env.len > 0) break :blk sesh_env;
-            var buf: [4096]u8 = undefined;
-            var w = std.Io.File.stderr().writer(io, &buf);
+    if (sesh_env.len == 0) {
+        if (session_name == null) {
+            w.interface.print("error: session name required (or run inside a zmx session)\n", .{}) catch {};
+        } else {
             w.interface.print("error: \".\" requires ZMX_SESSION (are you inside a zmx session?)\n", .{}) catch {};
-            w.interface.flush() catch {};
-            return error.SessionNameRequired;
-        } else name
-    else if (sesh_env.len > 0)
-        sesh_env
-    else {
+        }
+        w.interface.flush() catch {};
         return error.SessionNameRequired;
-    };
-    return getSeshName(alloc, raw);
+    }
+    try validateSessionName(sesh_env);
+    return alloc.dupe(u8, sesh_env);
 }
 
 pub const SessionMatch = struct {
@@ -241,4 +253,35 @@ test "parseSessionArg accepts a wildcard matching all sessions" {
     try std.testing.expect(match.is_prefix);
     try std.testing.expectEqualStrings("", match.name);
     try std.testing.expect(match.matches("any-session"));
+}
+
+test "resolveSessionOrEnv uses ZMX_SESSION without adding ZMX_SESSION_PREFIX" {
+    const alloc = std.testing.allocator;
+    _ = cross.c.setenv("ZMX_SESSION_PREFIX", "d.", 1);
+    _ = cross.c.setenv("ZMX_SESSION", "d.runner", 1);
+    defer {
+        _ = cross.c.unsetenv("ZMX_SESSION_PREFIX");
+        _ = cross.c.unsetenv("ZMX_SESSION");
+    }
+
+    const dot = try resolveSessionOrEnv(alloc, std.testing.io, ".");
+    defer alloc.free(dot);
+    try std.testing.expectEqualStrings("d.runner", dot);
+
+    const omitted = try resolveSessionOrEnv(alloc, std.testing.io, null);
+    defer alloc.free(omitted);
+    try std.testing.expectEqualStrings("d.runner", omitted);
+
+    const named = try resolveSessionOrEnv(alloc, std.testing.io, "tests");
+    defer alloc.free(named);
+    try std.testing.expectEqualStrings("d.tests", named);
+}
+
+test "resolveSessionOrEnv rejects a ZMX_SESSION outside socket_dir" {
+    const alloc = std.testing.allocator;
+    _ = cross.c.setenv("ZMX_SESSION", "../runner", 1);
+    defer _ = cross.c.unsetenv("ZMX_SESSION");
+
+    const err = resolveSessionOrEnv(alloc, std.testing.io, ".");
+    try std.testing.expectError(error.InvalidSessionName, err);
 }

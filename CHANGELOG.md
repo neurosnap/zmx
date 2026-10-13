@@ -14,6 +14,7 @@ Use spec: https://common-changelog.org/
 - Stop classifying complete kitty keyboard status replies (`CSI ? flags u`) as user input for leader selection
 - Prevent infinite loop in `mkdirAll` when directory path contains a dangling symlink
 - Prevent terminal and kitty keyboard queries from taking leadership control
+- Stop adding `ZMX_SESSION_PREFIX` twice when `.` refers to the current session, or when `history` is run without a name.
 
 ## v0.8.1 - 2026-09-05
 

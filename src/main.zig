@@ -147,11 +147,10 @@ pub fn main(init: std.process.Init) !void {
                 session_name = arg;
             }
         }
-        const sesh_env = socket.getSeshNameFromEnv();
-        const raw_name = session_name orelse (if (sesh_env.len > 0) sesh_env else {
-            return printError(io, "session name required (or run inside a zmx session)", .{});
-        });
-        const sesh = try socket.getSeshName(gpa, raw_name);
+        const sesh = socket.resolveSessionOrEnv(gpa, io, session_name) catch |err| switch (err) {
+            error.SessionNameRequired => std.process.exit(1),
+            else => return err,
+        };
         defer gpa.free(sesh);
         return history(gpa, io, &cfg, sesh, format, scrollback_rows);
     } else if (std.mem.eql(u8, cmd, "attach") or std.mem.eql(u8, cmd, "a")) {
