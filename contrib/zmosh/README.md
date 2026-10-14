@@ -16,10 +16,13 @@ Install the same build on both machines. The remote machine needs an SSH
 server and an available UDP port in **60000–60999**, reachable from the client.
 Normal SSH authentication and host-key verification apply.
 
-```sh
 zmosh attach user@server work
-# Optional SSH port (does not change the UDP port range):
+# Or using an SSH config alias (Host in ~/.ssh/config):
+zmosh attach myserver work
+# Optional SSH port override (does not change the UDP port range):
 ZMOSH_SSH_PORT=2222 zmosh attach user@server work
+# Verbose connection diagnostics:
+ZMOSH_DEBUG=1 zmosh attach myserver work
 ```
 
 The session is created if absent. Closing/detaching the remote client leaves
@@ -56,12 +59,12 @@ guarantee shell execution, durability after process crashes, or that a saturated
 PTY accepted arbitrary pastes. The current core PTY input queue has a 256 KiB
 limit. Terminal/SSH errors restore the local terminal and report failure.
 
-The SSH bootstrap currently discovers the server's IPv4 address from its
-authenticated SSH connection. IPv6-only destinations and SSH jump-host UDP
-routing are not supported. The address reported by the SSH server must be
-directly reachable over UDP; server-side NAT that reports a private address
-requires a directly reachable SSH endpoint. Matching contrib builds are required; no public
-wire-compatibility guarantee is made for the upstream fork.
+The SSH bootstrap resolves the destination host from the client's perspective
+(querying `ssh -G` if needed for `~/.ssh/config` host aliases), allowing connections
+to servers behind NAT provided the UDP port range is forwarded. `~/.ssh/config`
+`Port` directives are respected automatically; `ZMOSH_SSH_PORT` can be used to override
+the SSH port explicitly. Matching contrib builds are required; no public wire-compatibility
+guarantee is made for the upstream fork.
 
 ## Tests
 
