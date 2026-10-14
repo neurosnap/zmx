@@ -4,6 +4,7 @@ const zmx = @import("libzmx");
 const p = zmx.posix;
 const c = zmx.cross.c;
 const crypto = @import("crypto.zig");
+const udp = @import("udp.zig");
 
 pub const RemoteSession = struct {
     host: []u8,
@@ -101,6 +102,77 @@ fn reap(io: std.Io, pid: p.pid_t, deadline: i64) !void {
     }
 }
 
+pub fn resolveTargetHost(alloc: std.mem.Allocator, io: std.Io, host: []const u8) ![]u8 {
+    const debug = p.getenv("ZMOSH_DEBUG") != null;
+    const clean_host = if (std.mem.indexOfScalar(u8, host, '@')) |idx| host[idx + 1 ..] else host;
+    if (clean_host.len == 0 or clean_host[0] == '-' or std.mem.indexOfAny(u8, clean_host, "\x00\r\n") != null) return error.InvalidHost;
+
+    if (debug) {
+        var msg_buf: [256]u8 = undefined;
+        if (std.fmt.bufPrint(&msg_buf, "zmosh: resolving target host for '{s}'\n", .{clean_host})) |m| _ = p.write(2, m) catch 0 else |_| {}
+    }
+
+    if (udp.Address.resolve(clean_host, 1)) |_| {
+        if (debug) {
+            var msg_buf: [256]u8 = undefined;
+            if (std.fmt.bufPrint(&msg_buf, "zmosh: host '{s}' resolved directly\n", .{clean_host})) |m| _ = p.write(2, m) catch 0 else |_| {}
+        }
+        return try alloc.dupe(u8, clean_host);
+    } else |_| {}
+
+    if (debug) {
+        var msg_buf: [256]u8 = undefined;
+        if (std.fmt.bufPrint(&msg_buf, "zmosh: querying ssh -G to resolve alias '{s}'\n", .{host})) |m| _ = p.write(2, m) catch 0 else |_| {}
+    }
+
+    const host_z = try alloc.dupeZ(u8, host);
+    defer alloc.free(host_z);
+
+    const pipe = try p.pipe2(.{ .CLOEXEC = true });
+    defer p.close(pipe[0]);
+
+    const argv = [_:null]?[*:0]const u8{ "ssh", "-G", "--", host_z };
+    const pid = spawn(&argv, pipe[1], false, fdLimit()) catch |err| {
+        p.close(pipe[1]);
+        return err;
+    };
+    p.close(pipe[1]);
+
+    var reaped = false;
+    defer if (!reaped) {
+        p.kill(pid, .KILL) catch {};
+        _ = p.waitpid(pid, 0);
+    };
+
+    const deadline = now(io) + 5_000;
+    var buf: [4096]u8 = undefined;
+    const output = readRecord(io, pipe[0], &buf, deadline) catch {
+        return try alloc.dupe(u8, clean_host);
+    };
+    reap(io, pid, deadline) catch {
+        reaped = true;
+        return try alloc.dupe(u8, clean_host);
+    };
+    reaped = true;
+
+    var it = std.mem.splitScalar(u8, output, '\n');
+    while (it.next()) |line| {
+        const prefix = "hostname ";
+        if (std.mem.startsWith(u8, line, prefix)) {
+            const resolved = std.mem.trimEnd(u8, line[prefix.len..], "\r ");
+            if (resolved.len > 0) {
+                if (debug) {
+                    var msg_buf: [256]u8 = undefined;
+                    if (std.fmt.bufPrint(&msg_buf, "zmosh: ssh -G resolved '{s}' to '{s}'\n", .{ host, resolved })) |m| _ = p.write(2, m) catch 0 else |_| {}
+                }
+                return try alloc.dupe(u8, resolved);
+            }
+        }
+    }
+
+    return try alloc.dupe(u8, clean_host);
+}
+
 pub fn connectRemote(alloc: std.mem.Allocator, io: std.Io, host: []const u8, session: []const u8) !RemoteSession {
     if (host.len == 0 or host[0] == '-' or std.mem.indexOfAny(u8, host, "\x00\r\n") != null) return error.InvalidHost;
     const term = try quote(alloc, p.getenv("TERM") orelse "xterm-256color");
@@ -109,21 +181,49 @@ pub fn connectRemote(alloc: std.mem.Allocator, io: std.Io, host: []const u8, ses
     defer alloc.free(color);
     const name = try quote(alloc, session);
     defer alloc.free(name);
-    // SSH_CONNECTION is authenticated server-side metadata, and supplies the
-    // destination address even when the user selected an SSH config alias.
-    const command = try std.fmt.allocPrintSentinel(alloc, "TERM={s} COLORTERM={s} PATH=\"$PATH:/opt/homebrew/bin:$HOME/bin:$HOME/.local/bin\" zmosh serve {s} && {{ set -f; set -- $SSH_CONNECTION; printf 'ZMOSH_ADDRESS %s\\n' \"$3\"; }}", .{ term, color, name }, 0);
+    // Remote command attempts to report the server address for fallback, but client-side
+    // resolution takes precedence for NAT and jump hosts.
+    const command = try std.fmt.allocPrintSentinel(alloc, "TERM={s} COLORTERM={s} PATH=\"$PATH:/usr/local/bin:/opt/homebrew/bin:$HOME/bin:$HOME/.local/bin\" zmosh serve {s} && {{ set -f; set -- $SSH_CONNECTION; printf 'ZMOSH_ADDRESS %s\\n' \"$3\"; }}", .{ term, color, name }, 0);
     defer alloc.free(command);
     const host_z = try alloc.dupeZ(u8, host);
     defer alloc.free(host_z);
-    const port = p.getenv("ZMOSH_SSH_PORT") orelse "22";
-    const port_num = std.fmt.parseInt(u16, port, 10) catch return error.InvalidPort;
-    if (port_num == 0) return error.InvalidPort;
-    const port_z = try alloc.dupeZ(u8, port);
-    defer alloc.free(port_z);
-    const argv = [_:null]?[*:0]const u8{ "ssh", "-T", "-o", "ConnectTimeout=15", "-p", port_z, "--", host_z, command };
+
+    const debug = p.getenv("ZMOSH_DEBUG") != null;
+    var argv_buf = [_:null]?[*:0]const u8{null} ** 14;
+    var argc: usize = 0;
+    argv_buf[argc] = "ssh"; argc += 1;
+    argv_buf[argc] = "-T"; argc += 1;
+    if (debug) {
+        argv_buf[argc] = "-v"; argc += 1;
+    }
+    argv_buf[argc] = "-o"; argc += 1;
+    argv_buf[argc] = "ConnectTimeout=15"; argc += 1;
+    var port_z: ?[:0]const u8 = null;
+    defer if (port_z) |pz| alloc.free(pz);
+    if (p.getenv("ZMOSH_SSH_PORT")) |port| {
+        const port_num = std.fmt.parseInt(u16, port, 10) catch return error.InvalidPort;
+        if (port_num == 0) return error.InvalidPort;
+        port_z = try alloc.dupeZ(u8, port);
+        argv_buf[argc] = "-p"; argc += 1;
+        argv_buf[argc] = port_z.?; argc += 1;
+    }
+    argv_buf[argc] = "--"; argc += 1;
+    argv_buf[argc] = host_z; argc += 1;
+    argv_buf[argc] = command; argc += 1;
+    argv_buf[argc] = null;
+
+    if (debug) {
+        var msg_buf: [512]u8 = undefined;
+        if (port_z) |pz| {
+            if (std.fmt.bufPrint(&msg_buf, "zmosh: running ssh -T -v -o ConnectTimeout=15 -p {s} -- {s} ...\n", .{ pz, host })) |m| _ = p.write(2, m) catch 0 else |_| {}
+        } else {
+            if (std.fmt.bufPrint(&msg_buf, "zmosh: running ssh -T -v -o ConnectTimeout=15 -- {s} ...\n", .{host})) |m| _ = p.write(2, m) catch 0 else |_| {}
+        }
+    }
+
     const pipe = try p.pipe2(.{ .CLOEXEC = true });
     defer p.close(pipe[0]);
-    const pid = spawn(&argv, pipe[1], false, fdLimit()) catch |err| {
+    const pid = spawn(&argv_buf, pipe[1], false, fdLimit()) catch |err| {
         p.close(pipe[1]);
         return err;
     };
@@ -144,15 +244,38 @@ pub fn connectRemote(alloc: std.mem.Allocator, io: std.Io, host: []const u8, ses
     reaped = true;
     var lines = std.mem.splitScalar(u8, record, '\n');
     const connect = try parseConnectLine(lines.next() orelse return error.InvalidConnectLine);
-    const address = lines.next() orelse return error.InvalidAddress;
-    const prefix = "ZMOSH_ADDRESS ";
-    if (!std.mem.startsWith(u8, address, prefix)) return error.InvalidAddress;
-    const ip = address[prefix.len..];
-    // This contributed transport currently supports IPv4 only.
-    _ = std.Io.net.Ip4Address.parse(ip, connect.port) catch return error.InvalidAddress;
-    if (!std.mem.eql(u8, lines.next() orelse "missing", "") or lines.next() != null) return error.InvalidConnectLine;
-    return .{ .host = try alloc.dupe(u8, ip), .port = connect.port, .key = connect.key };
+    var server_ip: ?[]const u8 = null;
+    while (lines.next()) |line| {
+        const prefix = "ZMOSH_ADDRESS ";
+        if (std.mem.startsWith(u8, line, prefix)) {
+            const candidate = std.mem.trimEnd(u8, line[prefix.len..], "\r ");
+            if (candidate.len > 0) server_ip = candidate;
+            break;
+        }
+    }
+
+    var target_host = try resolveTargetHost(alloc, io, host);
+    errdefer alloc.free(target_host);
+
+    if (udp.Address.resolve(target_host, connect.port) catch null) |_| {
+        // target_host resolves cleanly
+    } else if (server_ip) |ip| {
+        if (std.Io.net.Ip4Address.parse(ip, connect.port) catch null) |_| {
+            alloc.free(target_host);
+            target_host = try alloc.dupe(u8, ip);
+        }
+    }
+
+    if (debug) {
+        var msg_buf: [1024]u8 = undefined;
+        if (std.fmt.bufPrint(&msg_buf, "zmosh: bootstrap response:\n{s}", .{record})) |m| _ = p.write(2, m) catch 0 else |_| {}
+        if (std.fmt.bufPrint(&msg_buf, "zmosh: target host is '{s}', UDP port {d}\n", .{ target_host, connect.port })) |m| _ = p.write(2, m) catch 0 else |_| {}
+    }
+
+    return .{ .host = target_host, .port = connect.port, .key = connect.key };
 }
+
+
 
 pub fn startGateway(alloc: std.mem.Allocator, io: std.Io, session: []const u8) !void {
     const executable = try std.process.executablePathAlloc(io, alloc);
@@ -194,6 +317,23 @@ test "connect record rejects malformed port key and trailing fields" {
     try std.testing.expectError(error.InvalidConnectLine, parseConnectLine("ZMX_CONNECT udp 2 AAAA"));
     const extra = try std.fmt.bufPrint(&buf, "ZMX_CONNECT udp 1234 {s} x", .{key});
     try std.testing.expectError(error.InvalidConnectLine, parseConnectLine(extra));
+}
+
+test "resolveTargetHost resolves numeric IP and strips user prefix" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const direct = try resolveTargetHost(alloc, io, "127.0.0.1");
+    defer alloc.free(direct);
+    try std.testing.expectEqualStrings("127.0.0.1", direct);
+
+    const with_user = try resolveTargetHost(alloc, io, "someuser@127.0.0.1");
+    defer alloc.free(with_user);
+    try std.testing.expectEqualStrings("127.0.0.1", with_user);
+
+    try std.testing.expectError(error.InvalidHost, resolveTargetHost(alloc, io, "-oOption"));
+    try std.testing.expectError(error.InvalidHost, resolveTargetHost(alloc, io, ""));
+    try std.testing.expectError(error.InvalidHost, resolveTargetHost(alloc, io, "user@"));
 }
 
 test "bootstrap rejects SSH option-like host before launching" {

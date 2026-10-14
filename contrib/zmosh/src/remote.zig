@@ -14,6 +14,10 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, session: bootstrap.RemoteSessio
     var failure: RemoteFailure = .{};
     // Report after terminal cleanup so its reset cannot erase the diagnostic.
     defer if (failure.len > 0) failure.report(2);
+    if (p.getenv("ZMOSH_DEBUG") != null) {
+        var msg_buf: [256]u8 = undefined;
+        if (std.fmt.bufPrint(&msg_buf, "zmosh: connecting via UDP to {s}:{d} ...\n", .{ session.host, session.port })) |m| _ = p.write(2, m) catch 0 else |_| {}
+    }
     const address = try udp.Address.resolve(session.host, session.port);
     var link = try link_mod.Link.init(alloc, try udp.UdpSocket.bindClient(address), session.key, .to_server, udp.nanoNow(io));
     defer link.deinit();
