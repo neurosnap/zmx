@@ -5,7 +5,9 @@ const p = zmx.posix;
 pub const std_options: std.Options = .{ .logFn = logFn };
 fn logFn(comptime level: std.log.Level, comptime scope: anytype, comptime format: []const u8, args: anytype) void {
     if (zmx.log.log_system.file == null) {
-        std.log.defaultLog(level, scope, format, args);
+        if (p.getenv("ZMOSH_DEBUG") != null or level == .err) {
+            std.log.defaultLog(level, scope, format, args);
+        }
     } else {
         zmx.log.zmxLogFn(level, scope, format, args);
     }
@@ -39,7 +41,19 @@ fn run(init: std.process.Init, entry_pid: p.pid_t) !void {
     _ = args.next();
     const cmd = args.next() orelse return help();
     if (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "help")) return help();
-    if (std.mem.eql(u8, cmd, "attach")) {
+    const is_attach = std.mem.eql(u8, cmd, "attach");
+    const worker = std.mem.eql(u8, cmd, "--gateway");
+    const is_serve = std.mem.eql(u8, cmd, "serve");
+    if (!is_attach and !worker and !is_serve) return error.UnknownCommand;
+
+    var cfg = try zmx.cfg.init(alloc, io);
+    defer if (zmx.cross.c.getpid() == entry_pid) cfg.deinit(alloc);
+    const log_path = try std.fs.path.join(alloc, &.{ cfg.log_dir, "zmosh.log" });
+    defer if (zmx.cross.c.getpid() == entry_pid) alloc.free(log_path);
+    try zmx.log.log_system.init(io, log_path, .fromMode(@intCast(cfg.log_mode)));
+    defer if (zmx.cross.c.getpid() == entry_pid) zmx.log.log_system.deinit();
+
+    if (is_attach) {
         const host = args.next() orelse return error.HostRequired;
         const session = args.next() orelse return error.SessionRequired;
         if (args.next() != null) return error.UnexpectedArgument;
@@ -47,16 +61,8 @@ fn run(init: std.process.Init, entry_pid: p.pid_t) !void {
         defer remote.deinit(alloc);
         return @import("remote.zig").run(alloc, io, remote);
     }
-    const worker = std.mem.eql(u8, cmd, "--gateway");
-    if (!worker and !std.mem.eql(u8, cmd, "serve")) return error.UnknownCommand;
     const raw_name = args.next() orelse return error.SessionRequired;
     if (args.next() != null) return error.UnexpectedArgument;
-    var cfg = try zmx.cfg.init(alloc, io);
-    defer if (zmx.cross.c.getpid() == entry_pid) cfg.deinit(alloc);
-    const log_path = try std.fs.path.join(alloc, &.{ cfg.log_dir, "zmosh.log" });
-    defer if (zmx.cross.c.getpid() == entry_pid) alloc.free(log_path);
-    try zmx.log.log_system.init(io, log_path, .fromMode(@intCast(cfg.log_mode)));
-    defer if (zmx.cross.c.getpid() == entry_pid) zmx.log.log_system.deinit();
     if (worker) return @import("serve.zig").run(alloc, io, raw_name);
     const name = try zmx.socket.getSeshName(alloc, raw_name);
     defer if (zmx.cross.c.getpid() == entry_pid) alloc.free(name);
