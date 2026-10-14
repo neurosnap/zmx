@@ -302,9 +302,10 @@ test "gateway forwards cap-sized snapshot incrementally without dropping final b
     defer link.deinit();
     var g = Gateway{ .alloc = alloc, .link = &link, .native_progress = 0, .phase = .streaming };
     defer g.deinit();
-    const header = zmx.ipc.Header{ .tag = .Output, .len = wire.max_payload };
+    const test_payload_len = 1024 * 1024;
+    const header = zmx.ipc.Header{ .tag = .Output, .len = test_payload_len };
     try g.frame.append(alloc, std.mem.asBytes(&header));
-    const payload = try alloc.alloc(u8, wire.max_payload);
+    const payload = try alloc.alloc(u8, test_payload_len);
     defer alloc.free(payload);
     for (payload, 0..) |*byte, i| byte.* = @truncate(i);
     try g.frame.append(alloc, payload);

@@ -3,7 +3,7 @@ const std = @import("std");
 const zmx = @import("libzmx");
 
 pub const header_len = 8;
-pub const max_payload = 1024 * 1024;
+pub const max_payload = 64 * 1024 * 1024;
 pub const max_buffer = max_payload + @sizeOf(zmx.ipc.Header);
 pub const Tag = enum(u8) { Input = 0, Output = 1, Resize = 2, Detach = 3, Init = 7, SessionEnd = 11 };
 pub const Message = struct { tag: Tag, data: []const u8 };
