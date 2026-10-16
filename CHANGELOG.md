@@ -25,6 +25,7 @@ Use spec: https://common-changelog.org/
 - Prevent infinite loop in `mkdirAll` when directory path contains a dangling symlink
 - Prevent terminal and kitty keyboard queries from taking leadership control
 - Fixed missing terminal snapshot when attaching to a session originally started detached or via `zmx run`
+- Don't drop a client's unread input on hangup
 
 ## v0.8.1 - 2026-09-05
 
