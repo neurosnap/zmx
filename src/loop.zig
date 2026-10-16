@@ -536,6 +536,12 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
             }
 
             if (revents & (lib_posix.POLL.HUP | lib_posix.POLL.ERR | lib_posix.POLL.NVAL) != 0) {
+                // A client that writes and exits (`zmx send`, `zmx run -d`) is
+                // reported HUP with part of its message still unread: a pass
+                // reads at most 4 KiB. Closing now drops the rest. Leave it to
+                // the next pass, which reads on until EOF closes the client.
+                if (revents & lib_posix.POLL.IN != 0 and
+                    revents & (lib_posix.POLL.ERR | lib_posix.POLL.NVAL) == 0) continue;
                 const last = daemon.closeClient(gpa, client, i, false);
                 if (last) break :daemon_loop;
             }
