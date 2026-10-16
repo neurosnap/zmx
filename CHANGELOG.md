@@ -4,16 +4,27 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
+### Breaking
+
+- Standardized IPC header and payloads to 8-byte aligned `extern struct` layouts. Daemons and clients must be on the same version
+- Dropped legacy pre-0.7.0 resize framing
+
 ### Added
 
 - Completions for [`yash`](https://magicant.github.io/yash/)
 - History command now accepts --screen (print only active screen) and --scrollback (num of rows to print)
+
+### Changed
+
+- IPC messages now carry an explicity `protocol_version` field
+- The daemon now responds with `Tag.Unsupported` (255) when receiving unknown IPC tags
 
 ### Fixed
 
 - Stop classifying complete kitty keyboard status replies (`CSI ? flags u`) as user input for leader selection
 - Prevent infinite loop in `mkdirAll` when directory path contains a dangling symlink
 - Prevent terminal and kitty keyboard queries from taking leadership control
+- Fixed missing terminal snapshot when attaching to a session originally started detached or via `zmx run`
 
 ## v0.8.1 - 2026-09-05
 

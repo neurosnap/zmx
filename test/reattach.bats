@@ -13,7 +13,7 @@ sock_dir, name, rows, cols, hold = sys.argv[1], sys.argv[2], int(sys.argv[3]), i
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 s.connect(os.path.join(sock_dir, name))
 payload = struct.pack("<HHHH", rows, cols, 0, 0)            # ipc.Resize
-s.sendall(struct.pack("<BIxxx", 7, len(payload)) + payload)  # ipc.Header, tag .Init = 7
+s.sendall(struct.pack("<BBHI", 7, 1, 0, len(payload)) + payload)  # ipc.Header (tag=7, ver=1, res=0, len)
 time.sleep(hold)
 s.close()
 PY

@@ -47,7 +47,7 @@ pub fn clientLoop(client_sock_fd: i32, env_str: []const u8) !ClientResult {
 
     // Send init message with terminal size (buffered)
     const size = ipc.getTerminalSize(lib_posix.STDOUT_FILENO);
-    try ipc.appendSizeMessage(gpa, &sock_write_buf, .Init, size);
+    try ipc.appendMessage(gpa, &sock_write_buf, .Init, std.mem.asBytes(&size));
 
     var poll_fds = try std.ArrayList(lib_posix.pollfd).initCapacity(gpa, 4);
     defer poll_fds.deinit(gpa);
@@ -104,7 +104,12 @@ pub fn clientLoop(client_sock_fd: i32, env_str: []const u8) !ClientResult {
         if (poll_fds.items[2].revents & lib_posix.POLL.IN != 0) {
             signal.drainSignalPipe();
             const next_size = ipc.getTerminalSize(lib_posix.STDOUT_FILENO);
-            try ipc.appendSizeMessage(gpa, &sock_write_buf, .Resize, next_size);
+            try ipc.appendMessage(
+                gpa,
+                &sock_write_buf,
+                .Resize,
+                std.mem.asBytes(&next_size),
+            );
         }
 
         // Handle stdin -> socket (Input)
@@ -160,7 +165,12 @@ pub fn clientLoop(client_sock_fd: i32, env_str: []const u8) !ClientResult {
                         // daemon is asking for the client's window size usually in response
                         // to this client being set as leader.
                         const next_size = ipc.getTerminalSize(lib_posix.STDOUT_FILENO);
-                        try ipc.appendSizeMessage(gpa, &sock_write_buf, .Resize, next_size);
+                        try ipc.appendMessage(
+                            gpa,
+                            &sock_write_buf,
+                            .Resize,
+                            std.mem.asBytes(&next_size),
+                        );
                     },
                     .Switch => {
                         std.log.info("switch session", .{});
@@ -492,12 +502,16 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
                         .History => try daemon.handleHistory(gpa, client, &term, msg.payload),
                         .Capture => try daemon.handleCapture(gpa, client, &term, msg.payload),
                         .Run => try daemon.handleRun(gpa, io, client, msg.payload),
-                        .Ack, .TaskComplete, .LabelData, .EnvData => {},
+                        .Ack, .TaskComplete, .LabelData, .EnvData, .Unsupported => {},
                         .Write => try daemon.handleWrite(gpa, client, msg.payload),
-                        _ => std.log.warn(
-                            "ignoring unknown IPC tag={d}",
-                            .{@intFromEnum(msg.header.tag)},
-                        ),
+                        _ => {
+                            std.log.warn(
+                                "ignoring unknown IPC tag={d}",
+                                .{@intFromEnum(msg.header.tag)},
+                            );
+                            ipc.appendMessage(gpa, &client.write_buf, .Unsupported, "") catch {};
+                            client.has_pending_output = true;
+                        },
                     }
                 }
             }
@@ -1080,6 +1094,7 @@ pub const Daemon = struct {
         // zeroes() so asBytes() doesn't ship struct padding + unused cmd/cwd
         // tail bytes (daemon stack contents) to clients.
         var info = std.mem.zeroes(ipc.Info);
+        info.protocol_version = ipc.PROTOCOL_VERSION;
         info.clients_len = self.clients.items.len - 1;
         info.pid = self.pid;
         info.created_at = self.created_at;
