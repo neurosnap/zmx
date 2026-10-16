@@ -48,7 +48,7 @@ pub fn appendNative(alloc: std.mem.Allocator, out: *std.ArrayList(u8), msg: Mess
         .Input => try zmx.ipc.appendMessage(alloc, out, .Input, msg.data),
         .Init, .Resize => {
             const size = try decodeSize(msg.data);
-            try zmx.ipc.appendSizeMessage(alloc, out, if (msg.tag == .Init) .Init else .Resize, size);
+            try zmx.ipc.appendMessage(alloc, out, if (msg.tag == .Init) .Init else .Resize, std.mem.asBytes(&size));
         },
         .Detach => {
             if (msg.data.len != 0) return error.InvalidLength;
@@ -101,7 +101,7 @@ test "remote terminal end cannot become native Switch" {
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
 }
 
-test "remote size translates to native and legacy encodings" {
+test "remote size translates to native encoding" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(std.testing.allocator);
     const data = encodeSize(.{ .rows = 31, .cols = 97 });
@@ -113,7 +113,7 @@ test "remote size translates to native and legacy encodings" {
     try std.testing.expectEqual(@as(u16, 31), size.rows);
     try std.testing.expectEqual(@as(u16, 97), size.cols);
     try std.testing.expectEqual(@as(u16, 0), size.xpixel);
-    try std.testing.expectEqual(@as(usize, 28), out.items.len);
+    try std.testing.expectEqual(@as(usize, 16), out.items.len);
 }
 
 test "native frame length is bounded before reading payload" {

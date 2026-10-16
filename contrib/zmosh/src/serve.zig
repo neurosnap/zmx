@@ -29,6 +29,7 @@ const Gateway = struct {
     end_started: ?i64 = null,
     paused_since: ?i64 = null,
     native_progress: i64,
+    session: []const u8 = "",
 
     fn deinit(self: *Gateway) void {
         self.frame.deinit(self.alloc);
@@ -160,12 +161,12 @@ const Gateway = struct {
         }
     }
 
-    fn finishPriming(self: *Gateway, fd: *i32, path: []const u8, now: i64) !void {
+    fn finishPriming(self: *Gateway, io: std.Io, fd: *i32, now: i64) !void {
         std.debug.assert(self.phase == .priming and self.eof);
         if (self.native.data().len != 0) return error.InitializationClosedEarly;
         p.close(fd.*);
         fd.* = -1;
-        const replacement = try zmx.socket.sessionConnect(path);
+        const replacement = try zmx.connect(self.alloc, io, self.session);
         errdefer p.close(replacement);
         _ = try runtime.nonblocking(replacement);
         const bytes = wire.encodeSize(self.size orelse return error.InitialSizeRequired);
@@ -194,12 +195,6 @@ const Gateway = struct {
 };
 
 pub fn run(alloc: std.mem.Allocator, io: std.Io, raw_session: []const u8) !void {
-    var cfg = try zmx.cfg.init(alloc, io);
-    defer cfg.deinit(alloc);
-    const session = try zmx.socket.getSeshName(alloc, raw_session);
-    defer alloc.free(session);
-    const path = try zmx.socket.getSocketPath(alloc, cfg.socket_dir, session);
-    defer alloc.free(path);
     // A bootstrap without authenticated UDP must not leave an unread client
     // attached to the core's output broadcast queue.
     var native_fd: i32 = -1;
@@ -219,9 +214,9 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, raw_session: []const u8) !void 
     var written: usize = 0;
     while (written < record.len) written += try p.write(1, record[written..]);
     p.close(1); // Dedicated bootstrap pipe; no SSH descriptor survives this point.
-    var gateway = Gateway{ .alloc = alloc, .link = &link, .native_progress = udp.nanoNow(io) };
+    var gateway = Gateway{ .alloc = alloc, .link = &link, .native_progress = udp.nanoNow(io), .session = raw_session };
     defer gateway.deinit();
-    gatewayLoop(&gateway, io, &native_fd, path) catch |err| {
+    gatewayLoop(&gateway, io, &native_fd) catch |err| {
         // Disconnect before the bounded failure notification: retaining a
         // stopped native reader would allow the daemon's backlog to grow.
         if (native_fd >= 0) {
@@ -235,17 +230,17 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, raw_session: []const u8) !void 
     };
 }
 
-fn gatewayLoop(g: *Gateway, io: std.Io, fd: *i32, path: []const u8) !void {
+fn gatewayLoop(g: *Gateway, io: std.Io, fd: *i32) !void {
     while (true) {
         const now = udp.nanoNow(io);
         try g.link.receive(now);
         if (g.phase == .priming) {
             if (now - g.prime_started >= link_mod.progress_timeout_ns) return error.InitializationTimeout;
-            if (g.eof) try g.finishPriming(fd, path, now);
+            if (g.eof) try g.finishPriming(io, fd, now);
         }
         try g.receiveRemote(now);
         if (g.phase == .priming and fd.* < 0) {
-            fd.* = try zmx.socket.sessionConnect(path);
+            fd.* = try zmx.connect(g.alloc, io, g.session);
             _ = try runtime.nonblocking(fd.*);
             g.native_progress = now;
         }
@@ -345,7 +340,7 @@ test "gateway bounded native admission and deferred size handoff" {
     try std.testing.expect(try g.appendRemote(.{ .tag = .Init, .data = &size }));
     try g.receiveRemote(0);
     try std.testing.expect(!g.resize_requested);
-    const first_len = 28; // Native + legacy size messages.
+    const first_len = 16;
     const resize = std.mem.bytesToValue(zmx.ipc.Header, g.native.data()[first_len..][0..8]);
     try std.testing.expectEqual(zmx.ipc.Tag.Resize, resize.tag);
     const room = g.native.room();
@@ -416,11 +411,11 @@ test "gateway primes only first Init and retains later input behind processing b
     try std.testing.expectEqual(Gateway.Phase.priming, g.phase);
     try std.testing.expectEqual(@as(i64, 100), g.prime_started);
     try std.testing.expectEqual(wire.Tag.Input, (try wire.decode(link.recv.peek().?)).tag);
-    try std.testing.expectEqual(@as(usize, 36), g.native.data().len); // Two Init sizes and Detach.
-    const detach = std.mem.bytesToValue(zmx.ipc.Header, g.native.data()[28..36]);
+    try std.testing.expectEqual(@as(usize, 24), g.native.data().len); // Init size and Detach.
+    const detach = std.mem.bytesToValue(zmx.ipc.Header, g.native.data()[16..24]);
     try std.testing.expectEqual(zmx.ipc.Tag.Detach, detach.tag);
     try g.receiveRemote(200);
-    try std.testing.expectEqual(@as(usize, 36), g.native.data().len);
+    try std.testing.expectEqual(@as(usize, 24), g.native.data().len);
     try std.testing.expect(!g.detached);
     // A truncated provisional snapshot is intentionally discarded, never
     // acknowledged as terminal output or reported as successful termination.

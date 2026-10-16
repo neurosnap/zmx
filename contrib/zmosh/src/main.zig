@@ -64,25 +64,16 @@ fn run(init: std.process.Init, entry_pid: p.pid_t) !void {
     const raw_name = args.next() orelse return error.SessionRequired;
     if (args.next() != null) return error.UnexpectedArgument;
     if (worker) return @import("serve.zig").run(alloc, io, raw_name);
-    const name = try zmx.socket.getSeshName(alloc, raw_name);
-    defer if (zmx.cross.c.getpid() == entry_pid) alloc.free(name);
-    const path = try zmx.socket.getSocketPath(alloc, cfg.socket_dir, name);
-    var daemon = zmx.Daemon.init(io, &cfg, name, path);
-    defer if (zmx.cross.c.getpid() == entry_pid) daemon.deinit(alloc);
-    daemon.shell = init.environ_map.get("SHELL") orelse "/bin/sh";
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_len = std.process.currentPath(io, &cwd_buf) catch 0;
-    daemon.setCwd(cwd_buf[0..cwd_len]);
-    const saved_stdout = try p.fcntl(1, p.F.DUPFD_CLOEXEC, 3);
-    defer if (zmx.cross.c.getpid() == entry_pid) p.close(@intCast(saved_stdout));
-    try p.dup2(2, 1);
-    const is_daemon = daemon.ensureSession(io) catch |err| {
-        if (zmx.cross.c.getpid() != entry_pid) p.exit(1);
-        try p.dup2(@intCast(saved_stdout), 1);
-        return err;
-    };
-    if (is_daemon or zmx.cross.c.getpid() != entry_pid) p.exit(0);
-    try p.dup2(@intCast(saved_stdout), 1);
+    if (comptime zmx.has_daemon) {
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd_len = std.process.currentPath(io, &cwd_buf) catch 0;
+        const shell = init.environ_map.get("SHELL") orelse "/bin/sh";
+        _ = try zmx.create(alloc, io, raw_name, .{
+            .shell = shell,
+            .cwd = cwd_buf[0..cwd_len],
+            .quiet = true,
+        });
+    }
     // Pass the raw name: the worker applies the shared prefix exactly once.
     try bootstrap.startGateway(alloc, io, raw_name);
 }

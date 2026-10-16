@@ -18,10 +18,13 @@ pub fn build(b: *std.Build) void {
     const version = b.option([]const u8, "version", "Version string for release") orelse
         @as([]const u8, build_zig_zon.version);
 
+    const enable_daemon = b.option(bool, "daemon", "Include daemon support and Ghostty VT in libzmx") orelse true;
+
     const options = b.addOptions();
     options.addOption([]const u8, "version", version);
     const ghostty_ver = build_zig_zon.dependencies.ghostty.hash;
     options.addOption([]const u8, "ghostty_version", ghostty_ver);
+    options.addOption(bool, "has_daemon", enable_daemon);
 
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -31,7 +34,7 @@ pub fn build(b: *std.Build) void {
     });
     exe_mod.addOptions("build_options", options);
 
-    const dep = b.dependency("ghostty", .{
+    const dep = if (enable_daemon) b.lazyDependency("ghostty", .{
         .target = target,
         .optimize = optimize,
         .@"emit-lib-vt" = true,
@@ -40,11 +43,13 @@ pub fn build(b: *std.Build) void {
         // configure time and breaks builds without full Xcode.
         .@"emit-xcframework" = false,
         .@"emit-macos-app" = false,
-    });
-    exe_mod.addImport(
-        "ghostty-vt",
-        dep.module("ghostty-vt"),
-    );
+    }) else null;
+    if (dep) |d| {
+        exe_mod.addImport(
+            "ghostty-vt",
+            d.module("ghostty-vt"),
+        );
+    }
 
     // libzmx module: programmatic interface for embedding or external tools
     const libzmx = b.addModule("libzmx", .{
@@ -53,7 +58,10 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    libzmx.addImport("ghostty-vt", dep.module("ghostty-vt"));
+    libzmx.addOptions("build_options", options);
+    if (dep) |d| {
+        libzmx.addImport("ghostty-vt", d.module("ghostty-vt"));
+    }
 
     // Also export as "zmx" for packages that depend on the package name
     const zmx_pkg_mod = b.addModule("zmx", .{
@@ -62,7 +70,10 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    zmx_pkg_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
+    zmx_pkg_mod.addOptions("build_options", options);
+    if (dep) |d| {
+        zmx_pkg_mod.addImport("ghostty-vt", d.module("ghostty-vt"));
+    }
 
     // Contributed networking is opt-in; default installs and releases stay local.
     {
@@ -89,17 +100,19 @@ pub fn build(b: *std.Build) void {
         const tests = b.addTest(.{ .root_module = remote_tests });
         b.step("test-contrib-zmosh", "Run contributed remote client tests").dependOn(&b.addRunArtifact(tests).step);
 
-        // Test-only screen oracle; never part of the default install.
-        const screen_probe_mod = b.createModule(.{
-            .root_source_file = b.path("contrib/zmosh/test/screen_probe.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        });
-        screen_probe_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
-        const screen_probe = b.addExecutable(.{ .name = "zmosh-screen-probe", .root_module = screen_probe_mod });
-        const install_screen_probe = b.addInstallArtifact(screen_probe, .{});
-        b.step("zmosh-screen-probe", "Build and install the test-only Ghostty screen oracle").dependOn(&install_screen_probe.step);
+        if (dep) |d| {
+            // Test-only screen oracle; never part of the default install.
+            const screen_probe_mod = b.createModule(.{
+                .root_source_file = b.path("contrib/zmosh/test/screen_probe.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            });
+            screen_probe_mod.addImport("ghostty-vt", d.module("ghostty-vt"));
+            const screen_probe = b.addExecutable(.{ .name = "zmosh-screen-probe", .root_module = screen_probe_mod });
+            const install_screen_probe = b.addInstallArtifact(screen_probe, .{});
+            b.step("zmosh-screen-probe", "Build and install the test-only Ghostty screen oracle").dependOn(&install_screen_probe.step);
+        }
     }
 
     // Run
@@ -128,6 +141,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .link_libc = true,
         });
+        test_module.addOptions("build_options", options);
         const test_dep = b.dependency("ghostty", .{
             .target = target,
             .optimize = optimize,
