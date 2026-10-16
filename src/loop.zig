@@ -598,7 +598,6 @@ pub const Daemon = struct {
     cwd_buf: [std.fs.max_path_bytes]u8 = undefined,
     cwd_path_buf: [std.fs.max_path_bytes]u8 = undefined,
     has_pty_output: bool = false,
-    has_had_client: bool = false,
     created_at: u64, // unix timestamp (ns)
     is_task_mode: bool = false, // flag for when session is run as a task
     task_id: [4]u8 = undefined,
@@ -957,6 +956,10 @@ pub const Daemon = struct {
     ) !void {
         if (payload.len != @sizeOf(ipc.Resize)) return;
 
+        if (!client.is_terminal) {
+            client.write_buf.clearRetainingCapacity();
+            client.has_pending_output = false;
+        }
         client.is_terminal = true;
 
         if (self.leader_client_fd == null) {
@@ -975,9 +978,7 @@ pub const Daemon = struct {
             try resizeTerm(gpa, term, resize.cols, resize.rows);
         }
 
-        // Only serialize on re-attach (has_had_client), not first attach, to avoid
-        // interfering with shell initialization (DA1 queries, etc.)
-        if (self.has_pty_output and self.has_had_client) {
+        if (self.has_pty_output) {
             const cursor = &term.screens.active.cursor;
             std.log.debug(
                 "cursor before serialize: x={d} y={d} pending_wrap={}",
@@ -1009,15 +1010,12 @@ pub const Daemon = struct {
             // incremental renderers (Ink, Claude Code, etc.) know to repaint.
             // If the size changed, TIOCSWINSZ above already sent SIGWINCH; if the size
             // was unchanged, the kernel suppressed it, so signal the pgrp explicitly.
-            if (self.has_pty_output and self.has_had_client) {
+            if (self.has_pty_output) {
                 var pgrp: lib_posix.pid_t = 0;
                 if (cross.c.ioctl(pty_fd, cross.c.TIOCGPGRP, &pgrp) == 0 and pgrp > 0) {
                     lib_posix.kill(-pgrp, .WINCH) catch {};
                 }
             }
-
-            // Mark that we've had a client init, so subsequent clients get terminal state
-            self.has_had_client = true;
 
             std.log.debug("init resize rows={d} cols={d}", .{ resize.rows, resize.cols });
         }
@@ -1199,7 +1197,6 @@ pub const Daemon = struct {
 
         try ipc.appendMessage(gpa, &client.write_buf, .Ack, "");
         client.has_pending_output = true;
-        self.has_had_client = true;
         std.log.debug("run command len={d}", .{payload.len});
     }
 
@@ -1306,7 +1303,6 @@ pub const Daemon = struct {
 
         try ipc.appendMessage(gpa, &client.write_buf, .Ack, "");
         client.has_pending_output = true;
-        self.has_had_client = true;
         std.log.debug(
             "write command len={d} file_path={s}",
             .{ file_content.len, file_path },
