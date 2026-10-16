@@ -8,7 +8,10 @@ BRANCH="${PICI_BRANCH:-tmp}"
 echo "running ci event=${EVENT} session=${ZMX_SESSION_PREFIX}"
 
 zmx run build docker build -t zig-zmx .
-zmx run build-release docker run --rm -v "$(pwd):/app" -t zig-zmx:latest zig build release
+zmx run build-release docker run --rm \
+  --ulimit stack=67108864:67108864 \
+  -v "$(pwd):/app" \
+  -t zig-zmx:latest zig build release -j8
 
 zmx run fmt -d docker run --rm -v "$(pwd):/app" -t zig-zmx:latest zig fmt --check .
 zmx run test -d docker run --rm -v "$(pwd):/app" -t zig-zmx:latest zig build test
