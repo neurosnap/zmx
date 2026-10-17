@@ -45,10 +45,9 @@ pub fn build(b: *std.Build) void {
         .@"emit-macos-app" = false,
     }) else null;
     if (dep) |d| {
-        exe_mod.addImport(
-            "ghostty-vt",
-            d.module("ghostty-vt"),
-        );
+        const vt_mod = d.module("ghostty-vt");
+        if (target.result.os.tag == .openbsd) vt_mod.sanitize_c = .off;
+        exe_mod.addImport("ghostty-vt", vt_mod);
     }
 
     // zmx module: programmatic interface for embedding or external tools
@@ -58,9 +57,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+
     zmx_pkg_mod.addOptions("build_options", options);
     if (dep) |d| {
-        zmx_pkg_mod.addImport("ghostty-vt", d.module("ghostty-vt"));
+        const vt_mod = d.module("ghostty-vt");
+        if (target.result.os.tag == .openbsd) vt_mod.sanitize_c = .off;
+        zmx_pkg_mod.addImport("ghostty-vt", vt_mod);
     }
 
     // Examples: build the usage examples in examples/ against the zmx module
