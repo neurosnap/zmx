@@ -184,7 +184,7 @@ pub fn attach(alloc: Allocator, io: Io, name: []const u8, opts: AttachOptions) !
         _ = cross.c.tcsetattr(lib_posix.STDIN_FILENO, cross.c.TCSANOW, &raw_termios);
     }
 
-    const clear_seq = "\x1b[2J\x1b[H";
+    const clear_seq = "\x1b[0m\x1b[2J\x1b[H";
     _ = try lib_posix.write(lib_posix.STDOUT_FILENO, clear_seq);
 
     const env_str = opts.tracked_env orelse "";
