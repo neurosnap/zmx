@@ -6,9 +6,10 @@ const lib_posix = @import("posix.zig");
 /// never surfaces; the handler writes a byte here and poll() wakes on POLLIN.
 pub var sig_pipe: [2]lib_posix.fd_t = .{ -1, -1 };
 
-pub fn wakeSignalPipe(_: lib_posix.SIG, _: *const lib_posix.siginfo_t, _: ?*anyopaque) callconv(.c) void {
+pub fn wakeSignalPipe(sig: lib_posix.SIG, _: *const lib_posix.siginfo_t, _: ?*anyopaque) callconv(.c) void {
     const saved = std.c._errno().*;
-    _ = std.c.write(sig_pipe[1], "x", 1);
+    const byte = [_]u8{@intCast(@backingInt(sig))};
+    _ = std.c.write(sig_pipe[1], &byte, 1);
     std.c._errno().* = saved;
 }
 
@@ -44,10 +45,15 @@ pub fn closeSignalPipe() void {
     lib_posix.close(fds[1]);
 }
 
-pub fn drainSignalPipe() void {
+/// Returns true if any signal other than SIGWINCH was received.
+pub fn drainSignalPipe() bool {
+    var terminate = false;
     var b: [16]u8 = undefined;
     while (true) {
-        const n = lib_posix.read(sig_pipe[0], &b) catch return;
-        if (n == 0) return;
+        const n = lib_posix.read(sig_pipe[0], &b) catch return terminate;
+        if (n == 0) return terminate;
+        for (b[0..n]) |sig| {
+            if (sig != @backingInt(lib_posix.SIG.WINCH)) terminate = true;
+        }
     }
 }
