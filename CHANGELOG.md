@@ -24,6 +24,7 @@ Use spec: https://common-changelog.org/
 - Stop classifying complete kitty keyboard status replies (`CSI ? flags u`) as user input for leader selection
 - Prevent infinite loop in `mkdirAll` when directory path contains a dangling symlink
 - Prevent terminal and kitty keyboard queries from taking leadership control
+- Stop forwarding DA1/DA2 queries the daemon already answered, so a client that sends `Init` late cannot answer them a second time
 - Fixed missing terminal snapshot when attaching to a session originally started detached or via `zmx run`
 - Don't drop a client's unread input on hangup
 
