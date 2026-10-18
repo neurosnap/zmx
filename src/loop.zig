@@ -1298,6 +1298,9 @@ pub const Daemon = struct {
         // Chunk large files to stay under command-line length limits.
         // 48000 is divisible by 3 (clean base64 boundaries) and encodes
         // to ~64KB, well under typical ARG_MAX.
+        // The commands skip queuePtyInput's cap: it would drop the chunks
+        // past PTY_WRITE_BUF_MAX and leave the file cut short. The payload
+        // is already bounded by ipc.MAX_PAYLOAD_LEN.
         const chunk_size = 48000;
         var offset: usize = 0;
         var is_first = true;
@@ -1311,16 +1314,16 @@ pub const Daemon = struct {
             defer gpa.free(encoded);
             _ = std.base64.standard.Encoder.encode(encoded, chunk);
 
-            self.queuePtyInput(gpa, "printf '%s' '");
-            self.queuePtyInput(gpa, encoded);
+            try self.pty_write_buf.appendSlice(gpa, "printf '%s' '");
+            try self.pty_write_buf.appendSlice(gpa, encoded);
             if (is_first) {
-                self.queuePtyInput(gpa, "' | base64 -d > '");
+                try self.pty_write_buf.appendSlice(gpa, "' | base64 -d > '");
             } else {
-                self.queuePtyInput(gpa, "' | base64 -d >> '");
+                try self.pty_write_buf.appendSlice(gpa, "' | base64 -d >> '");
             }
-            self.queuePtyInput(gpa, file_path);
-            self.queuePtyInput(gpa, "'");
-            self.queuePtyInput(gpa, "\r");
+            try self.pty_write_buf.appendSlice(gpa, file_path);
+            try self.pty_write_buf.appendSlice(gpa, "'");
+            try self.pty_write_buf.appendSlice(gpa, "\r");
 
             offset = end;
             is_first = false;
