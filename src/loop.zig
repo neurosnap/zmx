@@ -12,6 +12,7 @@ const signal = @import("signal.zig");
 const assert = std.debug.assert;
 const daemonize = @import("daemonize.zig");
 const builtin = @import("builtin");
+const program_status = @import("program_status.zig");
 
 /// clientLoop sends ipc commands to its corresponding daemon.  It uses poll() as its non-blocking
 /// mechanism. It will send stdin to the daemon and receive stdout from the daemon.
@@ -246,7 +247,7 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
     const init_size = ipc.getTerminalSize(pty_fd);
     var term = try initTerminal(gpa, io, init_size, daemon.cfg);
     defer term.deinit(gpa);
-    var vt_stream = term.vtStream();
+    var vt_stream = program_status.Stream.init(gpa, &term, &daemon.program_status_records, &daemon.pty_write_buf);
     defer vt_stream.deinit();
 
     // Carries the tail of the previous PTY read so the task-exit marker
@@ -358,9 +359,11 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
                     // Let the rest of this poll iteration complete so client
                     // write buffers are flushed via the normal POLLOUT path.
                     // On the next iteration, daemon.running will be false.
+                    daemon.program_status_records.expireActive(gpa);
                     daemon.running = false;
                 } else {
                     // Feed PTY output to terminal emulator for state tracking
+                    vt_stream.detached = !daemon.hasTerminalClient();
                     vt_stream.nextSlice(buf[0..n]);
                     daemon.setPwd(&term);
                     daemon.has_pty_output = true;
@@ -599,6 +602,7 @@ pub const Daemon = struct {
     pty_write_buf: std.ArrayList(u8) = .empty,
     clients: std.ArrayList(*Client) = .empty,
     labels: std.StringHashMapUnmanaged([]u8) = .empty,
+    program_status_records: program_status.Records = .{},
     // This control which client is the leader.  The leader controls terminal state and
     // cols/rows of session.
     leader_client_fd: ?i32 = null,
@@ -645,6 +649,7 @@ pub const Daemon = struct {
             gpa.free(entry.value_ptr.*);
         }
         self.labels.deinit(gpa);
+        self.program_status_records.deinit(gpa);
         self.pty_write_buf.deinit(gpa);
         gpa.free(self.socket_path);
     }
@@ -1266,7 +1271,8 @@ pub const Daemon = struct {
         self.setCwd(pwd);
     }
 
-    pub fn handleOutput(self: *Daemon, gpa: std.mem.Allocator, payload: []const u8, term: *ghostty_vt.Terminal, vt_stream: anytype) !void {
+    pub fn handleOutput(self: *Daemon, gpa: std.mem.Allocator, payload: []const u8, term: *ghostty_vt.Terminal, vt_stream: *program_status.Stream) !void {
+        vt_stream.detached = !self.hasTerminalClient();
         vt_stream.nextSlice(payload);
         self.setPwd(term);
         self.has_pty_output = true;
@@ -1482,6 +1488,46 @@ test "send queues PTY input without changing leader" {
 
     try std.testing.expectEqual(@as(?i32, 42), daemon.leader_client_fd);
     try std.testing.expectEqualStrings("hello", daemon.pty_write_buf.items);
+}
+
+test "program status collection and forwarding survive client attachment changes" {
+    const alloc = std.testing.allocator;
+    var daemon = testDaemon();
+    defer daemon.clients.deinit(alloc);
+    defer daemon.pty_write_buf.deinit(alloc);
+    defer daemon.program_status_records.deinit(alloc);
+    const cfg = Cfg{ .socket_dir = "", .log_dir = "" };
+    var term = try initTerminal(alloc, std.testing.io, .{ .cols = 80, .rows = 24 }, &cfg);
+    defer term.deinit(alloc);
+    var stream = program_status.Stream.init(alloc, &term, &daemon.program_status_records, &daemon.pty_write_buf);
+    defer stream.deinit();
+
+    try daemon.handleOutput(alloc, "\x1b]7501;?\x07\x1b]7501;state=working\x07", &term, &stream);
+    try std.testing.expectEqual(.working, daemon.program_status_records.get(null).?.state);
+    try std.testing.expect(daemon.pty_write_buf.items.len > 0);
+    daemon.pty_write_buf.clearRetainingCapacity();
+
+    const pipes = try lib_posix.pipe2(.{});
+    const first = try testClient(alloc, pipes[0], true);
+    try daemon.clients.append(alloc, first);
+    const second = try testClient(alloc, pipes[1], true);
+    try daemon.clients.append(alloc, second);
+    // Do not signal a real process group from handleOutput in this unit test.
+    daemon.pid = std.math.maxInt(i32);
+    const update = "\x1b]7501;?\x07\x1b]7501;state=blocked:kind=permission\x07";
+    try daemon.handleOutput(alloc, update, &term, &stream);
+    try std.testing.expectEqual(.blocked, daemon.program_status_records.get(null).?.state);
+    try std.testing.expectEqual(@as(usize, 0), daemon.pty_write_buf.items.len);
+    try std.testing.expectEqualStrings(update, first.write_buf.items[@sizeOf(ipc.Header)..]);
+    try std.testing.expectEqualStrings(update, second.write_buf.items[@sizeOf(ipc.Header)..]);
+
+    _ = daemon.closeClient(alloc, first, 0, false);
+    try daemon.handleOutput(alloc, "\x1b]7501;?\x07", &term, &stream);
+    try std.testing.expectEqual(@as(usize, 0), daemon.pty_write_buf.items.len);
+    _ = daemon.closeClient(alloc, second, 0, false);
+    try daemon.handleOutput(alloc, "\x1b]7501;?\x07\x1b]7501;state=done\x07", &term, &stream);
+    try std.testing.expectEqual(.done, daemon.program_status_records.get(null).?.state);
+    try std.testing.expect(daemon.pty_write_buf.items.len > 0);
 }
 
 test "handleEnvGet returns leader client's environment variables including unsets" {

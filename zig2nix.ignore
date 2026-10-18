@@ -1,0 +1,2 @@
+# zmx builds libghostty-vt, which does not use Ghostty's fontconfig dependency.
+ghostty.fontconfig
