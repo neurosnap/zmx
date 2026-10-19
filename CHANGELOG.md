@@ -26,6 +26,8 @@ Use spec: https://common-changelog.org/
 - Prevent terminal and kitty keyboard queries from taking leadership control
 - Fixed missing terminal snapshot when attaching to a session originally started detached or via `zmx run`
 - Don't drop a client's unread input on hangup
+- Keep the last screenful of scrollback when re-attaching on terminals where `ESC[2J` erases the screen instead of moving it into scrollback (#295)
+- Keep the shell history behind a full-screen app when re-attaching, so it is still there after the app exits
 
 ## v0.8.1 - 2026-09-05
 
