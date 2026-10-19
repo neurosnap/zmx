@@ -808,6 +808,71 @@ fn trailingBlankRows(pages: *const ghostty_vt.PageList) usize {
     return rows -| 1;
 }
 
+/// Write a screen's scrollback and active area as one continuous run of
+/// rows, the way the output originally arrived. Line breaks scroll the older
+/// rows into the client's scrollback, which works on every terminal.
+/// Clearing the screen between the two would erase the last screenful of
+/// scrollback on terminals where ED2 does not move the screen into
+/// scrollback first (xterm, xterm.js, Ghostty).
+///
+/// Every row must produce exactly one line so the last `rows` lines the
+/// client receives are the active area, which keeps absolute cursor
+/// positions written afterwards correct. The formatter drops trailing blank
+/// rows, so they are written back here.
+///
+/// See: https://github.com/neurosnap/zmx/issues/31
+/// See: https://github.com/neurosnap/zmx/issues/295
+fn writeScreenRows(writer: *std.Io.Writer, screen: *const ghostty_vt.Screen) !void {
+    const pages = &screen.pages;
+    const bottom = pages.getBottomRight(.active) orelse return error.WriteFailed;
+    var fmt = ghostty_vt.formatter.ScreenFormatter.init(screen, .vt);
+    fmt.content = .{
+        .selection = ghostty_vt.Selection.init(pages.getTopLeft(.screen), bottom, false),
+    };
+    try fmt.format(writer);
+
+    // Reset SGR first so the new rows are not filled with the last
+    // background color.
+    try writer.writeAll("\x1b[0m");
+    for (0..trailingBlankRows(pages)) |_| try writer.writeAll("\r\n");
+}
+
+/// Leave the client's primary screen in the state the app will return to,
+/// then switch to the alternate screen the same way the app did.
+fn writeAltScreenEntry(
+    writer: *std.Io.Writer,
+    primary: *const ghostty_vt.Screen,
+    mode: ghostty_vt.Mode,
+) !void {
+    var fmt = ghostty_vt.formatter.ScreenFormatter.init(primary, .vt);
+    fmt.content = .none;
+    // Each screen keeps its own kitty keyboard flags.
+    fmt.extra.kitty_keyboard = true;
+
+    // 1049 saves the cursor on the way in and restores it on the way out,
+    // so the client has to be where the app entered from. 47 and 1047 copy
+    // the alternate screen's cursor back on exit, so where the primary
+    // cursor is left does not matter for them.
+    const saved = if (mode == .alt_screen_save_cursor_clear_enter) primary.saved_cursor else null;
+    if (saved) |cursor| {
+        try writer.print("\x1b[{d};{d}H{f}", .{ cursor.y + 1, cursor.x + 1, cursor.style.formatterVt() });
+    } else {
+        fmt.extra.cursor = true;
+        fmt.extra.style = true;
+    }
+    try fmt.format(writer);
+
+    try writer.writeAll(switch (mode) {
+        .alt_screen_save_cursor_clear_enter => "\x1b[?1049h",
+        .alt_screen => "\x1b[?1047h",
+        .alt_screen_legacy => "\x1b[?47h",
+        else => unreachable,
+    });
+    // The alternate screen is drawn from the top-left. 47 and 1047 keep
+    // whatever the client's alternate screen last showed, so clear it.
+    try writer.writeAll("\x1b[0m\x1b[H\x1b[2J");
+}
+
 pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Terminal) ?[]const u8 {
     var builder: std.Io.Writer.Allocating = .init(alloc);
     defer builder.deinit();
@@ -825,42 +890,49 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
     // If state contains color override, restore it.
     writeColorOverrides(&builder.writer, term);
 
-    const pages = &term.screens.active.pages;
+    // A full-screen app on the alternate screen hides the primary screen and
+    // its scrollback, which come back when the app exits. Replay the primary
+    // screen first and switch to the alternate screen afterwards, so the
+    // client has the shell history to return to. The switch is written by
+    // hand below, so keep the formatter from emitting it with the other modes.
+    const alt_mode: ?ghostty_vt.Mode = if (term.screens.active_key == .alternate)
+        for ([_]ghostty_vt.Mode{
+            .alt_screen_save_cursor_clear_enter,
+            .alt_screen,
+            .alt_screen_legacy,
+        }) |mode| {
+            if (term.modes.get(mode)) break mode;
+        } else null
+    else
+        null;
+    if (alt_mode) |mode| term.modes.set(mode, false);
+    defer if (alt_mode) |mode| term.modes.set(mode, true);
 
-    // Replay scrollback and the active screen as one continuous run of
-    // rows, the way the output originally arrived. Line breaks scroll the
-    // older rows into the client's scrollback, which works on every
-    // terminal. Clearing the screen between the two would erase the last
-    // screenful of scrollback on terminals where ED2 does not move the
-    // screen into scrollback first (xterm, xterm.js, Ghostty).
-    //
-    // Every row must produce exactly one line so the last `rows` lines the
-    // client receives are the active screen, which keeps the absolute CUP
-    // emitted with the cursor extras correct. The formatter drops trailing
-    // blank rows, so they are written back below.
-    //
-    // See: https://github.com/neurosnap/zmx/issues/31
-    // See: https://github.com/neurosnap/zmx/issues/295
-    const content_br = pages.getBottomRight(.active) orelse return null;
-    var content_fmt = ghostty_vt.formatter.TerminalFormatter.init(term, .vt);
-    content_fmt.content = .{
-        .selection = ghostty_vt.Selection.init(
-            pages.getTopLeft(.screen),
-            content_br,
-            false,
-        ),
-    };
-    content_fmt.extra = .none;
-    content_fmt.extra.modes = true;
-    content_fmt.format(&builder.writer) catch |err| {
-        std.log.warn("failed to format terminal content err={s}", .{@errorName(err)});
+    var modes_fmt = ghostty_vt.formatter.TerminalFormatter.init(term, .vt);
+    modes_fmt.content = .none;
+    modes_fmt.extra = .none;
+    modes_fmt.extra.modes = true;
+    modes_fmt.format(&builder.writer) catch |err| {
+        std.log.warn("failed to format terminal modes err={s}", .{@errorName(err)});
         return null;
     };
 
-    // Reset SGR first so the new rows are not filled with the last
-    // background color.
-    builder.writer.writeAll("\x1b[0m") catch {};
-    for (0..trailingBlankRows(pages)) |_| builder.writer.writeAll("\r\n") catch {};
+    if (alt_mode) |mode| {
+        const primary = term.screens.get(.primary) orelse return null;
+        writeScreenRows(&builder.writer, primary) catch |err| {
+            std.log.warn("failed to format primary screen err={s}", .{@errorName(err)});
+            return null;
+        };
+        writeAltScreenEntry(&builder.writer, primary, mode) catch |err| {
+            std.log.warn("failed to format alternate screen entry err={s}", .{@errorName(err)});
+            return null;
+        };
+    }
+
+    writeScreenRows(&builder.writer, term.screens.active) catch |err| {
+        std.log.warn("failed to format terminal content err={s}", .{@errorName(err)});
+        return null;
+    };
 
     // Cursor and the other screen extras come last because scrolling
     // regions and content both move the cursor.
@@ -868,7 +940,7 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
     state_fmt.content = .none;
     state_fmt.extra = .{
         .palette = false,
-        .modes = false, // emitted with the content
+        .modes = false, // emitted before the content
         .scrolling_region = true,
         .tabstops = false, // tabstop restoration moves cursor after CUP, corrupting position
         .pwd = false, // emitted below without the sentinel the formatter includes
@@ -2038,6 +2110,59 @@ test "serializeTerminalState nested roundtrip keeps the scrollback" {
 
     try expectHistoryMatches(alloc, &inner, &client);
     try expectCursorAt(&client, inner.screens.active.cursor.y, inner.screens.active.cursor.x);
+}
+
+/// Re-attach while a full-screen app is on the alternate screen, then exit
+/// the app on both terminals. The client must return to the same primary
+/// screen, scrollback and cursor as the session.
+fn expectAltScreenRoundtrip(lines: usize, enter: []const u8, exit: []const u8) !void {
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var term = try testCreateTerminal(alloc, io, 80, 24, "");
+    defer term.deinit(alloc);
+    writeNumberedLines(&term, lines);
+    {
+        var stream = term.vtStream();
+        defer stream.deinit();
+        stream.nextSlice("$ ");
+        stream.nextSlice(enter);
+        stream.nextSlice("\x1b[3;10HAPP_MARK\x1b[10;5H");
+    }
+
+    var client = try serializeRoundtrip(alloc, io, &term);
+    defer client.deinit(alloc);
+
+    try testing.expectEqual(ghostty_vt.ScreenSet.Key.alternate, client.screens.active_key);
+    try expectScreensMatch(alloc, &term, &client);
+    try expectCursorAt(&client, 9, 4);
+
+    for ([_]*ghostty_vt.Terminal{ &term, &client }) |t| {
+        var stream = t.vtStream();
+        defer stream.deinit();
+        stream.nextSlice(exit);
+    }
+
+    try expectHistoryMatches(alloc, &term, &client);
+    try expectCursorAt(&client, term.screens.active.cursor.y, term.screens.active.cursor.x);
+}
+
+test "serializeTerminalState keeps the primary screen behind 1049" {
+    try expectAltScreenRoundtrip(300, "\x1b[?1049h", "\x1b[?1049l");
+}
+
+test "serializeTerminalState keeps the primary screen behind 1047" {
+    try expectAltScreenRoundtrip(300, "\x1b[?1047h", "\x1b[?1047l");
+}
+
+test "serializeTerminalState keeps the primary screen behind 47" {
+    try expectAltScreenRoundtrip(300, "\x1b[?47h", "\x1b[?47l");
+}
+
+test "serializeTerminalState restores the cursor 1049 saved" {
+    // The prompt is not on the last row, so the cursor the app returns to
+    // differs from where the replayed rows end.
+    try expectAltScreenRoundtrip(2, "\x1b[?1049h", "\x1b[?1049l");
 }
 
 test "serializeTerminalState alternate screen not leaked" {
