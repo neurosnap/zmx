@@ -55,14 +55,16 @@ fn run(init: std.process.Init, entry_pid: p.pid_t) !void {
     if (!is_attach and !worker and !is_serve) return error.UnknownCommand;
 
     log_io = io;
-    const log_dir = if (p.getenv("ZMX_DIR")) |zmxdir|
-        std.fmt.allocPrint(alloc, "{s}/logs", .{zmxdir}) catch null
-    else if (p.getenv("XDG_STATE_HOME")) |xdg_state_home|
-        std.fmt.allocPrint(alloc, "{s}/zmx/logs", .{xdg_state_home}) catch null
-    else if (p.getenv("HOME")) |home_dir|
-        std.fmt.allocPrint(alloc, "{s}/.local/state/zmx/logs", .{home_dir}) catch null
-    else
-        null;
+    const log_dir = if (!is_serve) blk: {
+        if (p.getenv("ZMX_DIR")) |zmxdir|
+            break :blk std.fmt.allocPrint(alloc, "{s}/logs", .{zmxdir}) catch null
+        else if (p.getenv("XDG_STATE_HOME")) |xdg_state_home|
+            break :blk std.fmt.allocPrint(alloc, "{s}/zmx/logs", .{xdg_state_home}) catch null
+        else if (p.getenv("HOME")) |home_dir|
+            break :blk std.fmt.allocPrint(alloc, "{s}/.local/state/zmx/logs", .{home_dir}) catch null
+        else
+            break :blk null;
+    } else null;
 
     if (log_dir) |dir| {
         defer alloc.free(dir);
@@ -105,6 +107,10 @@ fn run(init: std.process.Init, entry_pid: p.pid_t) !void {
     if (args.next() != null) return error.UnexpectedArgument;
     if (worker) return @import("serve.zig").run(alloc, io, raw_name);
     if (comptime zmx.has_daemon) {
+        if (log_file) |f| {
+            f.close(io);
+            log_file = null;
+        }
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
         const cwd_len = std.process.currentPath(io, &cwd_buf) catch 0;
         const shell = init.environ_map.get("SHELL") orelse "/bin/sh";
