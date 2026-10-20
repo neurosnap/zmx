@@ -75,44 +75,6 @@ pub fn build(b: *std.Build) void {
         zmx_pkg_mod.addImport("ghostty-vt", d.module("ghostty-vt"));
     }
 
-    // Contributed networking is opt-in; default installs and releases stay local.
-    {
-        const remote_mod = b.createModule(.{
-            .root_source_file = b.path("contrib/zmosh/src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        });
-        remote_mod.addImport("libzmx", libzmx);
-        const remote = b.addExecutable(.{ .name = "zmosh", .root_module = remote_mod });
-        const install_remote = b.addInstallArtifact(remote, .{});
-        b.step("contrib-zmosh", "Build and install the contributed remote client").dependOn(&install_remote.step);
-        b.step("check-contrib-zmosh", "Check the contributed remote client").dependOn(&remote.step);
-        const remote_tests = b.createModule(.{
-            .root_source_file = b.path("contrib/zmosh/src/test.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        });
-        remote_tests.addImport("libzmx", libzmx);
-        const tests = b.addTest(.{ .root_module = remote_tests });
-        b.step("test-contrib-zmosh", "Run contributed remote client tests").dependOn(&b.addRunArtifact(tests).step);
-
-        if (dep) |d| {
-            // Test-only screen oracle; never part of the default install.
-            const screen_probe_mod = b.createModule(.{
-                .root_source_file = b.path("contrib/zmosh/test/screen_probe.zig"),
-                .target = target,
-                .optimize = optimize,
-                .link_libc = true,
-            });
-            screen_probe_mod.addImport("ghostty-vt", d.module("ghostty-vt"));
-            const screen_probe = b.addExecutable(.{ .name = "zmosh-screen-probe", .root_module = screen_probe_mod });
-            const install_screen_probe = b.addInstallArtifact(screen_probe, .{});
-            b.step("zmosh-screen-probe", "Build and install the test-only Ghostty screen oracle").dependOn(&install_screen_probe.step);
-        }
-    }
-
     // Run
     {
         const run_step = b.step("run", "Run the app");
@@ -123,11 +85,13 @@ pub fn build(b: *std.Build) void {
             .root_module = exe_mod,
         });
 
-        b.installArtifact(exe);
-        const run_cmd = b.addRunArtifact(exe);
-        run_cmd.step.dependOn(b.getInstallStep());
-        if (b.args) |args| run_cmd.addArgs(args);
-        run_step.dependOn(&run_cmd.step);
+        if (enable_daemon) {
+            b.installArtifact(exe);
+            const run_cmd = b.addRunArtifact(exe);
+            run_cmd.step.dependOn(b.getInstallStep());
+            if (b.args) |args| run_cmd.addArgs(args);
+            run_step.dependOn(&run_cmd.step);
+        }
     }
 
     // Test
@@ -164,17 +128,20 @@ pub fn build(b: *std.Build) void {
     // Check for LSP integration
     {
         const check = b.step("check", "Check if zmx compiles");
-        const exe_check = b.addExecutable(.{
-            .name = "zmx",
-            // .use_llvm = true,
-            // .use_lld = !is_macos,
-            .root_module = exe_mod,
-        });
-
-        // Finally we add the "check" step which will be detected
-        // by ZLS and automatically enable Build-On-Save.
-        // If you copy this into your `build.zig`, make sure to rename 'foo'
-        check.dependOn(&exe_check.step);
+        if (enable_daemon) {
+            const exe_check = b.addExecutable(.{
+                .name = "zmx",
+                .root_module = exe_mod,
+            });
+            check.dependOn(&exe_check.step);
+        } else {
+            const lib_check = b.addLibrary(.{
+                .name = "zmx",
+                .root_module = libzmx,
+                .linkage = .static,
+            });
+            check.dependOn(&lib_check.step);
+        }
     }
 
     // Release step - cross-compile to all targets from any host
