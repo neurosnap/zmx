@@ -16,14 +16,16 @@ pub fn createCmdZ(def_shell: []const u8, is_task_mode: bool, command: ?[]const [
     const gpa = std.heap.c_allocator;
 
     if (command) |cmd_args| {
-        const argv = try gpa.allocSentinel(?[*:0]const u8, cmd_args.len, null);
-        for (cmd_args, 0..) |arg, i| {
-            argv[i] = try gpa.dupeZ(u8, arg);
+        if (cmd_args.len > 0) {
+            const argv = try gpa.allocSentinel(?[*:0]const u8, cmd_args.len, null);
+            for (cmd_args, 0..) |arg, i| {
+                argv[i] = try gpa.dupeZ(u8, arg);
+            }
+            return .{
+                .file = argv[0].?,
+                .argv_ptr = argv.ptr,
+            };
         }
-        return .{
-            .file = argv[0].?,
-            .argv_ptr = argv.ptr,
-        };
     }
 
     const z = try std.fmt.allocPrintSentinel(gpa, "{s}", .{def_shell}, 0);
