@@ -1,8 +1,7 @@
 //! SSH bootstrap is deliberately separate from terminal and UDP handling.
 const std = @import("std");
-const zmx = @import("libzmx");
-const p = zmx.posix;
-const c = zmx.cross.c;
+const p = @import("posix.zig");
+const c = @import("compat.zig").c;
 const crypto = @import("crypto.zig");
 const udp = @import("udp.zig");
 

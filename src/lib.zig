@@ -9,19 +9,8 @@ pub const has_daemon = if (@hasDecl(build_options, "has_daemon")) build_options.
 // Publicly exported locked-in IPC wire protocol
 pub const ipc = @import("ipc.zig");
 
-// Building blocks used by zmx CLI, tests, and in-tree contrib/zmosh
-pub const cfg = @import("cfg.zig");
-pub const socket = @import("socket.zig");
-pub const posix = @import("posix.zig");
-pub const cross = @import("cross.zig");
-pub const signal = @import("signal.zig");
-pub const log = @import("log.zig");
-pub const util = @import("util.zig");
-pub const loop = if (has_daemon) @import("loop.zig") else struct {};
-pub const Daemon = if (has_daemon) loop.Daemon else struct {};
-pub const Client = if (has_daemon) loop.Client else struct {};
-
-pub const client = @import("client.zig");
+const client = @import("client.zig");
+const util = @import("util.zig");
 
 // ============================================================================
 // Public Types

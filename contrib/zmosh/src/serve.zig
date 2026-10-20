@@ -1,7 +1,7 @@
 //! UDP gateway for the current core daemon's native IPC.
 const std = @import("std");
 const zmx = @import("libzmx");
-const p = zmx.posix;
+const p = @import("posix.zig");
 const crypto = @import("crypto.zig");
 const udp = @import("udp.zig");
 const link_mod = @import("link.zig");
@@ -260,10 +260,10 @@ fn gatewayLoop(g: *Gateway, io: std.Io, fd: *i32) !void {
         var fds = [_]p.pollfd{
             .{ .fd = g.link.socket.fd, .events = p.POLL.IN, .revents = 0 },
             .{ .fd = if (g.eof or (!can_read and g.native.data().len == 0)) -1 else fd.*, .events = (if (can_read) @as(i16, p.POLL.IN) else 0) | (if (g.native.data().len > 0) @as(i16, p.POLL.OUT) else 0), .revents = 0 },
-            .{ .fd = zmx.signal.sig_pipe[0], .events = p.POLL.IN, .revents = 0 },
+            .{ .fd = runtime.sig_pipe[0], .events = p.POLL.IN, .revents = 0 },
         };
         _ = try p.poll(&fds, 20);
-        if (fds[2].revents != 0) zmx.signal.drainSignalPipe();
+        if (fds[2].revents != 0) runtime.drainSignalPipe();
         if (runtime.stopped.load(.acquire)) return error.GatewayInterrupted;
         // POLLHUP may accompany readable final data. Only read() == 0 ends
         // the stream, and a partially received final frame is always failure.

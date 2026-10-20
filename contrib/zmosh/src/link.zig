@@ -1,6 +1,6 @@
 //! Shared bounded scheduling for the fork-derived encrypted UDP transport.
 const std = @import("std");
-const posix = @import("libzmx").posix;
+const posix = @import("posix.zig");
 const udp = @import("udp.zig");
 const crypto = @import("crypto.zig");
 const transport = @import("transport.zig");

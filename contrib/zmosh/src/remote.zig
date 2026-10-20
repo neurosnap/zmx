@@ -2,8 +2,8 @@
 // MIT license; see ../LICENSE and ../UPSTREAM.md.
 const std = @import("std");
 const zmx = @import("libzmx");
-const p = zmx.posix;
-const c = zmx.cross.c;
+const p = @import("posix.zig");
+const c = @import("compat.zig").c;
 const bootstrap = @import("bootstrap.zig");
 const udp = @import("udp.zig");
 const link_mod = @import("link.zig");
@@ -109,10 +109,10 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, session: bootstrap.RemoteSessio
             .{ .fd = link.socket.fd, .events = p.POLL.IN, .revents = 0 },
             .{ .fd = if (!input_closed and detach_at == null and ended_at == null and link.outgoing.room() >= 4096) 0 else -1, .events = p.POLL.IN, .revents = 0 },
             .{ .fd = if (output.data().len > 0) 1 else -1, .events = p.POLL.OUT, .revents = 0 },
-            .{ .fd = zmx.signal.sig_pipe[0], .events = p.POLL.IN, .revents = 0 },
+            .{ .fd = runtime.sig_pipe[0], .events = p.POLL.IN, .revents = 0 },
         };
         _ = try p.poll(&fds, 20);
-        if (fds[3].revents != 0) zmx.signal.drainSignalPipe();
+        if (fds[3].revents != 0) runtime.drainSignalPipe();
         if (fds[0].revents & p.POLL.IN != 0) try link.receive(udp.nanoNow(io));
         if (fds[2].revents & (p.POLL.HUP | p.POLL.ERR | p.POLL.NVAL) != 0) return error.StdoutClosed;
         if (fds[2].revents & p.POLL.OUT != 0) {

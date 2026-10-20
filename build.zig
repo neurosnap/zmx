@@ -84,7 +84,6 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         });
         remote_mod.addImport("libzmx", libzmx);
-        remote_mod.addImport("zmx", zmx_pkg_mod);
         const remote = b.addExecutable(.{ .name = "zmosh", .root_module = remote_mod });
         const install_remote = b.addInstallArtifact(remote, .{});
         b.step("contrib-zmosh", "Build and install the contributed remote client").dependOn(&install_remote.step);
@@ -96,7 +95,6 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         });
         remote_tests.addImport("libzmx", libzmx);
-        remote_tests.addImport("zmx", zmx_pkg_mod);
         const tests = b.addTest(.{ .root_module = remote_tests });
         b.step("test-contrib-zmosh", "Run contributed remote client tests").dependOn(&b.addRunArtifact(tests).step);
 
