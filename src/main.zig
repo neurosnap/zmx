@@ -1110,7 +1110,6 @@ fn history(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []cons
     _ = lib_posix.write(lib_posix.STDOUT_FILENO, data) catch return;
 }
 
-
 const AttachArgs = struct {
     /// Session name, or "" when the caller did not name one.
     session_name: []const u8 = "",
@@ -1158,7 +1157,6 @@ fn parseAttachArgs(argv: []const []const u8) AttachArgs {
     parsed.command_start = i;
     return parsed;
 }
-
 
 fn writeFile(gpa: std.mem.Allocator, io: std.Io, session_name: []const u8, file_path: []const u8, cwd: []const u8, shell: ?[]const u8) !void {
     _ = try zmx.create(gpa, io, session_name, .{ .cwd = cwd, .shell = shell });

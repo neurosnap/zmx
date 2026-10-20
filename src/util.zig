@@ -718,14 +718,11 @@ fn parseDecimal(buf: []const u8, pos: *usize) ?u32 {
     return value;
 }
 
-
-
 pub const HistoryFormat = enum(u8) {
     plain = 0,
     vt = 1,
     html = 2,
 };
-
 
 /// Formats a session entry for list output (only the name when `short` is
 /// true), adding a prefix to indicate the current session, if there is one.
@@ -1420,4 +1417,3 @@ test "stripAnsi: UTF-8 bytes do not start escape sequences" {
     defer alloc.free(result);
     try testing.expectEqualStrings("Ýmir\nline two\n", result);
 }
-
