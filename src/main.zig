@@ -36,6 +36,15 @@ fn printError(io: std.Io, comptime fmt: []const u8, args: anytype) noreturn {
     std.process.exit(1);
 }
 pub fn main(init: std.process.Init) !void {
+    mainImpl(init) catch |err| switch (err) {
+        error.Sighup => signal.reraise(.HUP),
+        error.Sigint => signal.reraise(.INT),
+        error.Sigterm => signal.reraise(.TERM),
+        else => return err,
+    };
+}
+
+fn mainImpl(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
 
