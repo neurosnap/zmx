@@ -146,7 +146,11 @@ test "mkdirAll fails on dangling symlink instead of looping" {
     defer tmp.cleanup();
 
     const alloc = std.testing.allocator;
-    const tmp_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    // Dir.realPathFile is unsupported on OpenBSD, so build the absolute path
+    // from the cwd instead.
+    const cwd_path = try std.process.currentPathAlloc(std.testing.io, alloc);
+    defer alloc.free(cwd_path);
+    const tmp_path = try std.fs.path.join(alloc, &.{ cwd_path, ".zig-cache", "tmp", &tmp.sub_path });
     defer alloc.free(tmp_path);
 
     try tmp.dir.symLink(std.testing.io, "nonexistent", "broken_link", .{});
