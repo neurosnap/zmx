@@ -107,7 +107,7 @@ pub fn clientLoop(client_sock_fd: i32, env_str: []const u8) !ClientResult {
         _ = try lib_posix.poll(poll_fds.items, -1);
 
         if (poll_fds.items[2].revents & lib_posix.POLL.IN != 0) {
-            if (signal.drainSignalPipe()) return ClientResult{ .kind = .detach, .session_name = null };
+            try signal.drainSignalPipe();
             const next_size = ipc.getTerminalSize(lib_posix.STDOUT_FILENO);
             try ipc.appendMessage(
                 gpa,
@@ -307,7 +307,7 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
         _ = try lib_posix.poll(poll_fds.items, -1);
 
         if (poll_fds.items[2].revents & lib_posix.POLL.IN != 0) {
-            _ = signal.drainSignalPipe();
+            signal.drainSignalPipe() catch {};
             std.log.info(
                 "SIGTERM received, shutting down gracefully session={s}",
                 .{daemon.session_name},

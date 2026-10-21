@@ -45,15 +45,33 @@ pub fn closeSignalPipe() void {
     lib_posix.close(fds[1]);
 }
 
-/// Returns true if any signal other than SIGWINCH was received.
-pub fn drainSignalPipe() bool {
-    var terminate = false;
+pub fn drainSignalPipe() error{ Sighup, Sigint, Sigterm }!void {
     var b: [16]u8 = undefined;
     while (true) {
-        const n = lib_posix.read(sig_pipe[0], &b) catch return terminate;
-        if (n == 0) return terminate;
+        const n = lib_posix.read(sig_pipe[0], &b) catch return;
+        if (n == 0) return;
         for (b[0..n]) |sig| {
-            if (sig != @backingInt(lib_posix.SIG.WINCH)) terminate = true;
+            switch (sig) {
+                @backingInt(lib_posix.SIG.HUP) => return error.Sighup,
+                @backingInt(lib_posix.SIG.INT) => return error.Sigint,
+                @backingInt(lib_posix.SIG.TERM) => return error.Sigterm,
+                else => {},
+            }
         }
     }
+}
+
+pub fn reraise(sig: lib_posix.SIG) noreturn {
+    const act: lib_posix.Sigaction = .{
+        .handler = .{ .handler = lib_posix.SIG.DFL },
+        .mask = lib_posix.sigemptyset(),
+        .flags = 0,
+    };
+    lib_posix.sigaction(sig, &act, null);
+
+    var mask = lib_posix.sigemptyset();
+    std.posix.sigaddset(&mask, sig);
+    std.posix.sigprocmask(lib_posix.SIG.UNBLOCK, &mask, null);
+    std.posix.raise(sig) catch {};
+    std.process.exit(128 + @as(u8, @intCast(@backingInt(sig))));
 }
