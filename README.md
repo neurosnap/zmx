@@ -130,7 +130,7 @@ The library in `src/lib.zig` is importable as the `zmx` package from other Zig p
 // build.zig.zon
 .dependencies = .{
     .zmx = .{
-        .url = "git+https://github.com/your-org/zmx#<commit>",
+        .url = "git+https://github.com/neurosnap/zmx#<commit>",
         .hash = "...",
     },
 },
