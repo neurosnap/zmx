@@ -4,17 +4,12 @@ const build_options = @import("build_options");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-pub const has_daemon = if (@hasDecl(build_options, "has_daemon")) build_options.has_daemon else true;
-
-// Publicly exported locked-in IPC wire protocol
-pub const ipc = @import("ipc.zig");
-
 const client = @import("client.zig");
 const util = @import("util.zig");
 
-// ============================================================================
-// Public Types
-// ============================================================================
+pub const has_daemon = if (@hasDecl(build_options, "has_daemon")) build_options.has_daemon else true;
+
+pub const ipc = @import("ipc.zig");
 
 pub const HistoryFormat = util.HistoryFormat;
 pub const SessionEntry = util.SessionEntry;
@@ -24,10 +19,6 @@ pub const AttachOptions = client.AttachOptions;
 pub const RunOptions = client.RunOptions;
 pub const KillOptions = client.KillOptions;
 pub const KillStatus = client.KillStatus;
-
-// ============================================================================
-// CLI-Mirrored Top-Level Functions
-// ============================================================================
 
 pub const connect = client.connect;
 pub const attach = client.attach;

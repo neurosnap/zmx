@@ -1,9 +1,4 @@
 const std = @import("std");
-const build_options = @import("build_options");
-const has_daemon = if (@hasDecl(build_options, "has_daemon")) build_options.has_daemon else true;
-const ghostty_vt = if (has_daemon) @import("ghostty-vt") else struct {
-    pub const Terminal = struct {};
-};
 const ipc = @import("ipc.zig");
 const log = @import("log.zig");
 const util = @import("util.zig");
@@ -16,6 +11,8 @@ const signal = @import("signal.zig");
 const assert = std.debug.assert;
 const daemonize = @import("daemonize.zig");
 const builtin = @import("builtin");
+const terminal = @import("terminal.zig");
+const ghostty_vt = terminal.ghostty_vt;
 
 /// clientLoop sends ipc commands to its corresponding daemon.  It uses poll() as its non-blocking
 /// mechanism. It will send stdin to the daemon and receive stdout from the daemon.

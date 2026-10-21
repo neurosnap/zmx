@@ -1,7 +1,15 @@
 const std = @import("std");
-const ghostty_vt = @import("ghostty-vt");
+const build_options = @import("build_options");
 const util = @import("util.zig");
 const testing = std.testing;
+const has_daemon = if (@hasDecl(build_options, "has_daemon")) build_options.has_daemon else true;
+pub const ghostty_vt = if (has_daemon) @import("ghostty-vt") else struct {
+    pub const Terminal = struct {};
+    pub const Parser = struct {};
+    pub const Selection = struct {};
+    pub const formatter = struct {};
+    pub const color = struct {};
+};
 
 pub const HistoryFormat = util.HistoryFormat;
 

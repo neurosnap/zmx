@@ -18,7 +18,7 @@ pub fn build(b: *std.Build) void {
     const version = b.option([]const u8, "version", "Version string for release") orelse
         @as([]const u8, build_zig_zon.version);
 
-    const enable_daemon = b.option(bool, "daemon", "Include daemon support and Ghostty VT in libzmx") orelse true;
+    const enable_daemon = b.option(bool, "daemon", "Include daemon support and Ghostty VT in zmx pkg") orelse true;
 
     const options = b.addOptions();
     options.addOption([]const u8, "version", version);
@@ -51,19 +51,7 @@ pub fn build(b: *std.Build) void {
         );
     }
 
-    // libzmx module: programmatic interface for embedding or external tools
-    const libzmx = b.addModule("libzmx", .{
-        .root_source_file = b.path("src/lib.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    libzmx.addOptions("build_options", options);
-    if (dep) |d| {
-        libzmx.addImport("ghostty-vt", d.module("ghostty-vt"));
-    }
-
-    // Also export as "zmx" for packages that depend on the package name
+    // zmx module: programmatic interface for embedding or external tools
     const zmx_pkg_mod = b.addModule("zmx", .{
         .root_source_file = b.path("src/lib.zig"),
         .target = target,
@@ -73,6 +61,28 @@ pub fn build(b: *std.Build) void {
     zmx_pkg_mod.addOptions("build_options", options);
     if (dep) |d| {
         zmx_pkg_mod.addImport("ghostty-vt", d.module("ghostty-vt"));
+    }
+
+    // Examples: build the usage examples in examples/ against the zmx module
+    {
+        const examples_step = b.step("examples", "Build usage examples");
+        const Example = struct { name: []const u8, file: []const u8 };
+        const example_sources: []const Example = &.{
+            .{ .name = "example-run-and-wait", .file = "examples/run_and_wait.zig" },
+            .{ .name = "example-list-sessions", .file = "examples/list_sessions.zig" },
+        };
+        for (example_sources) |ex| {
+            const ex_mod = b.createModule(.{
+                .root_source_file = b.path(ex.file),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            });
+            ex_mod.addImport("zmx", zmx_pkg_mod);
+            const ex_exe = b.addExecutable(.{ .name = ex.name, .root_module = ex_mod });
+            const install = b.addInstallArtifact(ex_exe, .{});
+            examples_step.dependOn(&install.step);
+        }
     }
 
     // Run
@@ -137,7 +147,7 @@ pub fn build(b: *std.Build) void {
         } else {
             const lib_check = b.addLibrary(.{
                 .name = "zmx",
-                .root_module = libzmx,
+                .root_module = zmx_pkg_mod,
                 .linkage = .static,
             });
             check.dependOn(&lib_check.step);
