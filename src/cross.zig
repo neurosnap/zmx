@@ -8,6 +8,14 @@ pub const c = switch (builtin.os.tag) {
         @cInclude("stdlib.h");
         @cInclude("unistd.h");
     }),
+    .openbsd => @cImport({
+        @cInclude("sys/types.h");
+        @cInclude("sys/ioctl.h");
+        @cInclude("termios.h");
+        @cInclude("util.h"); // forkpty()
+        @cInclude("stdlib.h");
+        @cInclude("unistd.h");
+    }),
     .freebsd => @cImport({
         @cInclude("termios.h"); // ioctl and constants
         @cInclude("libutil.h"); // openpty()
