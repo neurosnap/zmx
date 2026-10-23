@@ -267,8 +267,9 @@ const DA2_QUERY_EXPLICIT = "\x1b[>0c";
 const DA1_RESPONSE = "\x1b[?62;22c";
 const DA2_RESPONSE = "\x1b[>1;10;0c";
 
-pub fn respondToDeviceAttributes(alloc: std.mem.Allocator, buf: *std.ArrayList(u8), data: []const u8) void {
+pub fn respondToDeviceAttributes(alloc: std.mem.Allocator, buf: *std.ArrayList(u8), data: []u8) []const u8 {
     // Scan for DA queries in PTY output and respond on behalf of the terminal.
+    // Compact data in place and return the bytes left for clients.
     // This handles the case where no client is attached (e.g. zmx run)
     // and the shell (e.g. fish) sends a DA query that would otherwise go unanswered.
     //
@@ -282,22 +283,77 @@ pub fn respondToDeviceAttributes(alloc: std.mem.Allocator, buf: *std.ArrayList(u
     // DA1 response (from terminal): ESC [ ? ... c  (has '?' after '[')
     //
     // We must NOT match DA responses (which contain '?') as queries.
+    const queries = [_][]const u8{ DA1_QUERY, DA1_QUERY_EXPLICIT, DA2_QUERY, DA2_QUERY_EXPLICIT };
     var i: usize = 0;
+    var kept: usize = 0;
+    var previous: u8 = 0;
     while (i < data.len) {
-        if (data[i] == '\x1b' and i + 1 < data.len and data[i + 1] == '[') {
-            // Skip DA responses which have '?' after CSI
-            if (i + 2 < data.len and data[i + 2] == '?') {
-                i += 3;
-                continue;
-            }
-            if (matchSeq(data[i..], DA2_QUERY) or matchSeq(data[i..], DA2_QUERY_EXPLICIT)) {
-                buf.appendSlice(alloc, DA2_RESPONSE) catch {};
-            } else if (matchSeq(data[i..], DA1_QUERY) or matchSeq(data[i..], DA1_QUERY_EXPLICIT)) {
-                buf.appendSlice(alloc, DA1_RESPONSE) catch {};
-            }
+        var answered = false;
+        for (queries, 0..) |query, index| {
+            if (!matchSeq(data[i..], query)) continue;
+            buf.appendSlice(alloc, if (index < 2) DA1_RESPONSE else DA2_RESPONSE) catch break;
+            if (previous == '\x1b') break;
+            previous = query[query.len - 1];
+            i += query.len;
+            answered = true;
+            break;
         }
+        if (answered) continue;
+        previous = data[i];
+        data[kept] = previous;
+        kept += 1;
         i += 1;
     }
+    return data[0..kept];
+}
+
+test "answered device queries are removed while text and replies keep their order" {
+    const alloc = testing.allocator;
+    var replies: std.ArrayList(u8) = .empty;
+    defer replies.deinit(alloc);
+    try replies.appendSlice(alloc, "typed");
+    var data = ("before" ++ DA1_QUERY ++ "middle" ++ DA1_QUERY_EXPLICIT ++ DA2_QUERY ++
+        DA2_QUERY_EXPLICIT ++ DA1_RESPONSE ++ DA2_RESPONSE ++ "after").*;
+    const output = respondToDeviceAttributes(alloc, &replies, &data);
+    try testing.expectEqualStrings("beforemiddle" ++ DA1_RESPONSE ++ DA2_RESPONSE ++ "after", output);
+    try testing.expectEqualStrings("typed" ++ DA1_RESPONSE ++ DA1_RESPONSE ++ DA2_RESPONSE ++ DA2_RESPONSE, replies.items);
+}
+
+test "unanswered split queries and unrelated sequences remain available to clients" {
+    const alloc = testing.allocator;
+    var replies: std.ArrayList(u8) = .empty;
+    defer replies.deinit(alloc);
+    for ([_][]const u8{ DA1_QUERY, DA1_QUERY_EXPLICIT, DA2_QUERY, DA2_QUERY_EXPLICIT }) |query| {
+        for (1..query.len) |split| {
+            const data = try alloc.dupe(u8, query);
+            defer alloc.free(data);
+            try testing.expectEqualStrings(query[0..split], respondToDeviceAttributes(alloc, &replies, data[0..split]));
+            try testing.expectEqualStrings(query[split..], respondToDeviceAttributes(alloc, &replies, data[split..]));
+            try testing.expectEqual(@as(usize, 0), replies.items.len);
+        }
+    }
+    var data = "text\x1b[6n\x1b[>0q\x1b[00c\x1b[?62;22c".*;
+    try testing.expectEqualStrings("text\x1b[6n\x1b[>0q\x1b[00c\x1b[?62;22c", respondToDeviceAttributes(alloc, &replies, &data));
+    try testing.expectEqual(@as(usize, 0), replies.items.len);
+}
+
+test "answered queries preserve tmux DCS passthrough framing" {
+    const alloc = testing.allocator;
+    var replies: std.ArrayList(u8) = .empty;
+    defer replies.deinit(alloc);
+    const passthrough = "\x1bPtmux;\x1b\x1b[c\x1b\\";
+    var data = (DA1_QUERY ++ passthrough ++ DA2_QUERY).*;
+    try testing.expectEqualStrings(passthrough, respondToDeviceAttributes(alloc, &replies, &data));
+    try testing.expectEqualStrings(DA1_RESPONSE ++ DA1_RESPONSE ++ DA2_RESPONSE, replies.items);
+}
+
+test "a query stays available when its reply cannot be queued" {
+    var storage: [0]u8 = .{};
+    var allocator = std.heap.FixedBufferAllocator.init(&storage);
+    var replies: std.ArrayList(u8) = .empty;
+    var data = ("before" ++ DA1_QUERY ++ "after").*;
+    try testing.expectEqualStrings("before" ++ DA1_QUERY ++ "after", respondToDeviceAttributes(allocator.allocator(), &replies, &data));
+    try testing.expectEqual(@as(usize, 0), replies.items.len);
 }
 
 fn matchSeq(data: []const u8, seq: []const u8) bool {
