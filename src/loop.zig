@@ -267,6 +267,10 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
             daemon.queuePtyInput(gpa, if (has_terminal_client) "\x1b[I" else "\x1b[O");
         }
         had_terminal_client = has_terminal_client;
+        // --min-window: follow the smallest client. Resizes only record a
+        // client's size and detaches drop it; this applies the result before
+        // the next poll, whichever path changed it.
+        if (daemon.min_window_size) try daemon.applyMinSize(gpa, pty_fd, &term);
 
         poll_fds.clearRetainingCapacity();
 
@@ -570,6 +574,8 @@ pub const Client = struct {
     read_buf: ipc.SocketBuffer,
     write_buf: std.ArrayList(u8),
     env_str: ?[]u8 = null,
+    /// Last window size this attach client reported; null until it sends .Init.
+    size: ?ipc.Resize = null,
 
     pub fn deinit(self: *Client, gpa: std.mem.Allocator) void {
         lib_posix.close(self.socket_fd);
@@ -603,6 +609,9 @@ pub const Daemon = struct {
     // This control which client is the leader.  The leader controls terminal state and
     // cols/rows of session.
     leader_client_fd: ?i32 = null,
+    /// Size the PTY to the smallest cols and rows among attached terminal
+    /// clients instead of following the leader. Fixed when the session is created.
+    min_window_size: bool = false,
     running: bool = true,
     pid: i32 = undefined,
     command: ?[]const []const u8 = null,
@@ -673,6 +682,44 @@ pub const Daemon = struct {
         try term.resize(gpa, .{ .cols = cols, .rows = rows });
     }
 
+    /// Resize the PTY and our terminal together, so our terminal stays at the PTY's size.
+    fn resizeSession(gpa: std.mem.Allocator, pty_fd: i32, term: *ghostty_vt.Terminal, size: ipc.Resize) !void {
+        var ws = size.winsize();
+        _ = cross.c.ioctl(pty_fd, cross.c.TIOCSWINSZ, &ws);
+        try resizeTerm(gpa, term, size.cols, size.rows);
+    }
+
+    /// Smallest cols and rows reported by any attached terminal client.
+    fn minClientSize(self: *const Daemon) ?ipc.Resize {
+        var result: ?ipc.Resize = null;
+        for (self.clients.items) |c| {
+            if (!c.is_terminal) continue;
+            const sz = c.size orelse continue;
+            if (result) |*r| {
+                if (sz.cols < r.cols) {
+                    r.cols = sz.cols;
+                    r.xpixel = sz.xpixel;
+                }
+                if (sz.rows < r.rows) {
+                    r.rows = sz.rows;
+                    r.ypixel = sz.ypixel;
+                }
+            } else {
+                result = sz;
+            }
+        }
+        return result;
+    }
+
+    /// Resize the PTY and our terminal to the smallest attached client.
+    /// Our terminal is kept at the PTY's size, so it tells what is applied.
+    fn applyMinSize(self: *const Daemon, gpa: std.mem.Allocator, pty_fd: i32, term: *ghostty_vt.Terminal) !void {
+        const target = self.minClientSize() orelse return;
+        if (target.cols == term.cols and target.rows == term.rows) return;
+        try resizeSession(gpa, pty_fd, term, target);
+        std.log.debug("min size rows={d} cols={d}", .{ target.rows, target.cols });
+    }
+
     /// True while a client that sent .Init (a real `zmx attach`) is connected.
     fn hasTerminalClient(self: *const Daemon) bool {
         for (self.clients.items) |c| {
@@ -730,6 +777,12 @@ pub const Daemon = struct {
                 if (self.command != null) {
                     std.log.warn(
                         "session already exists, ignoring command session={s}",
+                        .{sesh_name},
+                    );
+                }
+                if (self.min_window_size) {
+                    std.log.warn(
+                        "session already exists, ignoring --min-window session={s}",
                         .{sesh_name},
                     );
                 }
@@ -990,7 +1043,15 @@ pub const Daemon = struct {
             try self.setLeader(gpa, client);
         }
         const is_leader = self.leader_client_fd == client.socket_fd;
-        const resize = std.mem.bytesToValue(ipc.Resize, payload);
+        var resize = std.mem.bytesToValue(ipc.Resize, payload);
+        client.size = resize;
+        // --min-window: every attach sizes the session, to the smallest client.
+        // Done here rather than left to daemonLoop, because the snapshot below
+        // must be laid out at the size the PTY is about to get.
+        if (self.min_window_size) {
+            resize = self.minClientSize() orelse resize;
+        }
+        const sets_size = is_leader or self.min_window_size;
 
         // Resize our terminal (not yet the PTY) to the leader's size before
         // serializing, so the snapshot is laid out for the width the client
@@ -998,7 +1059,7 @@ pub const Daemon = struct {
         // Cursor position stays consistent because it is serialized from the
         // same, already-resized terminal; the PTY is resized below, so the
         // shell's own SIGWINCH redraw still arrives after the snapshot.
-        if (is_leader) {
+        if (sets_size) {
             try resizeTerm(gpa, term, resize.cols, resize.rows);
         }
 
@@ -1025,8 +1086,8 @@ pub const Daemon = struct {
             }
         }
 
-        // only resize if leader
-        if (is_leader) {
+        // only resize if leader, or on every attach with --min-window
+        if (sets_size) {
             var ws = resize.winsize();
             _ = cross.c.ioctl(pty_fd, cross.c.TIOCSWINSZ, &ws);
 
@@ -1057,13 +1118,16 @@ pub const Daemon = struct {
         if (self.leader_client_fd == null) {
             try self.setLeader(gpa, client);
         }
+        const resize = std.mem.bytesToValue(ipc.Resize, payload);
+        // run/send clients also send Resize but never attached a terminal.
+        if (client.is_terminal) client.size = resize;
+        // --min-window: every attached client's size counts, not only the
+        // leader's; daemonLoop applies the smallest size before it polls again.
+        if (self.min_window_size) return;
         // only leader can resize
         if (self.leader_client_fd != client.socket_fd) return;
 
-        const resize = std.mem.bytesToValue(ipc.Resize, payload);
-        var ws = resize.winsize();
-        _ = cross.c.ioctl(pty_fd, cross.c.TIOCSWINSZ, &ws);
-        try resizeTerm(gpa, term, resize.cols, resize.rows);
+        try resizeSession(gpa, pty_fd, term, resize);
         std.log.debug("resize rows={d} cols={d}", .{ resize.rows, resize.cols });
     }
 
@@ -1568,4 +1632,246 @@ test "handleEnvGet returns leader client's environment variables including unset
     try daemon.handleEnvGet(alloc, &client_req);
     const pay3 = client_req.write_buf.items[@sizeOf(ipc.Header)..];
     try std.testing.expectEqualStrings("DISPLAY=:99\n", pay3);
+}
+
+/// A pty whose size the min_window_size tests read back.
+const TestPty = struct {
+    master: i32,
+    slave: i32,
+
+    fn open() !TestPty {
+        var master: c_int = undefined;
+        var slave: c_int = undefined;
+        if (cross.c.openpty(&master, &slave, null, null, null) != 0) return error.OpenPtyFailed;
+        return .{ .master = master, .slave = slave };
+    }
+
+    fn close(self: TestPty) void {
+        lib_posix.close(self.master);
+        lib_posix.close(self.slave);
+    }
+
+    fn size(self: TestPty) ipc.Resize {
+        return ipc.getTerminalSize(self.master);
+    }
+};
+
+fn testSized(rows: u16, cols: u16) ipc.Resize {
+    return .{ .rows = rows, .cols = cols };
+}
+
+test "minClientSize takes the smallest cols and rows from terminal clients" {
+    const alloc = std.testing.allocator;
+    var daemon = testDaemon();
+    defer daemon.clients.deinit(alloc);
+
+    try std.testing.expectEqual(@as(?ipc.Resize, null), daemon.minClientSize());
+
+    const a = try lib_posix.pipe2(.{});
+    const b = try lib_posix.pipe2(.{});
+    const c = try lib_posix.pipe2(.{});
+    const d = try lib_posix.pipe2(.{});
+    lib_posix.close(a[1]);
+    lib_posix.close(b[1]);
+    lib_posix.close(c[1]);
+    lib_posix.close(d[1]);
+
+    // Wide but short, and narrow but tall: the result mixes both.
+    const wide = try testClient(alloc, a[0], true);
+    wide.size = .{ .rows = 20, .cols = 200, .xpixel = 2000, .ypixel = 400 };
+    const tall = try testClient(alloc, b[0], true);
+    tall.size = .{ .rows = 60, .cols = 90, .xpixel = 900, .ypixel = 1200 };
+    // Neither a run/send client nor an attach that has not reported a size counts.
+    const tiny_run = try testClient(alloc, c[0], false);
+    tiny_run.size = testSized(5, 10);
+    const unsized = try testClient(alloc, d[0], true);
+    try daemon.clients.appendSlice(alloc, &.{ wide, tall, tiny_run, unsized });
+    defer for (daemon.clients.items) |cl| {
+        cl.deinit(alloc);
+        alloc.destroy(cl);
+    };
+
+    const min = daemon.minClientSize() orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqual(@as(u16, 20), min.rows);
+    try std.testing.expectEqual(@as(u16, 90), min.cols);
+    // Pixel sizes come from the client that supplied that dimension.
+    try std.testing.expectEqual(@as(u16, 900), min.xpixel);
+    try std.testing.expectEqual(@as(u16, 400), min.ypixel);
+}
+
+test "min_window_size resizes the PTY to the smallest client as clients come and go" {
+    const alloc = std.testing.allocator;
+    const cfg = Cfg{ .socket_dir = "", .log_dir = "" };
+    var term = try initTerminal(alloc, std.testing.io, testSized(24, 80), &cfg);
+    defer term.deinit(alloc);
+    const pty = try TestPty.open();
+    defer pty.close();
+
+    var daemon = testDaemon();
+    daemon.min_window_size = true;
+    defer daemon.clients.deinit(alloc);
+
+    const a = try lib_posix.pipe2(.{});
+    const b = try lib_posix.pipe2(.{});
+    lib_posix.close(a[1]);
+    lib_posix.close(b[1]);
+    const first = try testClient(alloc, a[0], false);
+    const second = try testClient(alloc, b[0], false);
+    try daemon.clients.append(alloc, first);
+    try daemon.clients.append(alloc, second);
+
+    const big = testSized(50, 200);
+    const small = testSized(30, 100);
+    try daemon.handleInit(alloc, first, pty.master, &term, std.mem.asBytes(&big));
+    try std.testing.expectEqual(@as(u16, 200), pty.size().cols);
+    try std.testing.expectEqual(@as(u16, 50), pty.size().rows);
+
+    // A second, smaller client shrinks the PTY even though it is not the leader.
+    try std.testing.expectEqual(@as(?i32, first.socket_fd), daemon.leader_client_fd);
+    try daemon.handleInit(alloc, second, pty.master, &term, std.mem.asBytes(&small));
+    try std.testing.expectEqual(@as(u16, 100), pty.size().cols);
+    try std.testing.expectEqual(@as(u16, 30), pty.size().rows);
+    try std.testing.expectEqual(@as(u16, 100), term.cols);
+    try std.testing.expectEqual(@as(u16, 30), term.rows);
+
+    // Each applyMinSize below stands in for the next daemonLoop iteration.
+
+    // The larger client resizing cannot grow the PTY past the smaller one.
+    const bigger = testSized(60, 220);
+    try daemon.handleResize(alloc, first, pty.master, &term, std.mem.asBytes(&bigger));
+    try daemon.applyMinSize(alloc, pty.master, &term);
+    try std.testing.expectEqual(@as(u16, 100), pty.size().cols);
+    try std.testing.expectEqual(@as(u16, 30), pty.size().rows);
+
+    // The smaller client resizing moves the PTY, once the loop applies it.
+    const smaller = testSized(25, 90);
+    try daemon.handleResize(alloc, second, pty.master, &term, std.mem.asBytes(&smaller));
+    try std.testing.expectEqual(@as(u16, 100), pty.size().cols);
+    try daemon.applyMinSize(alloc, pty.master, &term);
+    try std.testing.expectEqual(@as(u16, 90), pty.size().cols);
+    try std.testing.expectEqual(@as(u16, 25), pty.size().rows);
+    try std.testing.expectEqual(@as(u16, 90), term.cols);
+
+    // When the smaller client leaves, the PTY grows to what remains.
+    _ = daemon.closeClient(alloc, second, 1, false);
+    try daemon.applyMinSize(alloc, pty.master, &term);
+    try std.testing.expectEqual(@as(u16, 220), pty.size().cols);
+    try std.testing.expectEqual(@as(u16, 60), pty.size().rows);
+    try std.testing.expectEqual(@as(u16, 220), term.cols);
+
+    _ = daemon.closeClient(alloc, first, 0, false);
+}
+
+test "min_window_size ignores resizes from clients that never attached a terminal" {
+    const alloc = std.testing.allocator;
+    const cfg = Cfg{ .socket_dir = "", .log_dir = "" };
+    var term = try initTerminal(alloc, std.testing.io, testSized(24, 80), &cfg);
+    defer term.deinit(alloc);
+    const pty = try TestPty.open();
+    defer pty.close();
+
+    var daemon = testDaemon();
+    daemon.min_window_size = true;
+    defer daemon.clients.deinit(alloc);
+
+    const a = try lib_posix.pipe2(.{});
+    const b = try lib_posix.pipe2(.{});
+    lib_posix.close(a[1]);
+    lib_posix.close(b[1]);
+    const attach = try testClient(alloc, a[0], false);
+    const run = try testClient(alloc, b[0], false);
+    try daemon.clients.append(alloc, attach);
+    try daemon.clients.append(alloc, run);
+
+    const real = testSized(40, 150);
+    try daemon.handleInit(alloc, attach, pty.master, &term, std.mem.asBytes(&real));
+    // `zmx run` sends its own terminal size as a Resize without an Init.
+    const tiny = testSized(5, 10);
+    try daemon.handleResize(alloc, run, pty.master, &term, std.mem.asBytes(&tiny));
+    try daemon.applyMinSize(alloc, pty.master, &term);
+
+    try std.testing.expectEqual(@as(u16, 150), pty.size().cols);
+    try std.testing.expectEqual(@as(u16, 40), pty.size().rows);
+
+    _ = daemon.closeClient(alloc, run, 1, false);
+    _ = daemon.closeClient(alloc, attach, 0, false);
+}
+
+test "min_window_size keeps the smallest size whichever client attaches or leads" {
+    const alloc = std.testing.allocator;
+    const cfg = Cfg{ .socket_dir = "", .log_dir = "" };
+    var term = try initTerminal(alloc, std.testing.io, testSized(24, 80), &cfg);
+    defer term.deinit(alloc);
+    const pty = try TestPty.open();
+    defer pty.close();
+
+    var daemon = testDaemon();
+    daemon.min_window_size = true;
+    defer daemon.clients.deinit(alloc);
+    defer daemon.pty_write_buf.deinit(alloc);
+
+    const a = try lib_posix.pipe2(.{});
+    const b = try lib_posix.pipe2(.{});
+    lib_posix.close(a[1]);
+    lib_posix.close(b[1]);
+    const small = try testClient(alloc, a[0], false);
+    const big = try testClient(alloc, b[0], false);
+    try daemon.clients.append(alloc, small);
+    try daemon.clients.append(alloc, big);
+
+    const small_size = testSized(30, 100);
+    const big_size = testSized(50, 200);
+    try daemon.handleInit(alloc, small, pty.master, &term, std.mem.asBytes(&small_size));
+
+    // A larger client attaching neither grows the PTY nor lays out its
+    // snapshot at its own size.
+    try daemon.handleInit(alloc, big, pty.master, &term, std.mem.asBytes(&big_size));
+    try std.testing.expectEqual(@as(u16, 100), pty.size().cols);
+    try std.testing.expectEqual(@as(u16, 30), pty.size().rows);
+    try std.testing.expectEqual(@as(u16, 100), term.cols);
+
+    // Typing makes the larger client the leader, which then answers the
+    // leader's Resize request with its size; the PTY stays at the smaller one.
+    try daemon.handleInput(alloc, big, "x");
+    try std.testing.expectEqual(@as(?i32, big.socket_fd), daemon.leader_client_fd);
+    try daemon.handleResize(alloc, big, pty.master, &term, std.mem.asBytes(&big_size));
+    try daemon.applyMinSize(alloc, pty.master, &term);
+    try std.testing.expectEqual(@as(u16, 100), pty.size().cols);
+    try std.testing.expectEqual(@as(u16, 30), pty.size().rows);
+
+    _ = daemon.closeClient(alloc, big, 1, false);
+    _ = daemon.closeClient(alloc, small, 0, false);
+}
+
+test "without min_window_size only the leader resizes the PTY" {
+    const alloc = std.testing.allocator;
+    const cfg = Cfg{ .socket_dir = "", .log_dir = "" };
+    var term = try initTerminal(alloc, std.testing.io, testSized(24, 80), &cfg);
+    defer term.deinit(alloc);
+    const pty = try TestPty.open();
+    defer pty.close();
+
+    var daemon = testDaemon();
+    defer daemon.clients.deinit(alloc);
+
+    const a = try lib_posix.pipe2(.{});
+    const b = try lib_posix.pipe2(.{});
+    lib_posix.close(a[1]);
+    lib_posix.close(b[1]);
+    const leader = try testClient(alloc, a[0], false);
+    const other = try testClient(alloc, b[0], false);
+    try daemon.clients.append(alloc, leader);
+    try daemon.clients.append(alloc, other);
+
+    const big = testSized(50, 200);
+    const small = testSized(30, 100);
+    try daemon.handleInit(alloc, leader, pty.master, &term, std.mem.asBytes(&big));
+    try daemon.handleInit(alloc, other, pty.master, &term, std.mem.asBytes(&small));
+    try std.testing.expectEqual(@as(u16, 200), pty.size().cols);
+
+    try daemon.handleResize(alloc, other, pty.master, &term, std.mem.asBytes(&small));
+    try std.testing.expectEqual(@as(u16, 200), pty.size().cols);
+
+    _ = daemon.closeClient(alloc, other, 1, false);
+    _ = daemon.closeClient(alloc, leader, 0, false);
 }

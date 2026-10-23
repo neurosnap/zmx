@@ -174,6 +174,7 @@ const fish_completions =
     \\
     \\# Subcommand flags
     \\complete -c zmx -n "__fish_seen_subcommand_from a attach" -l labels -d 'Apply "key=value ..." labels as the session is created' -r
+    \\complete -c zmx -n "__fish_seen_subcommand_from a attach" -l min-window -d 'Size the session to the smallest attached client'
     \\complete -c zmx -n "__fish_seen_subcommand_from r run" -s d -d 'Detach from the calling terminal; use `wait` to track its status'
     \\complete -c zmx -n "__fish_seen_subcommand_from r run" -l fish -d 'Required when the session runs fish shell'
     \\complete -c zmx -n "__fish_seen_subcommand_from l list" -l short -d 'Short output'
@@ -197,6 +198,7 @@ const nu_completions =
     \\export extern "zmx attach" [
     \\    name: string@"nu-complete zmx sessions"
     \\    --labels: string
+    \\    --min-window
     \\    ...rest: string
     \\]
     \\
@@ -362,6 +364,7 @@ const yash_completions =
     \\function completion/zmx::attach:arg {
     \\    OPTIONS=( #>#
     \\        "--labels:; apply labels as session is created"
+    \\        "--min-window; size the session to the smallest attached client"
     \\    ) #<#
     \\    command -f completion//parseoptions -en
     \\    case $ARGOPT in
