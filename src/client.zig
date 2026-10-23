@@ -855,9 +855,10 @@ pub fn printEnv(alloc: Allocator, io: Io, name: []const u8, key: ?[]const u8) ![
     defer alloc.free(socket_path);
 
     const payload = try ipc.roundTripForTag(alloc, socket_path, .EnvGet, "", .EnvData);
-    errdefer alloc.free(payload);
 
+    // A whole-environment query gives this buffer to the caller.
     if (key == null) return payload;
+    defer alloc.free(payload);
 
     // Search for key in payload: lines formatted as "KEY=VALUE\n"
     var lines = std.mem.splitScalar(u8, payload, '\n');
@@ -865,12 +866,9 @@ pub fn printEnv(alloc: Allocator, io: Io, name: []const u8, key: ?[]const u8) ![
         if (std.mem.startsWith(u8, line, key.?)) {
             if (line.len > key.?.len and line[key.?.len] == '=') {
                 const val = line[key.?.len + 1 ..];
-                const result = try alloc.dupe(u8, val);
-                alloc.free(payload);
-                return result;
+                return try alloc.dupe(u8, val);
             }
         }
     }
-    alloc.free(payload);
     return error.EnvVarNotFound;
 }
