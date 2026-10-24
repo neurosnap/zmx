@@ -17,6 +17,7 @@ Use spec: https://common-changelog.org/
 
 ### Changed
 
+- Upgraded to zig 0.17
 - IPC messages now carry an explicity `protocol_version` field
 - The daemon now responds with `Tag.Unsupported` (255) when receiving unknown IPC tags
 
