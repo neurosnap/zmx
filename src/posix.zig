@@ -395,11 +395,11 @@ pub fn listen(sock: socket_t, backlog: u31) ListenError!void {
 /// the system function call whose errno value is intended to be observed.
 fn errno(rc: anytype) E {
     if (use_libc) {
-        return if (rc == -1) @enumFromInt(std.c._errno().*) else .SUCCESS;
+        return if (rc == -1) @fromBackingInt(@intCast(std.c._errno().*)) else .SUCCESS;
     }
     const signed: isize = @bitCast(rc);
     const int = if (signed > -4096 and signed < 0) -signed else 0;
-    return @enumFromInt(int);
+    return @fromBackingInt(@intCast(int));
 }
 
 fn setSockFlags(sock: socket_t, flags: u32) !void {
@@ -1008,10 +1008,10 @@ pub fn exit(status: u8) noreturn {
         // exit() is only available if exitBootServices() has not been called yet.
         // This call to exit should not fail, so we catch-ignore errors.
         if (uefi.system_table.boot_services) |bs| {
-            bs.exit(uefi.handle, @enumFromInt(status), null) catch {};
+            bs.exit(uefi.handle, @fromBackingInt(@intCast(status)), null) catch {};
         }
         // If we can't exit, reboot the system instead.
-        uefi.system_table.runtime_services.resetSystem(.cold, @enumFromInt(status), null);
+        uefi.system_table.runtime_services.resetSystem(.cold, @fromBackingInt(@intCast(status)), null);
     }
     system.exit(status);
 }
@@ -1244,7 +1244,7 @@ pub fn poll(fds: []pollfd, timeout: i32) PollError!usize {
 /// and you get an unexpected error.
 fn unexpectedErrno(err: E) UnexpectedError {
     if (unexpected_error_tracing) {
-        std.debug.print("unexpected errno: {d}\n", .{@intFromEnum(err)});
+        std.debug.print("unexpected errno: {d}\n", .{@backingInt(err)});
         std.debug.dumpCurrentStackTrace(std.debug.StackUnwindOptions{});
     }
     return error.Unexpected;
@@ -1255,7 +1255,7 @@ fn unexpectedErrno(err: E) UnexpectedError {
 /// If this happens the fix is to add the error code to the corresponding
 /// switch expression, possibly introduce a new error in the error set, and
 /// send a patch to Zig.
-const unexpected_error_tracing = builtin.mode == .Debug and switch (builtin.zig_backend) {
+const unexpected_error_tracing = builtin.mode == .debug and switch (builtin.zig_backend) {
     .stage2_llvm, .stage2_x86_64 => true,
     else => false,
 };

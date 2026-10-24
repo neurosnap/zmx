@@ -21,7 +21,7 @@ pub fn installWakeHandler(sig: u6) void {
         .mask = lib_posix.sigemptyset(),
         .flags = lib_posix.SA.SIGINFO,
     };
-    lib_posix.sigaction(@as(lib_posix.SIG, @enumFromInt(sig)), &act, null);
+    lib_posix.sigaction(@as(lib_posix.SIG, @fromBackingInt(@intCast(sig))), &act, null);
 }
 
 pub fn ignoreSigpipe() void {

@@ -104,7 +104,7 @@ fn writeDynamicColor(
 ) void {
     const c = dynamic.override orelse return;
     writer.print("\x1b]{d};rgb:{x:0>2}/{x:0>2}/{x:0>2}\x1b\\", .{
-        @intFromEnum(kind), c.r, c.g, c.b,
+        @backingInt(kind), c.r, c.g, c.b,
     }) catch |err| {
         std.log.warn("failed to format dynamic color err={s}", .{@errorName(err)});
     };

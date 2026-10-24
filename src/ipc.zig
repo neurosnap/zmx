@@ -1,5 +1,5 @@
 const std = @import("std");
-const cross = @import("cross.zig");
+const cross = @import("cross");
 const socket = @import("socket.zig");
 const lib_posix = @import("posix.zig");
 
@@ -39,7 +39,7 @@ pub const Tag = enum(u8) {
 };
 
 comptime {
-    if (@typeInfo(Tag).@"enum".is_exhaustive) @compileError(
+    if (@typeInfo(Tag).@"enum".mode == .exhaustive) @compileError(
         "ipc.Tag must stay non-exhaustive -- old daemons rely on `_` to ignore unknown tags",
     );
 }
@@ -57,7 +57,7 @@ pub const Resize = extern struct {
     xpixel: u16 = 0,
     ypixel: u16 = 0,
 
-    pub fn winsize(self: Resize) cross.c.struct_winsize {
+    pub fn winsize(self: Resize) cross.struct_winsize {
         return .{
             .ws_row = self.rows,
             .ws_col = self.cols,
@@ -72,25 +72,25 @@ pub const Resize = extern struct {
 /// screen; zero returns only the screen.
 pub const Capture = extern struct {
     format: u8,
-    _reserved: [3]u8 = .{0} ** 3,
+    _reserved: [3]u8 = @splat(0),
     rows: u32,
 };
 
 pub fn getTerminalSize(fd: i32) Resize {
-    var ws: cross.c.struct_winsize = undefined;
-    if (cross.c.ioctl(fd, cross.c.TIOCGWINSZ, &ws) == 0 and ws.ws_row > 0 and ws.ws_col > 0) {
+    var ws: cross.struct_winsize = undefined;
+    if (cross.ioctl(fd, cross.TIOCGWINSZ, &ws) == 0 and ws.ws_row > 0 and ws.ws_col > 0) {
         return .{ .rows = ws.ws_row, .cols = ws.ws_col, .xpixel = ws.ws_xpixel, .ypixel = ws.ws_ypixel };
     }
     inline for (.{ lib_posix.STDOUT_FILENO, lib_posix.STDIN_FILENO, lib_posix.STDERR_FILENO }) |fallback_fd| {
         if (fallback_fd != fd) {
-            if (cross.c.ioctl(fallback_fd, cross.c.TIOCGWINSZ, &ws) == 0 and ws.ws_row > 0 and ws.ws_col > 0) {
+            if (cross.ioctl(fallback_fd, cross.TIOCGWINSZ, &ws) == 0 and ws.ws_row > 0 and ws.ws_col > 0) {
                 return .{ .rows = ws.ws_row, .cols = ws.ws_col, .xpixel = ws.ws_xpixel, .ypixel = ws.ws_ypixel };
             }
         }
     }
     if (lib_posix.open("/dev/tty", .{ .ACCMODE = .RDWR }, 0)) |tty_fd| {
         defer lib_posix.close(tty_fd);
-        if (cross.c.ioctl(tty_fd, cross.c.TIOCGWINSZ, &ws) == 0 and ws.ws_row > 0 and ws.ws_col > 0) {
+        if (cross.ioctl(tty_fd, cross.TIOCGWINSZ, &ws) == 0 and ws.ws_row > 0 and ws.ws_col > 0) {
             return .{ .rows = ws.ws_row, .cols = ws.ws_col, .xpixel = ws.ws_xpixel, .ypixel = ws.ws_ypixel };
         }
     } else |_| {}
@@ -115,7 +115,7 @@ pub const Info = extern struct {
     task_ended_at: u64,
     task_exit_code: u8,
     protocol_version: u8 = PROTOCOL_VERSION,
-    _reserved: [6]u8 = .{0} ** 6,
+    _reserved: [6]u8 = @splat(0),
 };
 
 pub fn send(fd: i32, tag: Tag, data: []const u8) !void {
@@ -357,7 +357,7 @@ test "Tag wire values are frozen" {
         .{ Tag.LabelSet, 15 }, .{ Tag.LabelClear, 16 },   .{ Tag.LabelData, 17 },
         .{ Tag.Send, 18 },     .{ Tag.EnvGet, 19 },       .{ Tag.EnvSet, 20 },
         .{ Tag.EnvData, 21 },  .{ Tag.Capture, 22 },      .{ Tag.Unsupported, 255 },
-    }) |p| try std.testing.expectEqual(@as(u8, p[1]), @intFromEnum(p[0]));
+    }) |p| try std.testing.expectEqual(@as(u8, p[1]), @backingInt(p[0]));
 }
 
 pub fn roundTripForTag(

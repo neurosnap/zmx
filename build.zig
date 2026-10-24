@@ -1,4 +1,5 @@
 const std = @import("std");
+const Translator = @import("translate_c").Translator;
 const build_zig_zon = @import("build.zig.zon");
 
 const linux_targets: []const std.Target.Query = &.{
@@ -26,11 +27,24 @@ pub fn build(b: *std.Build) void {
     options.addOption([]const u8, "ghostty_version", ghostty_ver);
     options.addOption(bool, "has_daemon", enable_daemon);
 
+    const translate_c = b.dependency("translate_c", .{});
+    const translator: Translator = .init(translate_c, .{
+        .c_source_file = b.path("src/c.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
+        .imports = &.{
+            .{
+                .name = "cross",
+                .module = translator.mod,
+            },
+        },
     });
     exe_mod.addOptions("build_options", options);
 
@@ -56,6 +70,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .link_libc = true,
+        .imports = &.{
+            .{
+                .name = "cross",
+                .module = translator.mod,
+            },
+        },
     });
 
     zmx_pkg_mod.addOptions("build_options", options);
@@ -79,6 +99,12 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
                 .link_libc = true,
+                .imports = &.{
+                    .{
+                        .name = "cross",
+                        .module = translator.mod,
+                    },
+                },
             });
             ex_mod.addImport("zmx", zmx_pkg_mod);
             const ex_exe = b.addExecutable(.{ .name = ex.name, .root_module = ex_mod });
@@ -101,7 +127,7 @@ pub fn build(b: *std.Build) void {
             b.installArtifact(exe);
             const run_cmd = b.addRunArtifact(exe);
             run_cmd.step.dependOn(b.getInstallStep());
-            if (b.args) |args| run_cmd.addArgs(args);
+            run_cmd.addPassthruArgs();
             run_step.dependOn(&run_cmd.step);
         }
     }
@@ -114,6 +140,12 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
+            .imports = &.{
+                .{
+                    .name = "cross",
+                    .module = translator.mod,
+                },
+            },
         });
         test_module.addOptions("build_options", options);
         const test_dep = b.dependency("ghostty", .{
@@ -170,6 +202,12 @@ pub fn build(b: *std.Build) void {
                 .target = resolved,
                 .optimize = .ReleaseSafe,
                 .link_libc = true,
+                .imports = &.{
+                    .{
+                        .name = "cross",
+                        .module = translator.mod,
+                    },
+                },
             });
             release_mod.addOptions("build_options", options);
 

@@ -2,7 +2,7 @@ FROM debian:12
 
 RUN apt-get update && apt-get install -y curl git bats coreutils python3 && rm -rf /var/lib/apt/lists/*
 
-ARG ZIG_VERSION=0.16.0
+ARG ZIG_VERSION=0.17.0
 # `uname -m` already reports the names zig uses in its tarballs (x86_64,
 # aarch64), so it needs no mapping.
 RUN ARCH="$(uname -m)" && \

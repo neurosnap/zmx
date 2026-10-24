@@ -12,7 +12,7 @@ const Cfg = @import("cfg.zig");
 const util = @import("util.zig");
 const label = @import("label.zig");
 const lib_posix = @import("posix.zig");
-const cross = @import("cross.zig");
+const cross = @import("cross");
 const signal = @import("signal.zig");
 const loop = @import("loop.zig");
 const Daemon = if (has_daemon) loop.Daemon else struct {};
@@ -163,25 +163,25 @@ pub fn attach(alloc: Allocator, io: Io, name: []const u8, opts: AttachOptions) !
 
     const client_sock = try socket.sessionConnect(socket_path);
 
-    var orig_termios: cross.c.termios = undefined;
-    const stdin_is_tty = cross.c.tcgetattr(lib_posix.STDIN_FILENO, &orig_termios) == 0;
+    var orig_termios: cross.termios = undefined;
+    const stdin_is_tty = cross.tcgetattr(lib_posix.STDIN_FILENO, &orig_termios) == 0;
     const restore_seq = "\x1bc\x1b]110\x1b\\\x1b]111\x1b\\\x1b]112\x1b\\";
 
     defer {
         if (stdin_is_tty) {
-            _ = cross.c.tcsetattr(lib_posix.STDIN_FILENO, cross.c.TCSAFLUSH, &orig_termios);
+            _ = cross.tcsetattr(lib_posix.STDIN_FILENO, cross.TCSAFLUSH, &orig_termios);
         }
         _ = lib_posix.write(lib_posix.STDOUT_FILENO, restore_seq) catch {};
     }
 
     if (stdin_is_tty) {
         var raw_termios = orig_termios;
-        cross.c.cfmakeraw(&raw_termios);
-        raw_termios.c_cc[cross.c.VLNEXT] = cross.c._POSIX_VDISABLE;
-        raw_termios.c_cc[cross.c.VQUIT] = cross.c._POSIX_VDISABLE;
-        raw_termios.c_cc[cross.c.VMIN] = 1;
-        raw_termios.c_cc[cross.c.VTIME] = 0;
-        _ = cross.c.tcsetattr(lib_posix.STDIN_FILENO, cross.c.TCSANOW, &raw_termios);
+        cross.cfmakeraw(&raw_termios);
+        raw_termios.c_cc[cross.VLNEXT] = cross._POSIX_VDISABLE;
+        raw_termios.c_cc[cross.VQUIT] = cross._POSIX_VDISABLE;
+        raw_termios.c_cc[cross.VMIN] = 1;
+        raw_termios.c_cc[cross.VTIME] = 0;
+        _ = cross.tcsetattr(lib_posix.STDIN_FILENO, cross.TCSANOW, &raw_termios);
     }
 
     const clear_seq = "\x1b[0m\x1b[2J\x1b[H";
@@ -748,12 +748,12 @@ pub fn historyRange(alloc: Allocator, io: Io, name: []const u8, format: HistoryF
     const reply_tag: ipc.Tag = if (scrollback_rows != null) .Capture else .History;
     if (scrollback_rows) |rows| {
         var request = std.mem.zeroes(ipc.Capture);
-        request.format = @intFromEnum(format);
+        request.format = @backingInt(format);
         request.rows = rows;
         try ipc.send(fd, .Capture, std.mem.asBytes(&request));
         try ipc.send(fd, .Info, "");
     } else {
-        const format_byte = [_]u8{@intFromEnum(format)};
+        const format_byte = [_]u8{@backingInt(format)};
         try ipc.send(fd, .History, &format_byte);
     }
 
