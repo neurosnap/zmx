@@ -33,6 +33,9 @@ pub fn clientLoop(client_sock_fd: i32, env_str: []const u8) !ClientResult {
     try signal.openSignalPipe();
     defer signal.closeSignalPipe();
     signal.installWakeHandler(@backingInt(lib_posix.SIG.WINCH));
+    signal.installWakeHandler(@backingInt(lib_posix.SIG.TERM));
+    signal.installWakeHandler(@backingInt(lib_posix.SIG.HUP));
+    signal.installWakeHandler(@backingInt(lib_posix.SIG.INT));
 
     // Make socket non-blocking to avoid blocking on writes
     var sock_flags = try lib_posix.fcntl(client_sock_fd, lib_posix.F.GETFL, 0);
@@ -104,7 +107,7 @@ pub fn clientLoop(client_sock_fd: i32, env_str: []const u8) !ClientResult {
         _ = try lib_posix.poll(poll_fds.items, -1);
 
         if (poll_fds.items[2].revents & lib_posix.POLL.IN != 0) {
-            signal.drainSignalPipe();
+            try signal.drainSignalPipe();
             const next_size = ipc.getTerminalSize(lib_posix.STDOUT_FILENO);
             try ipc.appendMessage(
                 gpa,
@@ -304,7 +307,7 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
         _ = try lib_posix.poll(poll_fds.items, -1);
 
         if (poll_fds.items[2].revents & lib_posix.POLL.IN != 0) {
-            signal.drainSignalPipe();
+            signal.drainSignalPipe() catch {};
             std.log.info(
                 "SIGTERM received, shutting down gracefully session={s}",
                 .{daemon.session_name},

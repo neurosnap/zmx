@@ -6,9 +6,10 @@ const lib_posix = @import("posix.zig");
 /// never surfaces; the handler writes a byte here and poll() wakes on POLLIN.
 pub var sig_pipe: [2]lib_posix.fd_t = .{ -1, -1 };
 
-pub fn wakeSignalPipe(_: lib_posix.SIG, _: *const lib_posix.siginfo_t, _: ?*anyopaque) callconv(.c) void {
+pub fn wakeSignalPipe(sig: lib_posix.SIG, _: *const lib_posix.siginfo_t, _: ?*anyopaque) callconv(.c) void {
     const saved = std.c._errno().*;
-    _ = std.c.write(sig_pipe[1], "x", 1);
+    const byte = [_]u8{@intCast(@backingInt(sig))};
+    _ = std.c.write(sig_pipe[1], &byte, 1);
     std.c._errno().* = saved;
 }
 
@@ -44,10 +45,33 @@ pub fn closeSignalPipe() void {
     lib_posix.close(fds[1]);
 }
 
-pub fn drainSignalPipe() void {
+pub fn drainSignalPipe() error{ Sighup, Sigint, Sigterm }!void {
     var b: [16]u8 = undefined;
     while (true) {
         const n = lib_posix.read(sig_pipe[0], &b) catch return;
         if (n == 0) return;
+        for (b[0..n]) |sig| {
+            switch (sig) {
+                @backingInt(lib_posix.SIG.HUP) => return error.Sighup,
+                @backingInt(lib_posix.SIG.INT) => return error.Sigint,
+                @backingInt(lib_posix.SIG.TERM) => return error.Sigterm,
+                else => {},
+            }
+        }
     }
+}
+
+pub fn reraise(sig: lib_posix.SIG) noreturn {
+    const act: lib_posix.Sigaction = .{
+        .handler = .{ .handler = lib_posix.SIG.DFL },
+        .mask = lib_posix.sigemptyset(),
+        .flags = 0,
+    };
+    lib_posix.sigaction(sig, &act, null);
+
+    var mask = lib_posix.sigemptyset();
+    std.posix.sigaddset(&mask, sig);
+    std.posix.sigprocmask(lib_posix.SIG.UNBLOCK, &mask, null);
+    std.posix.raise(sig) catch {};
+    std.process.exit(128 + @as(u8, @intCast(@backingInt(sig))));
 }
