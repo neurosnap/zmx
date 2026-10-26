@@ -999,9 +999,9 @@ pub const Daemon = struct {
                 if (!std.mem.eql(u8, data, reply ++ "\x07") and
                     !std.mem.eql(u8, data, reply ++ "\x1b\\")) return;
 
-                // An agent may ask about OSC 7501 before any terminal attaches.
-                // Answer then so it can start reporting while the app is absent.
-                // "A supporting terminal MUST reply with ?."
+                // Ghostty has already built the OSC 7501 support reply in 'data'.
+                // Send it back to the program while no terminal is attached so the
+                // program can start reporting before a terminal connects.
                 // www.superlogical.com/rex/docs/build/program-status#feature-detection
                 daemon.queuePtyInput(handler.terminal.gpa(), data);
             }
