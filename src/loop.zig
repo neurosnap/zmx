@@ -367,17 +367,6 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
                     daemon.setPwd(&term);
                     daemon.has_pty_output = true;
 
-                    // When no real terminal client has attached yet, respond to
-                    // terminal queries (e.g. DA1/DA2) on behalf of the terminal.
-                    // This prevents fish from waiting 10s for unanswered queries.
-                    // Only clients that sent .Init (a real zmx attach) count,
-                    // not a `zmx run` tail-only client.
-                    if (!daemon.hasTerminalClient() and
-                        daemon.pty_write_buf.items.len < Daemon.PTY_WRITE_BUF_MAX)
-                    {
-                        util.respondToDeviceAttributes(gpa, &daemon.pty_write_buf, buf[0..n]);
-                    }
-
                     // In run mode, scan output for exit code marker. The marker
                     // can straddle two PTY reads (more likely under a throttled
                     // scheduler, e.g. containers), so prepend the tail carried
@@ -408,11 +397,25 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
                         );
                     }
 
+                    // When no real terminal client has attached yet, respond to
+                    // terminal queries (e.g. DA1/DA2) on behalf of the terminal.
+                    // This prevents fish from waiting 10s for unanswered queries.
+                    // Only clients that sent .Init (a real zmx attach) count,
+                    // not a `zmx run` tail-only client.
+                    // Remove answered queries from the broadcast so a client
+                    // that sends Init later cannot answer them again.
+                    // This rewrites buf, so it stays after the VT feed and task-marker scan.
+                    const output = if (!daemon.hasTerminalClient() and
+                        daemon.pty_write_buf.items.len < Daemon.PTY_WRITE_BUF_MAX)
+                        util.respondToDeviceAttributes(gpa, &daemon.pty_write_buf, buf[0..n])
+                    else
+                        buf[0..n];
+
                     // Broadcast data to all clients.
                     // Rewrite OSC 133;A to include redraw=0 so the outer terminal
                     // does not clear prompt lines on resize (issue #111).
-                    const broadcast_data = util.rewritePromptRedraw(gpa, buf[0..n]) orelse buf[0..n];
-                    defer if (broadcast_data.ptr != buf[0..n].ptr) gpa.free(broadcast_data);
+                    const broadcast_data = util.rewritePromptRedraw(gpa, output) orelse output;
+                    defer if (broadcast_data.ptr != output.ptr) gpa.free(broadcast_data);
                     for (daemon.clients.items) |client| {
                         ipc.appendMessage(gpa, &client.write_buf, .Output, broadcast_data) catch |err| {
                             std.log.warn(
