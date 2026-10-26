@@ -13,6 +13,7 @@ const daemonize = @import("daemonize.zig");
 const builtin = @import("builtin");
 const terminal = @import("terminal.zig");
 const ghostty_vt = terminal.ghostty_vt;
+const program_status = @import("program_status.zig");
 
 /// clientLoop sends ipc commands to its corresponding daemon.  It uses poll() as its non-blocking
 /// mechanism. It will send stdin to the daemon and receive stdout from the daemon.
@@ -248,7 +249,8 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
     const init_size = ipc.getTerminalSize(pty_fd);
     var term = try initTerminal(gpa, io, init_size, daemon.cfg);
     defer term.deinit(gpa);
-    var vt_stream = term.vtStream();
+    daemon.initVtStream(gpa, &term);
+    const vt_stream = &daemon.vt_stream;
     defer vt_stream.deinit();
 
     // Carries the tail of the previous PTY read so the task-exit marker
@@ -360,6 +362,7 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
                     // Let the rest of this poll iteration complete so client
                     // write buffers are flushed via the normal POLLOUT path.
                     // On the next iteration, daemon.running will be false.
+                    daemon.program_status_records.removeWorkingAndBlocked(gpa);
                     daemon.running = false;
                 } else {
                     // Feed PTY output to terminal emulator for state tracking
@@ -480,7 +483,7 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
                     switch (msg.header.tag) {
                         .Input => try daemon.handleInput(gpa, client, msg.payload),
                         .Send => daemon.handleSend(gpa, msg.payload),
-                        .Output => try daemon.handleOutput(gpa, msg.payload, &term, &vt_stream),
+                        .Output => try daemon.handleOutput(gpa, msg.payload, &term, vt_stream),
                         .Init => try daemon.handleInit(gpa, client, pty_fd, &term, msg.payload),
                         .Switch => try daemon.handleSwitch(gpa, msg.payload),
                         .Resize => try daemon.handleResize(gpa, client, pty_fd, &term, msg.payload),
@@ -601,6 +604,9 @@ pub const Daemon = struct {
     pty_write_buf: std.ArrayList(u8) = .empty,
     clients: std.ArrayList(*Client) = .empty,
     labels: std.StringHashMapUnmanaged([]u8) = .empty,
+    program_status_records: program_status.Records = .{},
+    // Initialized and deinitialized by 'daemonLoop' while its terminal is alive.
+    vt_stream: ghostty_vt.TerminalStream = undefined,
     // This control which client is the leader.  The leader controls terminal state and
     // cols/rows of session.
     leader_client_fd: ?i32 = null,
@@ -648,6 +654,7 @@ pub const Daemon = struct {
             gpa.free(entry.value_ptr.*);
         }
         self.labels.deinit(gpa);
+        self.program_status_records.deinit(gpa);
         self.pty_write_buf.deinit(gpa);
         gpa.free(self.socket_path);
     }
@@ -971,6 +978,83 @@ pub const Daemon = struct {
         }
     }
 
+    /// Connect Ghostty's OSC 7501 and shell-prompt callbacks to this daemon's records.
+    /// Keep the daemon at a fixed address until its stream is deinitialized.
+    fn initVtStream(self: *Daemon, alloc: std.mem.Allocator, term: *ghostty_vt.Terminal) void {
+        const Callbacks = struct {
+            fn onProgramStatus(handler: *@FieldType(ghostty_vt.TerminalStream, "handler"), report: ghostty_vt.osc.Command.ProgramStatus.Report) void {
+                const daemon = fromVtHandler(handler);
+                daemon.program_status_records.updateFromReport(handler.terminal.gpa(), report) catch |err| {
+                    std.log.warn("failed to retain program status: {s}", .{@errorName(err)});
+                };
+            }
+
+            fn onTerminalReply(handler: *@FieldType(ghostty_vt.TerminalStream, "handler"), data: []const u8) void {
+                const daemon = fromVtHandler(handler);
+                if (daemon.hasTerminalClient()) return;
+
+                // Ghostty also produces replies for other terminal protocols.
+                // Only answer OSC 7501 here so their existing handling stays intact.
+                const reply = "\x1b]7501;" ++ ghostty_vt.osc.program_status.query_reply;
+                if (!std.mem.eql(u8, data, reply ++ "\x07") and
+                    !std.mem.eql(u8, data, reply ++ "\x1b\\")) return;
+
+                // Ghostty has already built the OSC 7501 support reply in 'data'.
+                // Send it back to the program while no terminal is attached so the
+                // program can start reporting before a terminal connects.
+                // www.superlogical.com/rex/docs/build/program-status#feature-detection
+                daemon.queuePtyInput(handler.terminal.gpa(), data);
+            }
+
+            fn onSemanticPrompt(handler: *@FieldType(ghostty_vt.TerminalStream, "handler"), event: ghostty_vt.SemanticPrompt) void {
+                const daemon = fromVtHandler(handler);
+                if (event.kind == .prompt_start) {
+                    daemon.program_status_records.removeWorkingAndBlocked(handler.terminal.gpa());
+                }
+            }
+        };
+
+        self.vt_stream = .init(.{
+            .allocator = alloc,
+            .handler = term.vtHandler(),
+            // A reconnect can happen halfway through an OSC 7501 message.
+            // Save enough bytes for the spec's whole-sequence limit.
+            // "4096 bytes. The largest legal report is under 3300."
+            // www.superlogical.com/rex/docs/build/program-status#limits
+            .continuation_max_bytes = ghostty_vt.osc.program_status.max_sequence_bytes,
+        });
+
+        // While attached, the outer terminal owns capability replies. Both the
+        // parser callback and attachment changes run in this daemon's event loop.
+        self.vt_stream.handler.effects.write_pty = &Callbacks.onTerminalReply;
+        self.vt_stream.handler.effects.program_status = &Callbacks.onProgramStatus;
+        self.vt_stream.handler.effects.semantic_prompt = &Callbacks.onSemanticPrompt;
+    }
+
+    fn fromVtHandler(handler: *@FieldType(ghostty_vt.TerminalStream, "handler")) *Daemon {
+        // Ghostty passes the handler inside our stream to these callbacks.
+        // Follow the containing fields back to the daemon that owns the records.
+        const stream: *ghostty_vt.TerminalStream = @fieldParentPtr("handler", handler);
+        return @fieldParentPtr("vt_stream", stream);
+    }
+
+    /// Write OSC 7501 messages restoring saved task records, then any unfinished
+    /// terminal message. Call after restoring the screen and before sending new
+    /// output so the next bytes finish the message the program had already started.
+    /// Buffer this output before sending it and discard it if writing fails.
+    fn writeProgramStatus(self: *const Daemon, writer: *std.Io.Writer) !void {
+        try self.program_status_records.writeReplay(writer);
+        // Even if we could not save all OSC 7501 reports, continue any unfinished live
+        // message. Ghostty leaves out actions it already performed, so reading
+        // the saved bytes does not repeat them.
+        self.vt_stream.writeContinuation(writer) catch |err| switch (err) {
+            // Other terminal messages can exceed the OSC 7501 sequence limit.
+            // If Ghostty could not save one, keep the screen and OSC 7501 restoration.
+            error.ContinuationUnavailable => std.log.warn("unfinished terminal sequence unavailable on reattach", .{}),
+            else => return err,
+        };
+    }
+
     pub fn handleInit(
         self: *Daemon,
         gpa: std.mem.Allocator,
@@ -1003,6 +1087,32 @@ pub const Daemon = struct {
             try resizeTerm(gpa, term, resize.cols, resize.rows);
         }
 
+        self.restoreClient(gpa, client, term) catch |err| {
+            std.log.warn("failed to buffer program status for client err={s}", .{@errorName(err)});
+        };
+
+        // only resize if leader
+        if (is_leader) {
+            var ws = resize.winsize();
+            _ = cross.ioctl(pty_fd, cross.TIOCSWINSZ, &ws);
+
+            // On re-attach, deliver SIGWINCH to the foreground process group so
+            // incremental renderers (Ink, Claude Code, etc.) know to repaint.
+            // If the size changed, TIOCSWINSZ above already sent SIGWINCH; if the size
+            // was unchanged, the kernel suppressed it, so signal the pgrp explicitly.
+            if (self.has_pty_output) {
+                var pgrp: lib_posix.pid_t = 0;
+                if (cross.ioctl(pty_fd, cross.TIOCGPGRP, &pgrp) == 0 and pgrp > 0) {
+                    lib_posix.kill(-pgrp, .WINCH) catch {};
+                }
+            }
+
+            std.log.debug("init resize rows={d} cols={d}", .{ resize.rows, resize.cols });
+        }
+    }
+
+    /// Restore this attaching client's screen and saved OSC 7501 Program Status.
+    fn restoreClient(self: *Daemon, gpa: std.mem.Allocator, client: *Client, term: *ghostty_vt.Terminal) !void {
         if (self.has_pty_output) {
             const cursor = &term.screens.active.cursor;
             std.log.debug(
@@ -1025,25 +1135,18 @@ pub const Daemon = struct {
                 client.has_pending_output = true;
             }
         }
+        // Restore saved OSC 7501 Program Status records for this reconnecting client.
+        // Include any unfinished terminal message so later live output can finish it.
+        // Build these messages separately so failure preserves queued screen output.
+        var replay: std.Io.Writer.Allocating = .init(gpa);
+        defer replay.deinit();
+        try self.writeProgramStatus(&replay.writer);
+        if (replay.writer.buffered().len == 0) return;
 
-        // only resize if leader
-        if (is_leader) {
-            var ws = resize.winsize();
-            _ = cross.ioctl(pty_fd, cross.TIOCSWINSZ, &ws);
-
-            // On re-attach, deliver SIGWINCH to the foreground process group so
-            // incremental renderers (Ink, Claude Code, etc.) know to repaint.
-            // If the size changed, TIOCSWINSZ above already sent SIGWINCH; if the size
-            // was unchanged, the kernel suppressed it, so signal the pgrp explicitly.
-            if (self.has_pty_output) {
-                var pgrp: lib_posix.pid_t = 0;
-                if (cross.ioctl(pty_fd, cross.TIOCGPGRP, &pgrp) == 0 and pgrp > 0) {
-                    lib_posix.kill(-pgrp, .WINCH) catch {};
-                }
-            }
-
-            std.log.debug("init resize rows={d} cols={d}", .{ resize.rows, resize.cols });
-        }
+        // 'appendMessage' reserves space for all prepared bytes before adding any.
+        // If allocation fails, no OSC 7501 'clear' or saved task reports are queued.
+        try ipc.appendMessage(gpa, &client.write_buf, .Output, replay.writer.buffered());
+        client.has_pending_output = true;
     }
 
     pub fn handleResize(
@@ -1492,6 +1595,383 @@ test "send queues PTY input without changing leader" {
     try std.testing.expectEqualStrings("hello", daemon.pty_write_buf.items);
 }
 
+/// A daemon and terminal for testing OSC 7501 Program Status without starting a shell.
+const TestProgramSession = struct {
+    const cfg = Cfg{ .socket_dir = "", .log_dir = "" };
+
+    daemon: Daemon = testDaemon(),
+    term: ghostty_vt.Terminal = undefined,
+    stream: *ghostty_vt.TerminalStream = undefined,
+    records: *program_status.Records = undefined,
+
+    /// Initialize in place because the stream keeps pointers to our fields.
+    fn init(self: *TestProgramSession) !void {
+        self.term = try initTerminal(std.testing.allocator, std.testing.io, .{ .cols = 80, .rows = 24 }, &cfg);
+        self.daemon.initVtStream(std.testing.allocator, &self.term);
+        self.stream = &self.daemon.vt_stream;
+        self.records = &self.daemon.program_status_records;
+    }
+
+    fn deinit(self: *TestProgramSession) void {
+        self.stream.deinit();
+        self.term.deinit(std.testing.allocator);
+        self.daemon.program_status_records.deinit(std.testing.allocator);
+        self.daemon.pty_write_buf.deinit(std.testing.allocator);
+        self.daemon.clients.deinit(std.testing.allocator);
+    }
+
+    fn report(self: *TestProgramSession, data: []const u8) void {
+        self.stream.nextSlice("\x1b]7501;");
+        self.stream.nextSlice(data);
+        self.stream.nextSlice("\x1b\\");
+    }
+
+    fn writeReplay(self: *const TestProgramSession, writer: *std.Io.Writer) !void {
+        try self.daemon.writeProgramStatus(writer);
+    }
+};
+
+/// Owns a test client and both pipe ends so cleanup also runs after an assertion fails.
+/// Tests that register this client with a daemon must leave closing it to this helper.
+const TestProgramClient = struct {
+    client: *Client,
+    peer_fd: i32,
+
+    fn init(is_terminal: bool) !TestProgramClient {
+        const pipes = try lib_posix.pipe2(.{});
+        errdefer lib_posix.close(pipes[0]);
+        errdefer lib_posix.close(pipes[1]);
+        return .{ .client = try testClient(std.testing.allocator, pipes[0], is_terminal), .peer_fd = pipes[1] };
+    }
+
+    fn deinit(self: *TestProgramClient) void {
+        self.client.deinit(std.testing.allocator);
+        std.testing.allocator.destroy(self.client);
+        lib_posix.close(self.peer_fd);
+    }
+};
+
+fn repeatTestBytes(comptime bytes: []const u8, comptime count: usize) [bytes.len * count]u8 {
+    var result: [bytes.len * count]u8 = undefined;
+    for (0..count) |index| {
+        @memcpy(result[index * bytes.len ..][0..bytes.len], bytes);
+    }
+    return result;
+}
+
+/// Feed only queued terminal output to the receiving terminal and count its messages.
+fn replayTestOutput(client: *const Client, target: *ghostty_vt.TerminalStream) !usize {
+    var messages = try ipc.SocketBuffer.init(std.testing.allocator);
+    defer messages.deinit();
+    try messages.buf.appendSlice(std.testing.allocator, client.write_buf.items);
+    var outputs: usize = 0;
+    while (messages.next()) |message| {
+        if (message.header.tag == .Output) {
+            outputs += 1;
+            target.nextSlice(message.payload);
+        }
+    }
+    return outputs;
+}
+
+test "program status reattachment restores root and children and removes stale records" {
+    const alloc = std.testing.allocator;
+    var session: TestProgramSession = .{};
+    try session.init();
+    defer session.deinit();
+    const daemon = &session.daemon;
+    const term = &session.term;
+    const stream = session.stream;
+    try daemon.handleOutput(alloc, "screen text\x1b]7501;state=idle:app=agent\x07\x1b]7501;state=blocked:id=worker:kind=permission\x07", term, stream);
+
+    var connection = try TestProgramClient.init(false);
+    defer connection.deinit();
+    const client = connection.client;
+    const size = ipc.Resize{ .rows = 24, .cols = 80 };
+    try daemon.handleInit(alloc, client, -1, term, std.mem.asBytes(&size));
+
+    var receiver: TestProgramSession = .{};
+    try receiver.init();
+    defer receiver.deinit();
+    const target = &receiver.term;
+    const target_records = receiver.records;
+    const target_stream = receiver.stream;
+    target_stream.nextSlice("\x1b]7501;state=working\x07\x1b]7501;state=error:id=stale\x07");
+    _ = try replayTestOutput(client, target_stream);
+    try std.testing.expectEqual(@as(usize, 2), target_records.items.items.len);
+    try std.testing.expectEqual(.idle, target_records.get(null).?.state);
+    try std.testing.expectEqualStrings("agent", target_records.get(null).?.readOption(.app).?);
+    try std.testing.expectEqual(.blocked, target_records.get("worker").?.state);
+    try std.testing.expectEqual(.permission, target_records.get("worker").?.readOption(.kind).?);
+    try std.testing.expect(target_records.get("stale") == null);
+    const screen = try target.plainString(alloc);
+    defer alloc.free(screen);
+    try std.testing.expect(std.mem.indexOf(u8, screen, "screen text") != null);
+}
+
+test "program status reattachment clears an empty session before any output" {
+    const alloc = std.testing.allocator;
+    var session: TestProgramSession = .{};
+    try session.init();
+    defer session.deinit();
+    const daemon = &session.daemon;
+    const term = &session.term;
+    var connection = try TestProgramClient.init(false);
+    defer connection.deinit();
+    const client = connection.client;
+    const size = ipc.Resize{ .rows = 24, .cols = 80 };
+    try daemon.handleInit(alloc, client, -1, term, std.mem.asBytes(&size));
+    try std.testing.expect(std.mem.indexOf(u8, client.write_buf.items, "\x1b]7501;state=clear\x1b\\") != null);
+}
+
+test "program status repeated attachment is private and precedes later live output" {
+    const alloc = std.testing.allocator;
+    var session: TestProgramSession = .{};
+    try session.init();
+    defer session.deinit();
+    const daemon = &session.daemon;
+    const term = &session.term;
+    const stream = session.stream;
+    daemon.pid = std.math.maxInt(i32);
+    try daemon.handleOutput(alloc, "\x1b]7501;state=working\x07", term, stream);
+    const pipes = try lib_posix.pipe2(.{});
+    const first = try testClient(alloc, pipes[0], true);
+    defer alloc.destroy(first);
+    defer first.deinit(alloc);
+    const second = try testClient(alloc, pipes[1], true);
+    defer alloc.destroy(second);
+    defer second.deinit(alloc);
+    try daemon.clients.append(alloc, first);
+    try daemon.clients.append(alloc, second);
+    daemon.leader_client_fd = first.socket_fd;
+    const size = ipc.Resize{ .rows = 24, .cols = 80 };
+    try daemon.handleInit(alloc, second, -1, term, std.mem.asBytes(&size));
+    const once = try alloc.dupe(u8, second.write_buf.items);
+    defer alloc.free(once);
+    try daemon.handleInit(alloc, second, -1, term, std.mem.asBytes(&size));
+    try std.testing.expectEqualStrings(once, second.write_buf.items[once.len..]);
+    try std.testing.expectEqual(@as(usize, 0), first.write_buf.items.len);
+    const update = "\x1b]7501;state=idle\x07";
+    try daemon.handleOutput(alloc, update, term, stream);
+    try std.testing.expectEqualStrings(update, first.write_buf.items[@sizeOf(ipc.Header)..]);
+    var receiver: TestProgramSession = .{};
+    try receiver.init();
+    defer receiver.deinit();
+    const records = receiver.records;
+    const target_stream = receiver.stream;
+    const outputs = try replayTestOutput(second, target_stream);
+    try std.testing.expectEqual(@as(usize, 5), outputs);
+    try std.testing.expectEqual(@as(usize, 1), records.items.items.len);
+    try std.testing.expectEqual(.idle, records.get(null).?.state);
+}
+
+test "program status attachment restores screen before unfinished parser state" {
+    const alloc = std.testing.allocator;
+    const cases = .{
+        .{ "\x1b]7501;state=blocked:id=worker:kind=permission", "\x07" },
+        .{ "\xe2\x82", "\xac" },
+        .{ "\x1b[3", "1mZ" },
+    };
+    inline for (cases) |case| {
+        var session: TestProgramSession = .{};
+        try session.init();
+        defer session.deinit();
+        const daemon = &session.daemon;
+        const term = &session.term;
+        const stream = session.stream;
+        daemon.pid = std.math.maxInt(i32);
+        try daemon.handleOutput(alloc, "screen text", term, stream);
+        try daemon.handleOutput(alloc, case[0], term, stream);
+        var connection = try TestProgramClient.init(true);
+        defer connection.deinit();
+        const client = connection.client;
+        try daemon.clients.append(alloc, client);
+        daemon.leader_client_fd = client.socket_fd;
+        const size = ipc.Resize{ .rows = 24, .cols = 80 };
+        try daemon.handleInit(alloc, client, -1, term, std.mem.asBytes(&size));
+        try daemon.handleOutput(alloc, case[1], term, stream);
+        var receiver: TestProgramSession = .{};
+        try receiver.init();
+        defer receiver.deinit();
+        const target = &receiver.term;
+        const records = receiver.records;
+        const target_stream = receiver.stream;
+        _ = try replayTestOutput(client, target_stream);
+        const expected = try term.plainString(alloc);
+        defer alloc.free(expected);
+        const actual = try target.plainString(alloc);
+        defer alloc.free(actual);
+        try std.testing.expectEqualStrings(expected, actual);
+        if (std.mem.startsWith(u8, case[0], "\x1b]7501")) {
+            try std.testing.expectEqual(.blocked, records.get("worker").?.state);
+            try std.testing.expectEqual(.permission, records.get("worker").?.readOption(.kind).?);
+        }
+    }
+}
+
+test "program status failed replay never queues a partial snapshot or changes pending output" {
+    const alloc = std.testing.allocator;
+    var session: TestProgramSession = .{};
+    try session.init();
+    defer session.deinit();
+    const daemon = &session.daemon;
+    const term = &session.term;
+    const stream = session.stream;
+    stream.nextSlice("\x1b]7501;state=working\x07");
+    // Leave the screen empty so allocation failures exercise both building the
+    // OSC 7501 restoration messages and adding them to the client's output buffer.
+    // A prior queued message must survive.
+    var failures: usize = 0;
+    for ([_]bool{ false, true }) |pending| {
+        var reached_success = false;
+        for (0..20) |fail_index| {
+            var connection = try TestProgramClient.init(true);
+            defer connection.deinit();
+            const client = connection.client;
+            try client.write_buf.appendSlice(alloc, "existing output");
+            // Fill the client output buffer so adding the OSC 7501 messages
+            // for this reconnecting client must allocate more memory.
+            try client.write_buf.appendNTimes(alloc, 'x', client.write_buf.capacity - client.write_buf.items.len);
+            const before = try alloc.dupe(u8, client.write_buf.items);
+            defer alloc.free(before);
+            client.has_pending_output = pending;
+            var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = fail_index, .resize_fail_index = 0 });
+            daemon.restoreClient(failing.allocator(), client, term) catch {
+                failures += 1;
+                try std.testing.expectEqualStrings(before, client.write_buf.items);
+                try std.testing.expectEqual(pending, client.has_pending_output);
+                continue;
+            };
+            try std.testing.expect(client.has_pending_output);
+            try std.testing.expect(std.mem.startsWith(u8, client.write_buf.items, before));
+            try std.testing.expect(std.mem.indexOf(u8, client.write_buf.items, "state=working") != null);
+            reached_success = true;
+            break;
+        }
+        try std.testing.expect(reached_success);
+    }
+    try std.testing.expect(failures >= 4);
+}
+
+test "program status allocation failure preserves an already restored screen" {
+    const alloc = std.testing.allocator;
+    var session: TestProgramSession = .{};
+    try session.init();
+    defer session.deinit();
+    const daemon = &session.daemon;
+    const term = &session.term;
+    const stream = session.stream;
+    stream.nextSlice("screen remains available\x1b]7501;state=working\x07");
+    daemon.has_pty_output = true;
+
+    var preserved_screen_on_failure = false;
+    var reached_success = false;
+    for (0..64) |fail_index| {
+        var connection = try TestProgramClient.init(true);
+        defer connection.deinit();
+        const client = connection.client;
+        var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = fail_index, .resize_fail_index = 0 });
+        daemon.restoreClient(failing.allocator(), client, term) catch {
+            if (client.write_buf.items.len > 0) {
+                // Keep screen output even if restoring OSC 7501 Program Status
+                // failed. Do not send 'clear' without the saved task reports.
+                try std.testing.expect(std.mem.indexOf(u8, client.write_buf.items, "screen remains available") != null);
+                try std.testing.expect(std.mem.indexOf(u8, client.write_buf.items, "\x1b]7501;") == null);
+                try std.testing.expect(client.has_pending_output);
+                preserved_screen_on_failure = true;
+            }
+            continue;
+        };
+        try std.testing.expect(std.mem.indexOf(u8, client.write_buf.items, "screen remains available") != null);
+        try std.testing.expect(std.mem.indexOf(u8, client.write_buf.items, "state=working") != null);
+        reached_success = true;
+        break;
+    }
+    try std.testing.expect(reached_success);
+    try std.testing.expect(preserved_screen_on_failure);
+}
+
+test "program status unavailable recovery metadata still restores the screen" {
+    const alloc = std.testing.allocator;
+    for ([_]bool{ false, true }) |lost_records| {
+        var session: TestProgramSession = .{};
+        try session.init();
+        defer session.deinit();
+        const daemon = &session.daemon;
+        const term = &session.term;
+        const stream = session.stream;
+        stream.nextSlice("screen survives\x1b]7501;state=blocked\x07");
+        daemon.has_pty_output = true;
+        if (lost_records) {
+            var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+            try std.testing.expectError(error.OutOfMemory, daemon.program_status_records.updateFromReport(failing.allocator(), .{ .state = .idle, .data = "state=idle" }));
+        } else {
+            stream.nextSlice("\x1b]52;c;" ++ repeatTestBytes("YQ==", 1100));
+        }
+        var connection = try TestProgramClient.init(true);
+        defer connection.deinit();
+        const client = connection.client;
+        try daemon.restoreClient(alloc, client, term);
+        var receiver: TestProgramSession = .{};
+        try receiver.init();
+        defer receiver.deinit();
+        const target = &receiver.term;
+        const records = receiver.records;
+        const target_stream = receiver.stream;
+        _ = try replayTestOutput(client, target_stream);
+        const screen = try target.plainString(alloc);
+        defer alloc.free(screen);
+        try std.testing.expect(std.mem.indexOf(u8, screen, "screen survives") != null);
+        if (lost_records) {
+            try std.testing.expectEqual(@as(usize, 0), records.items.items.len);
+            try std.testing.expect(std.mem.indexOf(u8, client.write_buf.items, "7501") == null);
+        } else {
+            try std.testing.expectEqual(.blocked, records.get(null).?.state);
+        }
+    }
+}
+
+test "program status collection and forwarding survive client attachment changes" {
+    const alloc = std.testing.allocator;
+    var session: TestProgramSession = .{};
+    try session.init();
+    defer session.deinit();
+    const daemon = &session.daemon;
+    // Close clients left attached if an assertion interrupts the detach checks.
+    defer while (daemon.clients.items.len > 0) {
+        _ = daemon.closeClient(alloc, daemon.clients.items[0], 0, false);
+    };
+    const term = &session.term;
+    const stream = session.stream;
+
+    try daemon.handleOutput(alloc, "\x1b]7501;?\x07\x1b]7501;state=working\x07", term, stream);
+    try std.testing.expectEqual(.working, daemon.program_status_records.get(null).?.state);
+    try std.testing.expectEqualStrings("\x1b]7501;" ++ ghostty_vt.osc.program_status.query_reply ++ "\x07", daemon.pty_write_buf.items);
+    daemon.pty_write_buf.clearRetainingCapacity();
+
+    const pipes = try lib_posix.pipe2(.{});
+    const first = try testClient(alloc, pipes[0], true);
+    try daemon.clients.append(alloc, first);
+    const second = try testClient(alloc, pipes[1], true);
+    try daemon.clients.append(alloc, second);
+    // Do not signal a real process group from 'handleOutput' in this unit test.
+    daemon.pid = std.math.maxInt(i32);
+    const update = "\x1b]7501;?\x07\x1b]7501;state=blocked:kind=permission\x07";
+    try daemon.handleOutput(alloc, update, term, stream);
+    try std.testing.expectEqual(.blocked, daemon.program_status_records.get(null).?.state);
+    try std.testing.expectEqual(@as(usize, 0), daemon.pty_write_buf.items.len);
+    try std.testing.expectEqualStrings(update, first.write_buf.items[@sizeOf(ipc.Header)..]);
+    try std.testing.expectEqualStrings(update, second.write_buf.items[@sizeOf(ipc.Header)..]);
+
+    _ = daemon.closeClient(alloc, first, 0, false);
+    try daemon.handleOutput(alloc, "\x1b]7501;?\x07", term, stream);
+    try std.testing.expectEqual(@as(usize, 0), daemon.pty_write_buf.items.len);
+    _ = daemon.closeClient(alloc, second, 0, false);
+    try daemon.handleOutput(alloc, "\x1b]7501;?\x07\x1b]7501;state=done\x07", term, stream);
+    try std.testing.expectEqual(.done, daemon.program_status_records.get(null).?.state);
+    try std.testing.expectEqualStrings("\x1b]7501;" ++ ghostty_vt.osc.program_status.query_reply ++ "\x07", daemon.pty_write_buf.items);
+}
+
 test "handleEnvGet returns leader client's environment variables including unsets" {
     const alloc = std.testing.allocator;
     var cfg = Cfg{
@@ -1572,4 +2052,375 @@ test "handleEnvGet returns leader client's environment variables including unset
     try daemon.handleEnvGet(alloc, &client_req);
     const pay3 = client_req.write_buf.items[@sizeOf(ipc.Header)..];
     try std.testing.expectEqualStrings("DISPLAY=:99\n", pay3);
+}
+
+test "program status owns reports and replaces complete records" {
+    var f: TestProgramSession = .{};
+    try f.init();
+    defer f.deinit();
+
+    // Deliberately split escape sequences across reads, including the terminator.
+    f.stream.nextSlice("\x1b]");
+    f.stream.nextSlice("7501;state=blocked:app=claude-code:kind=permission:msg=QXBwcm92ZT8=\x1b");
+    f.stream.nextSlice("\\");
+    f.report("state=working:id=worker:progress=37");
+    try std.testing.expectEqual(.blocked, f.records.get(null).?.state);
+    try std.testing.expectEqualStrings("claude-code", f.records.get(null).?.readOption(.app).?);
+    try std.testing.expectEqual(.permission, f.records.get(null).?.readOption(.kind).?);
+    try std.testing.expectEqual(@as(u8, 37), f.records.get("worker").?.readOption(.progress).?);
+
+    f.report("state=idle");
+    const root = f.records.get(null).?;
+    try std.testing.expectEqual(.idle, root.state);
+    try std.testing.expect(root.readOption(.app) == null);
+    try std.testing.expect(root.readOption(.kind) == null);
+    try std.testing.expect(root.readOption(.msg) == null);
+    try std.testing.expectEqual(@as(usize, 2), f.records.items.items.len);
+}
+
+test "program status clears descendants at path boundaries without requiring a parent" {
+    var f: TestProgramSession = .{};
+    try f.init();
+    defer f.deinit();
+    f.report("state=idle");
+    f.report("state=blocked:id=build/test:kind=question");
+    f.report("state=working:id=builder/test");
+    f.report("state=clear:id=build");
+    try std.testing.expect(f.records.get("build/test") == null);
+    try std.testing.expect(f.records.get("builder/test") != null);
+    try std.testing.expect(f.records.get(null) != null);
+    f.report("state=clear");
+    try std.testing.expectEqual(@as(usize, 0), f.records.items.items.len);
+}
+
+test "program status lifetimes distinguish prompts screens soft resets and full resets" {
+    var f: TestProgramSession = .{};
+    try f.init();
+    defer f.deinit();
+    f.report("state=working");
+    f.report("state=blocked:id=blocked");
+    f.report("state=done:id=done");
+    f.report("state=error:id=error");
+    f.report("state=idle:id=idle");
+    f.stream.nextSlice("\x1b[?1049h\x1b[?1049l\x1b[!p");
+    try std.testing.expectEqual(@as(usize, 5), f.records.items.items.len);
+    f.stream.nextSlice("\x1b]133;A\x07");
+    try std.testing.expect(f.records.get(null) == null);
+    try std.testing.expect(f.records.get("blocked") == null);
+    try std.testing.expectEqual(@as(usize, 3), f.records.items.items.len);
+
+    f.report("state=working");
+    f.records.removeWorkingAndBlocked(std.testing.allocator);
+    try std.testing.expect(f.records.get(null) == null);
+    try std.testing.expect(f.records.get("done") != null);
+    f.stream.nextSlice("\x1bc");
+    try std.testing.expectEqual(@as(usize, 0), f.records.items.items.len);
+}
+
+test "program status rejects malformed and oversized reports atomically" {
+    var f: TestProgramSession = .{};
+    try f.init();
+    defer f.deinit();
+    f.report("state=done:app=test");
+    const invalid = [_][]const u8{
+        "state=unknown",
+        "state=blocked:id=bad//id",
+        "state=blocked:msg=A",
+        "state=blocked:msg=Cg==", // newline
+        "state=blocked:title=wog=", // C1 control U+0088
+        "state=blocked:abcdefghijklmnopq=x",
+        "state=blocked:app=" ++ repeatTestBytes("a", 33),
+        "state=blocked:msg=" ++ repeatTestBytes("YQ==", 684),
+        "state=blocked:title=" ++ repeatTestBytes("YQ==", 65),
+        "state=blocked:unknown=" ++ repeatTestBytes("x", 4096),
+    };
+    for (invalid) |data| {
+        f.report(data);
+        try std.testing.expectEqualStrings("test", f.records.get(null).?.readOption(.app).?);
+        try std.testing.expectEqual(.done, f.records.get(null).?.state);
+        try std.testing.expectEqual(@as(usize, 1), f.records.items.items.len);
+    }
+}
+
+test "program status records with the same id are isolated between sessions" {
+    var first: TestProgramSession = .{};
+    try first.init();
+    defer first.deinit();
+    var second: TestProgramSession = .{};
+    try second.init();
+    defer second.deinit();
+    first.report("state=blocked:id=worker");
+    second.report("state=done:id=worker");
+    first.report("state=clear");
+    try std.testing.expectEqual(@as(usize, 0), first.records.items.items.len);
+    try std.testing.expectEqual(.done, second.records.get("worker").?.state);
+}
+
+test "program status replay preserves every report split across attachment" {
+    const alloc = std.testing.allocator;
+    const sequences = [_][]const u8{
+        "\x1b]7501;state=idle:app=agent:msg=UmVhZHk=\x07",
+        "\x1b]7501;state=blocked:id=worker/test:kind=permission:progress=37\x1b\\",
+        "\x1b]7501;state=clear:id=worker\x1b\\",
+        "\x1b]7501;state=clear\x07",
+    };
+    for (sequences) |sequence| {
+        for (0..sequence.len + 1) |cut| {
+            var source: TestProgramSession = .{};
+            try source.init();
+            defer source.deinit();
+            source.report("state=working:app=agent");
+            source.report("state=working:id=worker/test");
+            source.stream.nextSlice(sequence[0..cut]);
+
+            var replay: std.Io.Writer.Allocating = .init(alloc);
+            defer replay.deinit();
+            try source.writeReplay(&replay.writer);
+            var target: TestProgramSession = .{};
+            try target.init();
+            defer target.deinit();
+            target.report("state=error:id=stale");
+            target.stream.nextSlice(replay.writer.buffered());
+            source.stream.nextSlice(sequence[cut..]);
+            target.stream.nextSlice(sequence[cut..]);
+            try std.testing.expectEqual(source.records.items.items.len, target.records.items.items.len);
+            for (source.records.items.items) |record| {
+                const restored = target.records.get(record.readOption(.id)) orelse return error.TestUnexpectedNull;
+                try std.testing.expectEqual(record.state, restored.state);
+                try std.testing.expectEqualStrings(record.data, restored.data);
+            }
+        }
+    }
+}
+
+test "program status restores a large interrupted report through client attachment" {
+    const alloc = std.testing.allocator;
+    const id = repeatTestBytes("a", 31) ++ "/" ++ repeatTestBytes("b", 31) ++ "/" ++ repeatTestBytes("c", 31) ++ "/" ++ repeatTestBytes("d", 31);
+    const report = "state=blocked:kind=permission:progress=100:app=" ++ repeatTestBytes("a", 32) ++
+        ":id=" ++ id ++ ":title=" ++ repeatTestBytes("YWFh", 64) ++ ":msg=" ++ repeatTestBytes("YWFh", 682) ++ "YWE=";
+    const sequence = "\x1b]7501;" ++ report ++ "\x1b\\";
+    // Fill each text field to its protocol limit so reconnect exercises a large
+    // unfinished OSC 7501 message.
+    // www.superlogical.com/rex/docs/build/program-status#limits
+    for ([_]usize{ 7, 1023, sequence.len - 2, sequence.len - 1, sequence.len }) |cut| {
+        var source: TestProgramSession = .{};
+        try source.init();
+        defer source.deinit();
+        source.report("state=working");
+        try source.daemon.handleOutput(alloc, sequence[0..cut], &source.term, source.stream);
+
+        var connection = try TestProgramClient.init(false);
+        defer connection.deinit();
+        try source.daemon.restoreClient(alloc, connection.client, &source.term);
+
+        var receiver: TestProgramSession = .{};
+        try receiver.init();
+        defer receiver.deinit();
+        receiver.report("state=error:id=stale");
+        _ = try replayTestOutput(connection.client, receiver.stream);
+        receiver.stream.nextSlice(sequence[cut..]);
+        source.stream.nextSlice(sequence[cut..]);
+
+        const restored = receiver.records.get(id) orelse return error.TestUnexpectedNull;
+        try std.testing.expectEqual(.blocked, restored.state);
+        try std.testing.expectEqualStrings(report, restored.data);
+        try std.testing.expectEqualStrings(report, source.records.get(id).?.data);
+        try std.testing.expectEqual(.working, receiver.records.get(null).?.state);
+        try std.testing.expect(receiver.records.get("stale") == null);
+        try std.testing.expectEqual(@as(usize, 2), receiver.records.items.items.len);
+    }
+}
+
+test "program status replay continues pending queries without repeating dispatched queries" {
+    const S = struct {
+        fn reply(handler: *@FieldType(ghostty_vt.TerminalStream, "handler"), data: []const u8) void {
+            const daemon = Daemon.fromVtHandler(handler);
+            const session: *TestProgramSession = @fieldParentPtr("daemon", daemon);
+            const target: *@This() = @fieldParentPtr("session", session);
+            target.replies.appendSlice(std.testing.allocator, data) catch @panic("test allocation failed");
+        }
+
+        session: TestProgramSession = .{},
+        replies: std.ArrayList(u8) = .empty,
+    };
+    const queries = [_][]const u8{ "\x1b]7501;?\x07", "\x1b]7501;?\x1b\\" };
+    for (queries) |query| {
+        for (0..query.len) |cut| {
+            var source: TestProgramSession = .{};
+            try source.init();
+            defer source.deinit();
+            source.stream.nextSlice(query[0..cut]);
+            var replay: std.Io.Writer.Allocating = .init(std.testing.allocator);
+            defer replay.deinit();
+            try source.writeReplay(&replay.writer);
+            var target: S = .{};
+            try target.session.init();
+            defer target.session.deinit();
+            defer target.replies.deinit(std.testing.allocator);
+            target.session.stream.handler.effects.write_pty = &S.reply;
+            target.session.stream.nextSlice(replay.writer.buffered());
+            try std.testing.expectEqual(@as(usize, 0), target.replies.items.len);
+            target.session.stream.nextSlice(query[cut..]);
+            // Ghostty considers the query complete when it reads the escape
+            // byte of the two-byte terminator. Replaying the final backslash
+            // must not process the same query again.
+            const dispatched = query[query.len - 1] == '\\' and cut == query.len - 1;
+            if (dispatched) {
+                try std.testing.expectEqual(@as(usize, 0), target.replies.items.len);
+            } else {
+                const terminator: []const u8 = if (query[query.len - 1] == 7) "\x07" else "\x1b\\";
+                var expected: std.Io.Writer.Allocating = .init(std.testing.allocator);
+                defer expected.deinit();
+                try expected.writer.print("\x1b]7501;{s}{s}", .{ ghostty_vt.osc.program_status.query_reply, terminator });
+                try std.testing.expectEqualStrings(expected.writer.buffered(), target.replies.items);
+            }
+        }
+    }
+}
+
+test "program status replay stays unavailable after a missed update until root clear or reset" {
+    const alloc = std.testing.allocator;
+    for ([_][]const u8{ "\x1b]7501;state=clear\x07", "\x1bc" }) |reset| {
+        var f: TestProgramSession = .{};
+        try f.init();
+        defer f.deinit();
+        f.report("state=working:app=agent");
+        var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+        try std.testing.expectError(error.OutOfMemory, f.records.updateFromReport(failing.allocator(), .{ .state = .idle, .data = "state=idle" }));
+        f.report("state=done:id=worker");
+        f.report("state=clear:id=worker");
+        f.stream.nextSlice("\x1b]133;A\x07");
+        var unavailable: std.Io.Writer.Allocating = .init(alloc);
+        defer unavailable.deinit();
+        try f.writeReplay(&unavailable.writer);
+        try std.testing.expectEqual(@as(usize, 0), unavailable.writer.buffered().len);
+
+        f.stream.nextSlice(reset);
+        var recovered: std.Io.Writer.Allocating = .init(alloc);
+        defer recovered.deinit();
+        try f.writeReplay(&recovered.writer);
+        try std.testing.expectEqualStrings("\x1b]7501;state=clear\x1b\\", recovered.writer.buffered());
+    }
+}
+
+test "program status replay recovers after an oversized unrelated continuation" {
+    var f: TestProgramSession = .{};
+    try f.init();
+    defer f.deinit();
+    f.report("state=blocked:id=worker");
+    f.stream.nextSlice("\x1b]52;c;" ++ repeatTestBytes("YQ==", 1100));
+    var replay: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer replay.deinit();
+    try f.writeReplay(&replay.writer);
+    try std.testing.expectEqualStrings("\x1b]7501;state=clear\x1b\\\x1b]7501;state=blocked:id=worker\x1b\\", replay.writer.buffered());
+    f.stream.nextSlice("\x07\x1b]7501;state=idle");
+    replay.clearRetainingCapacity();
+    try f.writeReplay(&replay.writer);
+    try std.testing.expect(std.mem.endsWith(u8, replay.writer.buffered(), "\x1b]7501;state=idle"));
+}
+
+test "program status detached capability replies survive every query split" {
+    const alloc = std.testing.allocator;
+    inline for (.{ "\x07", "\x1b\\" }) |terminator| {
+        const query = "\x1b]7501;?" ++ terminator;
+        const expected = "\x1b]7501;" ++ ghostty_vt.osc.program_status.query_reply ++ terminator;
+        for (0..query.len + 1) |cut| {
+            var session: TestProgramSession = .{};
+            try session.init();
+            defer session.deinit();
+            var control = try TestProgramClient.init(false);
+            defer control.deinit();
+            try session.daemon.clients.append(alloc, control.client);
+            session.stream.nextSlice(query[0..cut]);
+            session.stream.nextSlice(query[cut..]);
+            try std.testing.expectEqualStrings(expected, session.daemon.pty_write_buf.items);
+            try std.testing.expectEqual(@as(usize, 0), session.records.items.items.len);
+        }
+    }
+}
+
+test "program status capability ownership follows terminal attachment at query dispatch" {
+    const alloc = std.testing.allocator;
+    inline for (.{ "\x07", "\x1b\\" }) |terminator| {
+        const query = "\x1b]7501;?" ++ terminator;
+        const expected = "\x1b]7501;" ++ ghostty_vt.osc.program_status.query_reply ++ terminator;
+        for ([_]bool{ false, true }) |initially_attached| {
+            for (0..query.len + 1) |cut| {
+                var session: TestProgramSession = .{};
+                try session.init();
+                defer session.deinit();
+                var first = try TestProgramClient.init(initially_attached);
+                defer first.deinit();
+                var second = try TestProgramClient.init(initially_attached);
+                defer second.deinit();
+                try session.daemon.clients.append(alloc, first.client);
+                try session.daemon.clients.append(alloc, second.client);
+                session.stream.nextSlice(query[0..cut]);
+                first.client.is_terminal = !initially_attached;
+                second.client.is_terminal = !initially_attached;
+                session.stream.nextSlice(query[cut..]);
+                // Ghostty dispatches ST-ended queries at ESC, before the final
+                // backslash. The terminal attachment at that point owns the reply.
+                const dispatch_end = if (terminator.len == 2) query.len - 1 else query.len;
+                const daemon_replies = if (cut >= dispatch_end) !initially_attached else initially_attached;
+                try std.testing.expectEqualStrings(if (daemon_replies) expected else "", session.daemon.pty_write_buf.items);
+            }
+        }
+    }
+}
+
+test "program status capability replies leave other terminal queries to existing handlers" {
+    var session: TestProgramSession = .{};
+    try session.init();
+    defer session.deinit();
+    session.stream.nextSlice("\x1b[c\x1b[>c\x1b[5n\x1b[6n\x1b]10;?\x07\x1b]52;c;?\x07");
+    try std.testing.expectEqualStrings("", session.daemon.pty_write_buf.items);
+    session.report("state=blocked:msg=cHJpdmF0ZQ==");
+    session.stream.nextSlice("\x1b]7501;?\x07");
+    try std.testing.expectEqualStrings("\x1b]7501;" ++ ghostty_vt.osc.program_status.query_reply ++ "\x07", session.daemon.pty_write_buf.items);
+    try std.testing.expect(std.mem.indexOf(u8, session.daemon.pty_write_buf.items, "private") == null);
+}
+
+test "program status detached capability reply precedes device attributes" {
+    var session: TestProgramSession = .{};
+    try session.init();
+    defer session.deinit();
+    const query = "\x1b]7501;?\x07\x1b[c";
+    session.stream.nextSlice(query);
+    util.respondToDeviceAttributes(std.testing.allocator, &session.daemon.pty_write_buf, query);
+    try std.testing.expectEqualStrings("\x1b]7501;" ++ ghostty_vt.osc.program_status.query_reply ++ "\x07" ++ "\x1b[?62;22c", session.daemon.pty_write_buf.items);
+}
+
+test "program status does not repeat a query after its attached terminal leaves" {
+    var session: TestProgramSession = .{};
+    try session.init();
+    defer session.deinit();
+    var connection = try TestProgramClient.init(true);
+    defer connection.deinit();
+    try session.daemon.clients.append(std.testing.allocator, connection.client);
+    session.stream.nextSlice("\x1b]7501;?\x1b\\");
+    connection.client.is_terminal = false;
+    var restored: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer restored.deinit();
+    try session.writeReplay(&restored.writer);
+    try std.testing.expectEqualStrings("\x1b]7501;state=clear\x1b\\", restored.writer.buffered());
+    try std.testing.expectEqualStrings("", session.daemon.pty_write_buf.items);
+    // A terminal can disconnect before answering. Only a new query can ask
+    // again after that loss, rather than a later attachment repeating it.
+    session.stream.nextSlice("\x1b]7501;?\x07");
+    try std.testing.expectEqualStrings("\x1b]7501;" ++ ghostty_vt.osc.program_status.query_reply ++ "\x07", session.daemon.pty_write_buf.items);
+}
+
+test "program status capability reply never partially overwrites queued input" {
+    var session: TestProgramSession = .{};
+    try session.init();
+    defer session.deinit();
+    const alloc = std.testing.allocator;
+    try session.daemon.pty_write_buf.appendNTimes(alloc, 'x', Daemon.PTY_WRITE_BUF_MAX - 1);
+    session.stream.nextSlice("\x1b]7501;?\x07");
+    try std.testing.expectEqual(Daemon.PTY_WRITE_BUF_MAX - 1, session.daemon.pty_write_buf.items.len);
+    try std.testing.expect(std.mem.allEqual(u8, session.daemon.pty_write_buf.items, 'x'));
+    session.daemon.pty_write_buf.clearRetainingCapacity();
+    session.stream.nextSlice("\x1b]7501;?\x07");
+    try std.testing.expectEqualStrings("\x1b]7501;" ++ ghostty_vt.osc.program_status.query_reply ++ "\x07", session.daemon.pty_write_buf.items);
 }

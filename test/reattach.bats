@@ -68,3 +68,18 @@ count() { "$ZMX" history "$1" | grep -o "$2" | wc -l | tr -d ' '; }
   done
   [ "$after" -gt "$before" ]
 }
+
+@test "program status restores current tasks privately after reconnect" {
+  unset ZMX_SESSION ZMX_SESSION_PREFIX
+  python3 "$BATS_TEST_DIRNAME/program_status.py" records "$ZMX" "$BATS_TEST_TMPDIR" 3>&-
+}
+
+@test "program status finishes an interrupted report after reconnect" {
+  unset ZMX_SESSION ZMX_SESSION_PREFIX
+  python3 "$BATS_TEST_DIRNAME/program_status.py" pending-report "$ZMX" "$BATS_TEST_TMPDIR" 3>&-
+}
+
+@test "program status enables agents before attachment and after detachment" {
+  unset ZMX_SESSION ZMX_SESSION_PREFIX
+  python3 "$BATS_TEST_DIRNAME/program_status.py" detached-capability "$ZMX" "$BATS_TEST_TMPDIR" 3>&-
+}
