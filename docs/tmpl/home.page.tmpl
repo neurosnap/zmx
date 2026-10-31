@@ -1,0 +1,146 @@
+{{template "base" .}}
+
+{{define "title"}}{{.Data.Title}}{{end}}
+
+{{define "meta"}}
+<meta name="description" content="{{.Data.Description}}">
+{{end}}
+
+{{define "attrs"}}class="container"{{end}}
+
+{{define "body"}}
+{{template "nav" .}}
+
+<main>
+  <div class="flex flex-col gap-2">
+    <div class="hero">
+      <div class="box">
+        <div class="text-sm mono text-grey mb">zmx@sh: ~</div>
+        <div class="flex items-center gap my">
+          <img src="/logo.png" alt="zmx" width="28" height="28" style="margin: 0;" />
+          <h1 class="m-0"><span class="text-green">$</span> zmx attach dev</h1>
+        </div>
+        <p class="mono mt">Session attach/detach for the terminal.</p>
+        <div class="flex items-center gap my mono">
+          <a href="/getting-started">[get started]</a>
+          <a href="/sitemap">[docs]</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="box">
+      <div class="text-sm mono text-grey mb">DESCRIPTION</div>
+      <p class="my">
+        Persist terminal shell sessions while keeping native terminal scrollback
+        and 1:1 terminal emulator features. <code>zmx</code> handles session
+        persistence and defers window management to your OS window manager.
+      </p>
+      <div class="mt mono text-sm flex flex-wrap gap">
+        <span class="text-grey">see also:</span>
+        <a href="https://bower.sh/you-might-not-need-tmux">[you might not need tmux]</a>
+        <a href="https://youtu.be/UIXj0_rhPgI">[intro video]</a>
+        <a href="https://youtu.be/CV3skPYHP4Q">[ai portal demo]</a>
+      </div>
+    </div>
+
+    <article class="features">
+      <div class="box">
+        <h3 class="m-0">
+          <a href="/getting-started">[persistence]</a>
+        </h3>
+        <div>Attach and detach from shell sessions without killing them. Multiple clients can connect to the same session.</div>
+      </div>
+
+      <div class="box">
+        <h3 class="m-0">
+          <a href="/architecture">[native vt]</a>
+        </h3>
+        <div>Uses <code>libghostty-vt</code> to restore terminal state and scrollback on re-attach.</div>
+      </div>
+
+      <div class="box">
+        <h3 class="m-0">
+          <a href="/ssh">[ssh workflow]</a>
+        </h3>
+        <div>Combine SSH <code>ControlMaster</code> and <code>autossh</code> with your OS window manager for remote sessions.</div>
+      </div>
+
+      <div class="box">
+        <h3 class="m-0">
+          <a href="/shell-integration">[shell integration]</a>
+        </h3>
+        <div>Prompt status, client environment variable tracking, shell completions, and <code>fzf</code> session picker.</div>
+      </div>
+
+      <div class="box">
+        <h3 class="m-0">
+          <a href="/getting-started#usage">[automation]</a>
+        </h3>
+        <div>Send commands without attaching (<code>zmx run</code>), wait on tasks (<code>zmx wait</code>), tail output, or print scrollback history.</div>
+      </div>
+
+      <div class="box">
+        <h3 class="m-0">
+          <a href="/zig-package">[zig package]</a>
+        </h3>
+        <div>Import <code>zmx</code> in Zig projects via <code>src/lib.zig</code>.</div>
+      </div>
+    </article>
+
+    <div>
+      <hr>
+    </div>
+
+    <div class="group-2 home-features">
+      <div class="box">
+        <h3 class="mt-0">Attach and detach</h3>
+        <p class="my">Create or re-attach to a named session:</p>
+        <pre class="cmd">zmx attach dev</pre>
+        <p class="my">Close your terminal window or run <code>zmx detach</code> (<code>ctrl+\</code>). The session keeps running and restores screen state and scrollback on re-attach.</p>
+      </div>
+
+      <div class="box">
+        <h3 class="mt-0">Run commands without attaching</h3>
+        <p class="my">Send commands to a session and wait for completion:</p>
+        <pre class="cmd">zmx run build -d zig build
+zmx run test -d zig build test
+zmx wait build test</pre>
+        <p class="my">Read session output with <code>zmx history</code> or <code>zmx tail</code>.</p>
+      </div>
+
+      <div class="box">
+        <h3 class="mt-0">Remote SSH sessions</h3>
+        <p class="my">Configure SSH <code>ControlMaster</code> in <code>~/.ssh/config</code>:</p>
+        <pre>Host d.*
+    HostName 192.168.1.xxx
+    RemoteCommand zmx attach %k
+    RequestTTY yes
+    ControlPath ~/.ssh/cm-%r@%h:%p
+    ControlMaster auto
+    ControlPersist 10m</pre>
+        <p class="my">Open a native terminal window per remote session with <code>ssh d.term</code> or <code>autossh</code>. <a href="/ssh">Read the SSH guide</a>.</p>
+      </div>
+
+      <div class="box">
+        <h3 class="mt-0">Install</h3>
+        <p class="my">Available on Linux and macOS:</p>
+        <pre class="cmd">brew install neurosnap/tap/zmx
+# or
+mise use zmx
+# or
+nix run github:NixOS/nixpkgs/nixpkgs-unstable#zmx</pre>
+        <p class="my">See all <a href="/getting-started">installation options</a>.</p>
+      </div>
+
+      <div class="text-center mono my">
+        <h3 class="inline-block">Ready to try zmx?</h3>
+        <div class="my"><a href="/getting-started">[get started]</a></div>
+      </div>
+    </div>
+
+    <hr class="my-4">
+
+    {{template "footer" .}}
+  </div>
+</main>
+{{end}}

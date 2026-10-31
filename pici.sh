@@ -22,9 +22,8 @@ zmx run upload-build docker build -t zmx-upload -f Dockerfile.upload .
 
 if [[ $BRANCH = "main" ]]; then
   zmx run upload docker run --rm \
-    -v "$(pwd)/README.md:/app/README.md:ro" \
+    -v "$(pwd)/docs:/app/docs" \
     -v "$(pwd)/logo.png:/app/logo.png:ro" \
-    -v "$(pwd)/index.tmpl:/app/index.tmpl:ro" \
     -v ~/.ssh:/root/.ssh:ro \
     zmx-upload
 fi
