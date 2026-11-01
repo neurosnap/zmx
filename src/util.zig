@@ -8,7 +8,7 @@ pub const serializeTerminal = if (has_daemon) terminal.serializeTerminal else st
 pub const serializeTerminalRange = if (has_daemon) terminal.serializeTerminalRange else struct {};
 const ipc = @import("ipc.zig");
 const socket = @import("socket.zig");
-const cross = @import("cross.zig");
+const cross = @import("cross");
 const label = @import("label.zig");
 const lib_posix = @import("posix.zig");
 const testing = std.testing;
@@ -1122,11 +1122,11 @@ test "isCtrlBackslash xterm modifyOtherKeys" {
 }
 
 test "isDetachKeyDisabled" {
-    _ = cross.c.unsetenv("ZMX_NO_DETACH_KEY");
+    _ = cross.unsetenv("ZMX_NO_DETACH_KEY");
     try testing.expect(!isDetachKeyDisabled());
 
-    _ = cross.c.setenv("ZMX_NO_DETACH_KEY", "1", 1);
-    defer _ = cross.c.unsetenv("ZMX_NO_DETACH_KEY");
+    _ = cross.setenv("ZMX_NO_DETACH_KEY", "1", 1);
+    defer _ = cross.unsetenv("ZMX_NO_DETACH_KEY");
     try testing.expect(isDetachKeyDisabled());
 }
 

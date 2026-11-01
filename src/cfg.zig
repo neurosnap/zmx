@@ -5,7 +5,7 @@ pub const Cfg = @This();
 
 const std = @import("std");
 const lib_posix = @import("posix.zig");
-const cross = @import("cross.zig");
+const cross = @import("cross");
 
 socket_dir: []const u8,
 log_dir: []const u8,
@@ -113,8 +113,8 @@ test "Cfg.init uses default modes when env vars are not set" {
     const alloc = std.testing.allocator;
 
     // Ensure they are not set
-    _ = cross.c.unsetenv("ZMX_DIR_MODE");
-    _ = cross.c.unsetenv("ZMX_LOG_MODE");
+    _ = cross.unsetenv("ZMX_DIR_MODE");
+    _ = cross.unsetenv("ZMX_LOG_MODE");
 
     var cfg = try Cfg.init(alloc, std.testing.io);
     defer cfg.deinit(alloc);
@@ -127,11 +127,11 @@ test "Cfg.init uses custom modes from env vars" {
     const alloc = std.testing.allocator;
 
     // Set custom octal values
-    _ = cross.c.setenv("ZMX_DIR_MODE", "770", 1);
-    _ = cross.c.setenv("ZMX_LOG_MODE", "660", 1);
+    _ = cross.setenv("ZMX_DIR_MODE", "770", 1);
+    _ = cross.setenv("ZMX_LOG_MODE", "660", 1);
     defer {
-        _ = cross.c.unsetenv("ZMX_DIR_MODE");
-        _ = cross.c.unsetenv("ZMX_LOG_MODE");
+        _ = cross.unsetenv("ZMX_DIR_MODE");
+        _ = cross.unsetenv("ZMX_LOG_MODE");
     }
 
     var cfg = try Cfg.init(alloc, std.testing.io);

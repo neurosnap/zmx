@@ -1,0 +1,28 @@
+{{define "toc"}}
+<div class="sitemap-grid">
+{{range .Sitemap.Children -}}
+  {{if .Children}}
+  <div class="sitemap-card">
+    <div class="sidebar-header mono text-sm text-grey font-bold">[{{.Text}}]</div>
+    <ul class="sitemap-tree mono list-none" style="padding-left: 0; margin: 0;">
+    {{range .Children -}}
+      <li class="sitemap-page-item">
+        <span class="text-grey">></span> <a href="{{.GenHref}}" class="font-bold">{{.Text}}</a>
+
+        {{if .Children}}
+        <ul class="list-none sitemap-heading-list">
+        {{range .Children}}
+          <li>
+            <span class="text-grey">#</span> <a href="{{.GenHref}}">{{.Text}}</a>
+          </li>
+        {{end}}
+        </ul>
+        {{end}}
+      </li>
+    {{- end}}
+    </ul>
+  </div>
+  {{end}}
+{{- end}}
+</div>
+{{end}}

@@ -1,5 +1,5 @@
 const std = @import("std");
-const cross = @import("cross.zig");
+const cross = @import("cross");
 
 pub var log_system = LogSystem{};
 
@@ -40,7 +40,7 @@ pub const LogSystem = struct {
         // between our length() check and seekTo(), causing us to overwrite
         // recent parent entries. lseek(fd, 0, SEEK_END) is atomic — it
         // always positions at the true end of file at seek time.
-        const new_pos = cross.c.lseek(file.handle, 0, cross.c.SEEK_END);
+        const new_pos = cross.lseek(file.handle, 0, cross.SEEK_END);
         if (new_pos == -1) {
             std.Io.File.close(file, self.io);
             return error.SeekFailed;

@@ -181,7 +181,7 @@ test "getSocketPath succeeds for paths within limit" {
 
 test "getSocketPath returns NameTooLong when path exceeds limit" {
     const alloc = std.testing.allocator;
-    const dir = [_]u8{'d'} ** (max_socket_path_len - 2);
+    const dir: [max_socket_path_len - 2]u8 = @splat('d');
     const dir_slice: []const u8 = &dir;
 
     const ok = try getSocketPath(alloc, dir_slice, "x");
@@ -194,7 +194,7 @@ test "getSocketPath returns NameTooLong when path exceeds limit" {
 
 test "getSocketPath returns NameTooLong for empty dir with oversized name" {
     const alloc = std.testing.allocator;
-    const name = [_]u8{'n'} ** (max_socket_path_len);
+    const name: [max_socket_path_len]u8 = @splat('n');
     const name_slice: []const u8 = &name;
     const err = getSocketPath(alloc, "", name_slice);
     try std.testing.expectError(error.NameTooLong, err);
@@ -205,11 +205,11 @@ test "maxSessionNameLen computes correct dynamic limit" {
     const short_max = maxSessionNameLen(short_dir).?;
     try std.testing.expectEqual(max_socket_path_len - short_dir.len - 1, short_max);
 
-    const full_dir = [_]u8{'f'} ** max_socket_path_len;
+    const full_dir: [max_socket_path_len]u8 = @splat('f');
     const full_dir_slice: []const u8 = &full_dir;
     try std.testing.expectEqual(@as(?usize, null), maxSessionNameLen(full_dir_slice));
 
-    const tight_dir = [_]u8{'t'} ** (max_socket_path_len - 2);
+    const tight_dir: [max_socket_path_len - 2]u8 = @splat('t');
     const tight_dir_slice: []const u8 = &tight_dir;
     try std.testing.expectEqual(@as(?usize, 1), maxSessionNameLen(tight_dir_slice));
 }

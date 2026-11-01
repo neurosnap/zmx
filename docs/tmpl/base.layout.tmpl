@@ -1,0 +1,24 @@
+{{define "base"}}
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>{{template "title" .}} · zmx</title>
+    <meta charset='utf-8'>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="keywords" content="zmx, session persistence, terminal, tool, linux, zig">
+
+    <link href="/logo.png" rel="icon" sizes="any" type="image/png">
+
+    <link rel="stylesheet" href="https://pico.sh/syntax.css?v={{.CacheId}}">
+    <link rel="stylesheet" href="https://pico.sh/smol.css?v={{.CacheId}}">
+    <link rel="stylesheet" href="/main.css?v={{.CacheId}}">
+    {{template "meta" .}}
+  </head>
+
+  <body {{template "attrs" .}}>
+    <div class="debug-grid"></div>
+    {{template "body" .}}
+  </body>
+</html>
+{{end}}

@@ -2,7 +2,7 @@ const std = @import("std");
 const ipc = @import("ipc.zig");
 const log = @import("log.zig");
 const util = @import("util.zig");
-const cross = @import("cross.zig");
+const cross = @import("cross");
 const socket = @import("socket.zig");
 const label = @import("label.zig");
 const lib_posix = @import("posix.zig");
@@ -19,7 +19,7 @@ const ghostty_vt = terminal.ghostty_vt;
 pub fn clientLoop(client_sock_fd: i32, env_str: []const u8) !ClientResult {
     std.log.info("client loop fd={d}", .{client_sock_fd});
     const gpa: std.mem.Allocator = blk: {
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             const GPA = std.heap.DebugAllocator(.{});
             const Static = struct {
                 var gpa: GPA = .{};
@@ -31,7 +31,8 @@ pub fn clientLoop(client_sock_fd: i32, env_str: []const u8) !ClientResult {
     defer lib_posix.close(client_sock_fd);
 
     try signal.openSignalPipe();
-    signal.installWakeHandler(@intFromEnum(lib_posix.SIG.WINCH));
+    defer signal.closeSignalPipe();
+    signal.installWakeHandler(@backingInt(lib_posix.SIG.WINCH));
 
     // Make socket non-blocking to avoid blocking on writes
     var sock_flags = try lib_posix.fcntl(client_sock_fd, lib_posix.F.GETFL, 0);
@@ -240,7 +241,7 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
     std.log.info("daemon started session={s} pty_fd={d}", .{ daemon.session_name, pty_fd });
 
     try signal.openSignalPipe();
-    signal.installWakeHandler(@intFromEnum(lib_posix.SIG.TERM));
+    signal.installWakeHandler(@backingInt(lib_posix.SIG.TERM));
     var poll_fds = try std.ArrayList(lib_posix.pollfd).initCapacity(gpa, 8);
     defer poll_fds.deinit(gpa);
 
@@ -512,7 +513,7 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
                         _ => {
                             std.log.warn(
                                 "ignoring unknown IPC tag={d}",
-                                .{@intFromEnum(msg.header.tag)},
+                                .{@backingInt(msg.header.tag)},
                             );
                             ipc.appendMessage(gpa, &client.write_buf, .Unsupported, "") catch {};
                             client.has_pending_output = true;
@@ -685,7 +686,7 @@ pub const Daemon = struct {
     /// Resize the PTY and our terminal together, so our terminal stays at the PTY's size.
     fn resizeSession(gpa: std.mem.Allocator, pty_fd: i32, term: *ghostty_vt.Terminal, size: ipc.Resize) !void {
         var ws = size.winsize();
-        _ = cross.c.ioctl(pty_fd, cross.c.TIOCSWINSZ, &ws);
+        _ = cross.ioctl(pty_fd, cross.TIOCSWINSZ, &ws);
         try resizeTerm(gpa, term, size.cols, size.rows);
     }
 
@@ -891,7 +892,7 @@ pub const Daemon = struct {
         }
 
         const gpa: std.mem.Allocator = blk: {
-            if (builtin.mode == .Debug) {
+            if (builtin.mode == .debug) {
                 const GPA = std.heap.DebugAllocator(.{});
                 const Static = struct {
                     var gpa: GPA = .{};
@@ -1089,7 +1090,7 @@ pub const Daemon = struct {
         // only resize if leader, or on every attach with --min-window
         if (sets_size) {
             var ws = resize.winsize();
-            _ = cross.c.ioctl(pty_fd, cross.c.TIOCSWINSZ, &ws);
+            _ = cross.ioctl(pty_fd, cross.TIOCSWINSZ, &ws);
 
             // On re-attach, deliver SIGWINCH to the foreground process group so
             // incremental renderers (Ink, Claude Code, etc.) know to repaint.
@@ -1097,7 +1098,7 @@ pub const Daemon = struct {
             // was unchanged, the kernel suppressed it, so signal the pgrp explicitly.
             if (self.has_pty_output) {
                 var pgrp: lib_posix.pid_t = 0;
-                if (cross.c.ioctl(pty_fd, cross.c.TIOCGPGRP, &pgrp) == 0 and pgrp > 0) {
+                if (cross.ioctl(pty_fd, cross.TIOCGPGRP, &pgrp) == 0 and pgrp > 0) {
                     lib_posix.kill(-pgrp, .WINCH) catch {};
                 }
             }
@@ -1222,7 +1223,7 @@ pub const Daemon = struct {
     ) !void {
         self.setPwd(term);
         const format: util.HistoryFormat = if (payload.len > 0)
-            @enumFromInt(payload[0])
+            @fromBackingInt(@intCast(payload[0]))
         else
             .plain;
         if (util.serializeTerminal(gpa, term, format)) |output| {
@@ -1362,6 +1363,9 @@ pub const Daemon = struct {
         // Chunk large files to stay under command-line length limits.
         // 48000 is divisible by 3 (clean base64 boundaries) and encodes
         // to ~64KB, well under typical ARG_MAX.
+        // The commands skip queuePtyInput's cap: it would drop the chunks
+        // past PTY_WRITE_BUF_MAX and leave the file cut short. The payload
+        // is already bounded by ipc.MAX_PAYLOAD_LEN.
         const chunk_size = 48000;
         var offset: usize = 0;
         var is_first = true;
@@ -1375,16 +1379,16 @@ pub const Daemon = struct {
             defer gpa.free(encoded);
             _ = std.base64.standard.Encoder.encode(encoded, chunk);
 
-            self.queuePtyInput(gpa, "printf '%s' '");
-            self.queuePtyInput(gpa, encoded);
+            try self.pty_write_buf.appendSlice(gpa, "printf '%s' '");
+            try self.pty_write_buf.appendSlice(gpa, encoded);
             if (is_first) {
-                self.queuePtyInput(gpa, "' | base64 -d > '");
+                try self.pty_write_buf.appendSlice(gpa, "' | base64 -d > '");
             } else {
-                self.queuePtyInput(gpa, "' | base64 -d >> '");
+                try self.pty_write_buf.appendSlice(gpa, "' | base64 -d >> '");
             }
-            self.queuePtyInput(gpa, file_path);
-            self.queuePtyInput(gpa, "'");
-            self.queuePtyInput(gpa, "\r");
+            try self.pty_write_buf.appendSlice(gpa, file_path);
+            try self.pty_write_buf.appendSlice(gpa, "'");
+            try self.pty_write_buf.appendSlice(gpa, "\r");
 
             offset = end;
             is_first = false;
@@ -1642,7 +1646,7 @@ const TestPty = struct {
     fn open() !TestPty {
         var master: c_int = undefined;
         var slave: c_int = undefined;
-        if (cross.c.openpty(&master, &slave, null, null, null) != 0) return error.OpenPtyFailed;
+        if (cross.openpty(&master, &slave, null, null, null) != 0) return error.OpenPtyFailed;
         return .{ .master = master, .slave = slave };
     }
 

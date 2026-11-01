@@ -17,3 +17,6 @@ prior_art/
 result
 result-*
 .direnv/
+
+# Docs
+docs/public/

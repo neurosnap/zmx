@@ -1,0 +1,45 @@
+{{template "base" .}}
+
+{{define "title"}}{{.Data.Title}}{{end}}
+
+{{define "meta"}}
+<meta name="description" content="{{.Data.Description}}">
+{{end}}
+
+{{define "attrs"}}class="post-container"{{end}}
+
+{{define "body"}}
+{{template "nav" .}}
+
+<div class="post-group">
+  <aside class="toc-pane">
+    {{if .Data.TocHtml}}
+    <div class="sidebar-header mono text-sm text-grey">[OUTLINE]</div>
+    <div class="toc">
+      {{.Data.TocHtml}}
+    </div>
+    {{end}}
+  </aside>
+
+  <main class="post">
+    <h1 class="m-0 flex items-center">
+      {{.Data.Title}}
+    </h1>
+    <p class="m-0 mono">{{.Data.Description}}</p>
+
+    <hr />
+
+    <article class="md">
+      {{.Data.Html}}
+    </article>
+
+    {{template "pager" .}}
+    {{template "footer" .}}
+  </main>
+
+  <aside class="sitemap-pane">
+    {{template "sitemap-footer" .}}
+  </aside>
+</div>
+
+{{end}}

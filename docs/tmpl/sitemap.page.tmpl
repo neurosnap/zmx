@@ -1,0 +1,26 @@
+{{template "base" .}}
+
+{{define "title"}}{{.Data.Title}}{{end}}
+
+{{define "meta"}}
+<meta name="description" content="{{.Data.Description}}">
+{{end}}
+
+{{define "attrs"}}class="container"{{end}}
+
+{{define "body"}}
+{{template "nav" .}}
+
+<main>
+  <h1 class="m-0">{{.Data.Title}}</h1>
+  <p class="m-0 mono text-grey"># {{.Data.Description}}</p>
+
+  <hr class="dashed" />
+
+  {{template "toc" .}}
+
+  <hr class="dashed" />
+</main>
+
+{{template "footer" .}}
+{{end}}

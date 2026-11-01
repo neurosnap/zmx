@@ -21,7 +21,7 @@ pub fn installWakeHandler(sig: u6) void {
         .mask = lib_posix.sigemptyset(),
         .flags = lib_posix.SA.SIGINFO,
     };
-    lib_posix.sigaction(@as(lib_posix.SIG, @enumFromInt(sig)), &act, null);
+    lib_posix.sigaction(@as(lib_posix.SIG, @fromBackingInt(@intCast(sig))), &act, null);
 }
 
 pub fn ignoreSigpipe() void {
@@ -35,6 +35,13 @@ pub fn ignoreSigpipe() void {
 
 pub fn openSignalPipe() !void {
     sig_pipe = try lib_posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
+}
+
+pub fn closeSignalPipe() void {
+    const fds = sig_pipe;
+    sig_pipe = .{ -1, -1 };
+    lib_posix.close(fds[0]);
+    lib_posix.close(fds[1]);
 }
 
 pub fn drainSignalPipe() void {
