@@ -9,9 +9,10 @@
   #include <sys/ioctl.h>
   #include <sys/types.h>
 
-  // Declare forkpty manually for macOS cross-compilation environments
-  // where util.h might be missing from sysroot.
+  // Declare forkpty and openpty manually for macOS cross-compilation
+  // environments where util.h might be missing from sysroot.
   pid_t forkpty(int *amaster, char *name, const struct termios *termp, const struct winsize *winp);
+  int openpty(int *amaster, int *aslave, char *name, const struct termios *termp, const struct winsize *winp);
 
 #elif defined(__OpenBSD__)
   #include <sys/types.h>

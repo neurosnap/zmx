@@ -35,6 +35,9 @@ pub const AttachOptions = struct {
     shell: ?[]const u8 = null,
     labels: ?[]const u8 = null,
     tracked_env: ?[]const u8 = null,
+    /// Size the PTY to the smallest attached client instead of following the
+    /// leader. Applies only when this attach creates the session.
+    min_window_size: bool = false,
 };
 
 pub const RunOptions = struct {
@@ -153,6 +156,7 @@ pub fn attach(alloc: Allocator, io: Io, name: []const u8, opts: AttachOptions) !
         daemon.command = opts.command;
         if (opts.cwd) |cwd| daemon.setCwd(cwd);
         if (opts.shell) |sh| daemon.shell = sh;
+        daemon.min_window_size = opts.min_window_size;
         const is_daemon_proc = try daemon.ensureSession(io);
         if (is_daemon_proc) std.process.exit(0);
     }
