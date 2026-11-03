@@ -11,6 +11,10 @@ pub const has_daemon = if (@hasDecl(build_options, "has_daemon")) build_options.
 
 pub const ipc = @import("ipc.zig");
 
+// Expose the capability API and the required and optional definitions supplied with zmx.
+pub const capabilities = if (has_daemon) @import("capability-api") else @compileError("capabilities require -Ddaemon=true");
+pub const capability_definitions = if (has_daemon) @import("capabilities/definitions.zig") else @compileError("capabilities require -Ddaemon=true");
+
 pub const HistoryFormat = util.HistoryFormat;
 pub const SessionEntry = util.SessionEntry;
 

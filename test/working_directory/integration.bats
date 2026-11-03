@@ -8,7 +8,7 @@
 # for the chdir, so a new session lands in a directory whose name needed
 # escaping.
 
-load test_helper
+load ../test_helper
 
 # Emit an OSC 7 for $2 from inside session $1, as a shell integration would.
 osc7_session() {

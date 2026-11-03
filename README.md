@@ -26,6 +26,22 @@
 - Use `zmx` as a zig package
 - This project does **NOT** provide windows, tabs, or splits
 
+## optional daemon capabilities
+
+zmx supports optional capabilities compiled into the executable. Select them with
+`--capabilities=<names>`, using a comma-separated list before the session name in
+`attach` or `run`.
+
+For example, OSC 7501 Program Status lets programs report whether they are working,
+waiting for input, or finished. Its optional capability remembers those reports
+and restores them when a terminal reconnects.
+
+```sh
+zmx attach --capabilities=osc7501 agent
+```
+
+See [daemon capabilities](docs/capabilities.md) for configuration and the Zig API.
+
 ## demos
 
 - [zmx - intro](https://youtu.be/UIXj0_rhPgI)

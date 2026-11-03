@@ -43,7 +43,11 @@ const bash_completions =
     \\  fi
     \\
     \\  case "$prev" in
-    \\    attach|run|send|print|write|kill|get|set|clear|print-env|wait|tail)
+    \\    attach|run)
+    \\      local sessions=$(zmx list --short 2>/dev/null | tr '\n' ' ')
+    \\      COMPREPLY=($(compgen -W "--capabilities $sessions" -- "$cur"))
+    \\      ;;
+    \\    send|print|write|kill|get|set|clear|print-env|wait|tail)
     \\      local sessions=$(zmx list --short 2>/dev/null | tr '\n' ' ')
     \\      COMPREPLY=($(compgen -W "$sessions" -- "$cur"))
     \\      ;;
@@ -104,7 +108,11 @@ const zsh_completions =
     \\      ;;
     \\    args)
     \\      case $words[2] in
-    \\        attach|a|kill|k|run|r|send|s|print|p|write|wr|get|g|set|clear|print-env|wait|w|tail|t)
+    \\        attach|a|run|r)
+    \\          _zmx_sessions
+    \\          _values 'options' '--capabilities'
+    \\          ;;
+    \\        kill|k|send|s|print|p|write|wr|get|g|set|clear|print-env|wait|w|tail|t)
     \\          _zmx_sessions
     \\          ;;
     \\        history|hi)
@@ -173,6 +181,7 @@ const fish_completions =
     \\complete -c zmx -n "__fish_is_nth_token 2; and __fish_seen_subcommand_from c completions" -a 'bash zsh fish nu yash' -d Shell
     \\
     \\# Subcommand flags
+    \\complete -c zmx -n "__fish_seen_subcommand_from a attach r run" -l capabilities -d 'Optional capabilities for a new session, before its name' -r
     \\complete -c zmx -n "__fish_seen_subcommand_from a attach" -l labels -d 'Apply "key=value ..." labels as the session is created' -r
     \\complete -c zmx -n "__fish_seen_subcommand_from r run" -s d -d 'Detach from the calling terminal; use `wait` to track its status'
     \\complete -c zmx -n "__fish_seen_subcommand_from r run" -l fish -d 'Required when the session runs fish shell'
@@ -195,12 +204,14 @@ const nu_completions =
     \\}
     \\
     \\export extern "zmx attach" [
+    \\    --capabilities: string
     \\    name: string@"nu-complete zmx sessions"
     \\    --labels: string
     \\    ...rest: string
     \\]
     \\
     \\export extern "zmx run" [
+    \\    --capabilities: string
     \\    name: string@"nu-complete zmx sessions"
     \\    -d
     \\    --fish
@@ -361,6 +372,7 @@ const yash_completions =
     \\
     \\function completion/zmx::attach:arg {
     \\    OPTIONS=( #>#
+    \\        "--capabilities:; optional capabilities for a new session"
     \\        "--labels:; apply labels as session is created"
     \\    ) #<#
     \\    command -f completion//parseoptions -en
@@ -368,7 +380,7 @@ const yash_completions =
     \\    (-)
     \\        command -f completion//completeoptions
     \\        ;;
-    \\    (--labels)
+    \\    (--labels|--capabilities)
     \\        ;;
     \\    (*)
     \\        command -f completion//getoperands
@@ -383,6 +395,7 @@ const yash_completions =
     \\
     \\function completion/zmx::run:arg {
     \\    OPTIONS=( #>#
+    \\        "--capabilities:; optional capabilities for a new session"
     \\        "d; detach from calling terminal"
     \\        "--fish; session runs fish shell"
     \\    ) #<#
@@ -390,6 +403,8 @@ const yash_completions =
     \\    case $ARGOPT in
     \\    (-)
     \\        command -f completion//completeoptions
+    \\        ;;
+    \\    (--capabilities)
     \\        ;;
     \\    (*)
     \\        command -f completion//getoperands
