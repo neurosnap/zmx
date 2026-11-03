@@ -11,6 +11,7 @@ Use spec: https://common-changelog.org/
 
 ### Added
 
+- Optional ordered daemon capabilities with an opt-in OSC 7501 Program Status capability
 - zmx as a zig package
 - Completions for [`yash`](https://magicant.github.io/yash/)
 - History command now accepts --screen (print only active screen) and --scrollback (num of rows to print)

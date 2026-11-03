@@ -58,10 +58,30 @@ pub fn build(b: *std.Build) void {
         .@"emit-xcframework" = false,
         .@"emit-macos-app" = false,
     }) else null;
+
+    // Share the authoring types without exporting daemon machinery through libzmx.
+    const capability_api = b.createModule(.{
+        .root_source_file = b.path("src/capabilities.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const capability_runtime = b.createModule(.{
+        .root_source_file = b.path("src/capabilities/runtime.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "capability-api", .module = capability_api }},
+    });
+
+    exe_mod.addImport("capability-api", capability_api);
+    exe_mod.addImport("capability-runtime", capability_runtime);
+
     if (dep) |d| {
         const vt_mod = d.module("ghostty-vt");
         if (target.result.os.tag == .openbsd) vt_mod.sanitize_c = .off;
         exe_mod.addImport("ghostty-vt", vt_mod);
+        capability_api.addImport("ghostty-vt", vt_mod);
+        capability_runtime.addImport("ghostty-vt", vt_mod);
     }
 
     // zmx module: programmatic interface for embedding or external tools
@@ -79,6 +99,8 @@ pub fn build(b: *std.Build) void {
     });
 
     zmx_pkg_mod.addOptions("build_options", options);
+    zmx_pkg_mod.addImport("capability-api", capability_api);
+    zmx_pkg_mod.addImport("capability-runtime", capability_runtime);
     if (dep) |d| {
         const vt_mod = d.module("ghostty-vt");
         if (target.result.os.tag == .openbsd) vt_mod.sanitize_c = .off;
@@ -159,6 +181,10 @@ pub fn build(b: *std.Build) void {
             "ghostty-vt",
             test_dep.module("ghostty-vt"),
         );
+        capability_api.addImport("ghostty-vt", test_dep.module("ghostty-vt"));
+        capability_runtime.addImport("ghostty-vt", test_dep.module("ghostty-vt"));
+        test_module.addImport("capability-api", capability_api);
+        test_module.addImport("capability-runtime", capability_runtime);
         const exe_unit_tests = b.addTest(.{
             .root_module = test_module,
             // .use_llvm = true,
@@ -167,6 +193,26 @@ pub fn build(b: *std.Build) void {
 
         const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
         test_step.dependOn(&run_exe_unit_tests.step);
+
+        // Capability implementations use the public API. In-memory fixtures also
+        // need the internal runtime to drive parsing, attachment, and reconnects.
+        if (enable_daemon) {
+            const capability_tests = b.addTest(.{
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("test/capabilities.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .link_libc = true,
+                    .imports = &.{
+                        .{ .name = "zmx", .module = zmx_pkg_mod },
+                        .{ .name = "capability-runtime", .module = capability_runtime },
+                        .{ .name = "ghostty-vt", .module = test_dep.module("ghostty-vt") },
+                    },
+                }),
+            });
+            const run_capability_tests = b.addRunArtifact(capability_tests);
+            test_step.dependOn(&run_capability_tests.step);
+        }
     }
 
     // Check for LSP integration

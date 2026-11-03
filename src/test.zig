@@ -1,4 +1,7 @@
 comptime {
+    _ = @import("capability-api");
+    _ = @import("capabilities/registry.zig");
+    _ = @import("capabilities/program_status/main.zig");
     _ = @import("main.zig");
     _ = @import("util.zig");
     _ = @import("socket.zig");

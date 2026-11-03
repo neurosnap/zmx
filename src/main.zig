@@ -157,13 +157,17 @@ pub fn main(init: std.process.Init) !void {
             try attach_args.append(gpa, arg);
         }
 
-        const parsed = parseAttachArgs(attach_args.items);
+        const parsed = parseAttachArgs(attach_args.items) catch |err| return printCapabilityError(io, err);
         if (parsed.want_help) {
             return help(io);
         }
         if (parsed.missing_labels_value) {
             return printError(io, "--labels requires \"key=value ...\"", .{});
         }
+
+        const optional = try resolveCapabilities(gpa, io, parsed.capability_names orelse "");
+        defer gpa.free(optional);
+
         // Before ensureSession, so a rejected label does not leave a session
         // behind that the caller never asked for.
         if (parsed.labels) |kvs| assertLabels(io, kvs);
@@ -187,28 +191,33 @@ pub fn main(init: std.process.Init) !void {
             .shell = shell_env,
             .labels = parsed.labels,
             .tracked_env = env_str,
+            .optional_capabilities = optional,
         }) catch |err| {
+            if (err == error.CapabilitiesRequireDirectAttach) {
+                return printError(io, "--capabilities requires attaching from outside a zmx session", .{});
+            }
+
             return printError(io, "cannot connect to session \"{s}\": {s}", .{ parsed.session_name, @errorName(err) });
         };
         return;
     } else if (std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "r")) {
-        const session_name = args.next() orelse "";
-        if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
+        var run_args: std.ArrayList([]const u8) = .empty;
+        defer run_args.deinit(gpa);
+
+        while (args.next()) |arg| {
+            try run_args.append(gpa, arg);
+        }
+
+        const parsed = parseRunArgs(run_args.items) catch |err| return printCapabilityError(io, err);
+        if (parsed.want_help) {
             return help(io);
         }
 
-        var cmd_args_raw: std.ArrayList([]const u8) = .empty;
-        defer cmd_args_raw.deinit(gpa);
-        var detached = false;
-        while (args.next()) |arg| {
-            // Once the command has started, -d belongs to the command.
-            if (cmd_args_raw.items.len == 0 and std.mem.startsWith(u8, arg, "-d")) {
-                detached = true;
-            } else {
-                try cmd_args_raw.append(gpa, arg);
-            }
-        }
+        // Reject a bad selection before reading piped input or creating a daemon.
+        const optional = try resolveCapabilities(gpa, io, parsed.capability_names orelse "");
+        defer gpa.free(optional);
 
+        const command = run_args.items[parsed.command_start..];
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
         const cwd_len = std.process.currentPath(io, &cwd_buf) catch 0;
         const cwd = cwd_buf[0..cwd_len];
@@ -217,7 +226,7 @@ pub fn main(init: std.process.Init) !void {
         var stdin_buf = std.ArrayList(u8).empty;
         defer stdin_buf.deinit(gpa);
 
-        if (cmd_args_raw.items.len == 0) {
+        if (command.len == 0) {
             const stdin_file = std.Io.File.stdin();
             defer stdin_file.close(io);
             var stdbuf: [4096]u8 = undefined;
@@ -235,12 +244,13 @@ pub fn main(init: std.process.Init) !void {
             }
         }
 
-        if (cmd_args_raw.items.len == 0 and stdin_bytes == null) {
+        if (command.len == 0 and stdin_bytes == null) {
             return printError(io, "run requires a command (or pipe input via stdin)", .{});
         }
 
-        const exit_code = zmx.run(gpa, io, session_name, cmd_args_raw.items, .{
-            .detached = detached,
+        const exit_code = zmx.run(gpa, io, parsed.session_name, command, .{
+            .detached = parsed.detached,
+            .optional_capabilities = optional,
             .cwd = cwd,
             .shell = shell_env,
             .stdin_bytes = stdin_bytes,
@@ -445,8 +455,8 @@ fn help(io: std.Io) !void {
         \\Usage: zmx <command> [args...]
         \\
         \\Commands:
-        \\  [a]ttach [--labels kv] <name> [command...]                 Attach to session, creating if needed
-        \\  [r]un <name> [-d] [command...]                             Send command without attaching
+        \\  [a]ttach [options] <name> [command...]                     Attach to session, creating if needed
+        \\  [r]un [options] <name> [-d] [command...]                   Send command without attaching
         \\  [s]end <name> <text...>                                    Send raw input to session PTY
         \\  [p]rint <name> <text...>                                   Inject text into session display
         \\  [wr]ite <name> <file_path>                                 Write stdin to file_path through the session
@@ -464,6 +474,12 @@ fn help(io: std.Io) !void {
         \\  [v]ersion                                                  Show version and metadata (socket dir, log dir)
         \\  [h]elp                                                     Show this help
         \\
+        \\Capabilities (attach and run):
+        \\  --capabilities=<names> adds comma-separated optional capabilities when
+        \\  creating a session. Place it before the session name. An existing
+        \\  daemon keeps its original capabilities. Omit it to add none.
+        \\  For attach, a nonempty selection requires running outside a zmx session.
+        \\
         \\Attach:
         \\  This will spawn a login $SHELL with a PTY.  You can provide a
         \\  command instead of creating a shell.
@@ -475,6 +491,7 @@ fn help(io: std.Io) !void {
         \\  Examples:
         \\    zmx attach dev
         \\    zmx attach dev vim
+        \\    zmx attach --capabilities=osc7501 agent
         \\    zmx attach --labels "project=api role=worker" build
         \\
         \\History:
@@ -1110,6 +1127,97 @@ fn history(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []cons
     _ = lib_posix.write(lib_posix.STDOUT_FILENO, data) catch return;
 }
 
+const CapabilityArgsError = error{ MissingCapabilitiesValue, RepeatedCapabilities };
+
+/// Read one capability option before the session name. Both parsers use this
+/// boundary so a child's own --capabilities arguments are never consumed by zmx.
+fn consumeCapabilities(argv: []const []const u8, index: *usize, names: *?[]const u8) CapabilityArgsError!bool {
+    const flag = "--capabilities";
+    const arg = argv[index.*];
+    const separate = std.mem.eql(u8, arg, flag);
+    if (!separate and !std.mem.startsWith(u8, arg, flag ++ "=")) {
+        return false;
+    }
+
+    if (names.* != null) {
+        return error.RepeatedCapabilities;
+    }
+
+    if (separate) {
+        if (index.* + 1 == argv.len or std.mem.startsWith(u8, argv[index.* + 1], "-")) {
+            return error.MissingCapabilitiesValue;
+        }
+
+        index.* += 1;
+        names.* = argv[index.*];
+    } else {
+        names.* = arg[flag.len + 1 ..];
+    }
+
+    return true;
+}
+
+fn printCapabilityError(io: std.Io, err: CapabilityArgsError) noreturn {
+    switch (err) {
+        error.MissingCapabilitiesValue => printError(io, "--capabilities requires a comma-separated list (or an empty string)", .{}),
+        error.RepeatedCapabilities => printError(io, "--capabilities may only be specified once", .{}),
+    }
+}
+
+/// CLI names are resolved here, before calling libzmx. The library receives only
+/// explicit definitions, just as it does from an embedding application.
+fn resolveCapabilities(alloc: std.mem.Allocator, io: std.Io, names: []const u8) ![]const Cfg.CapabilityDefinition {
+    if (zmx.has_daemon) {
+        return @import("capabilities/registry.zig").resolveOptional(alloc, names) catch |err| switch (err) {
+            error.UnknownCapability => printError(io, "unknown capability in \"{s}\"", .{names}),
+            error.DuplicateCapability => printError(io, "capabilities must be optional and listed only once", .{}),
+            else => return err,
+        };
+    }
+
+    if (names.len != 0) {
+        printError(io, "this build cannot enable daemon capabilities", .{});
+    }
+
+    return &.{};
+}
+
+const RunArgs = struct {
+    session_name: []const u8 = "",
+    capability_names: ?[]const u8 = null,
+    command_start: usize = 0,
+    detached: bool = false,
+    want_help: bool = false,
+};
+
+/// Read zmx options before the session name, then preserve the child command.
+/// Run's existing leading -d option remains between the name and the command.
+fn parseRunArgs(argv: []const []const u8) CapabilityArgsError!RunArgs {
+    var parsed: RunArgs = .{};
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        if (detectHelp(argv[i])) {
+            parsed.want_help = true;
+            return parsed;
+        }
+
+        if (try consumeCapabilities(argv, &i, &parsed.capability_names)) {
+            continue;
+        }
+
+        parsed.session_name = argv[i];
+        i += 1;
+        break;
+    }
+
+    while (i < argv.len and std.mem.startsWith(u8, argv[i], "-d")) : (i += 1) {
+        parsed.detached = true;
+    }
+
+    parsed.command_start = i;
+    return parsed;
+}
+
 const AttachArgs = struct {
     /// Session name, or "" when the caller did not name one.
     session_name: []const u8 = "",
@@ -1118,6 +1226,7 @@ const AttachArgs = struct {
     /// `--labels "k=v ..."`: labels to apply once the session exists, in the
     /// same space-separated form `zmx set` takes.
     labels: ?[]const u8 = null,
+    capability_names: ?[]const u8 = null,
     want_help: bool = false,
     /// `--labels` was given with nothing to apply.
     missing_labels_value: bool = false,
@@ -1126,7 +1235,7 @@ const AttachArgs = struct {
 /// Parses the arguments that follow `zmx attach`. Flags are only recognized
 /// before the session name, so everything after it stays part of the command
 /// handed to the session.
-fn parseAttachArgs(argv: []const []const u8) AttachArgs {
+fn parseAttachArgs(argv: []const []const u8) CapabilityArgsError!AttachArgs {
     const labels_flag = "--labels";
     var parsed: AttachArgs = .{};
     var i: usize = 0;
@@ -1135,6 +1244,9 @@ fn parseAttachArgs(argv: []const []const u8) AttachArgs {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             parsed.want_help = true;
             return parsed;
+        }
+        if (try consumeCapabilities(argv, &i, &parsed.capability_names)) {
+            continue;
         }
         if (std.mem.startsWith(u8, arg, labels_flag ++ "=")) {
             parsed.labels = arg[labels_flag.len + 1 ..];
@@ -1247,7 +1359,7 @@ fn send(alloc: std.mem.Allocator, io: std.Io, session_name: []const u8, text_par
 }
 
 test "parseAttachArgs reads a bare session name" {
-    const parsed = parseAttachArgs(&.{"dev"});
+    const parsed = try parseAttachArgs(&.{"dev"});
     try std.testing.expectEqualStrings("dev", parsed.session_name);
     try std.testing.expect(!parsed.want_help);
     try std.testing.expectEqual(@as(usize, 1), parsed.command_start);
@@ -1255,18 +1367,18 @@ test "parseAttachArgs reads a bare session name" {
 
 test "parseAttachArgs keeps the session command intact" {
     const argv: []const []const u8 = &.{ "dev", "vim", "-n" };
-    const parsed = parseAttachArgs(argv);
+    const parsed = try parseAttachArgs(argv);
     try std.testing.expectEqualStrings("dev", parsed.session_name);
     // -n after the session name belongs to the command, not to zmx.
     try std.testing.expectEqualSlices([]const u8, argv[1..], argv[parsed.command_start..]);
 }
 
 test "parseAttachArgs reports help before the session name" {
-    try std.testing.expect(parseAttachArgs(&.{"--help"}).want_help);
-    try std.testing.expect(parseAttachArgs(&.{"-h"}).want_help);
-    try std.testing.expect(parseAttachArgs(&.{ "--labels", "a=1", "--help" }).want_help);
+    try std.testing.expect((try parseAttachArgs(&.{"--help"})).want_help);
+    try std.testing.expect((try parseAttachArgs(&.{"-h"})).want_help);
+    try std.testing.expect((try parseAttachArgs(&.{ "--labels", "a=1", "--help" })).want_help);
     // Once a session name is read, -h belongs to the command.
-    try std.testing.expect(!parseAttachArgs(&.{ "dev", "-h" }).want_help);
+    try std.testing.expect(!(try parseAttachArgs(&.{ "dev", "-h" })).want_help);
 }
 
 test "parseAttachArgs reads --labels in both forms" {
@@ -1274,7 +1386,7 @@ test "parseAttachArgs reads --labels in both forms" {
         &.{ "--labels", "a=1 b=2", "build" },
         &.{ "--labels=a=1 b=2", "build" },
     }) |argv| {
-        const parsed = parseAttachArgs(argv);
+        const parsed = try parseAttachArgs(argv);
         try std.testing.expectEqualStrings("a=1 b=2", parsed.labels.?);
         try std.testing.expectEqualStrings("build", parsed.session_name);
         try std.testing.expect(!parsed.missing_labels_value);
@@ -1284,7 +1396,7 @@ test "parseAttachArgs reads --labels in both forms" {
 
 test "parseAttachArgs combines --labels with a session command" {
     const argv: []const []const u8 = &.{ "--labels", "a=1", "build", "make", "--labels" };
-    const parsed = parseAttachArgs(argv);
+    const parsed = try parseAttachArgs(argv);
     try std.testing.expectEqualStrings("a=1", parsed.labels.?);
     try std.testing.expectEqualStrings("build", parsed.session_name);
     // --labels after the session name belongs to the command.
@@ -1292,15 +1404,97 @@ test "parseAttachArgs combines --labels with a session command" {
 }
 
 test "parseAttachArgs reports --labels with no value" {
-    const parsed = parseAttachArgs(&.{"--labels"});
+    const parsed = try parseAttachArgs(&.{"--labels"});
     try std.testing.expect(parsed.missing_labels_value);
     try std.testing.expectEqual(@as(?[]const u8, null), parsed.labels);
 }
 
 test "parseAttachArgs leaves labels unset when the flag is absent" {
-    const parsed = parseAttachArgs(&.{"dev"});
+    const parsed = try parseAttachArgs(&.{"dev"});
     try std.testing.expectEqual(@as(?[]const u8, null), parsed.labels);
     try std.testing.expect(!parsed.missing_labels_value);
+}
+
+test "capability options accept separate equals and empty forms before the session" {
+    for ([_][]const []const u8{
+        &.{ "--capabilities", "osc7501", "agent" },
+        &.{ "--capabilities=osc7501", "agent" },
+        &.{ "--capabilities", "", "agent" },
+        &.{ "--capabilities=", "agent" },
+    }, [_][]const u8{ "osc7501", "osc7501", "", "" }) |argv, expected| {
+        const attached = try parseAttachArgs(argv);
+        const run = try parseRunArgs(argv);
+        try std.testing.expectEqualStrings(expected, attached.capability_names.?);
+        try std.testing.expectEqualStrings(expected, run.capability_names.?);
+        try std.testing.expectEqualStrings("agent", attached.session_name);
+        try std.testing.expectEqualStrings("agent", run.session_name);
+        try std.testing.expectEqual(argv.len, attached.command_start);
+        try std.testing.expectEqual(argv.len, run.command_start);
+    }
+}
+
+test "capability options reject missing values and repeated selections" {
+    for ([_][]const []const u8{
+        &.{"--capabilities"},
+        &.{ "--capabilities", "--help" },
+        &.{ "--capabilities", "--labels=x=y", "agent" },
+        &.{ "--capabilities", "--capabilities=osc7501", "agent" },
+    }) |argv| {
+        try std.testing.expectError(error.MissingCapabilitiesValue, parseAttachArgs(argv));
+        try std.testing.expectError(error.MissingCapabilitiesValue, parseRunArgs(argv));
+    }
+
+    for ([_][]const []const u8{
+        &.{ "--capabilities=", "--capabilities", "osc7501", "agent" },
+        &.{ "--capabilities", "osc7501", "--capabilities=", "agent" },
+    }) |argv| {
+        try std.testing.expectError(error.RepeatedCapabilities, parseAttachArgs(argv));
+        try std.testing.expectError(error.RepeatedCapabilities, parseRunArgs(argv));
+    }
+}
+
+test "attach combines labels and capability selection in either order" {
+    for ([_][]const []const u8{
+        &.{ "--labels", "a=1", "--capabilities=osc7501", "agent" },
+        &.{ "--capabilities", "osc7501", "--labels=a=1", "agent" },
+    }) |argv| {
+        const parsed = try parseAttachArgs(argv);
+        try std.testing.expectEqualStrings("a=1", parsed.labels.?);
+        try std.testing.expectEqualStrings("osc7501", parsed.capability_names.?);
+        try std.testing.expectEqualStrings("agent", parsed.session_name);
+    }
+}
+
+test "attach and run preserve child options after the session name" {
+    const argv: []const []const u8 = &.{ "--capabilities=osc7501", "agent", "--capabilities", "--capabilities=missing", "--help", "-d" };
+    const attached = try parseAttachArgs(argv);
+    const run = try parseRunArgs(argv);
+    try std.testing.expectEqual(@as(usize, 2), attached.command_start);
+    try std.testing.expectEqual(@as(usize, 2), run.command_start);
+    try std.testing.expect(!attached.want_help and !run.want_help and !run.detached);
+
+    const detached = try parseRunArgs(&.{ "--capabilities=osc7501", "agent", "-d", "echo", "-d" });
+    try std.testing.expect(detached.detached);
+    try std.testing.expectEqual(@as(usize, 3), detached.command_start);
+    const original = try parseRunArgs(&.{ "agent", "-d", "echo", "-d" });
+    try std.testing.expect(original.detached);
+    try std.testing.expectEqual(@as(usize, 2), original.command_start);
+}
+
+test "help and omitted selection work before the session name" {
+    for ([_][]const []const u8{ &.{"--help"}, &.{ "--capabilities=osc7501", "-h" } }) |argv| {
+        try std.testing.expect((try parseAttachArgs(argv)).want_help);
+        try std.testing.expect((try parseRunArgs(argv)).want_help);
+    }
+
+    for ([_][]const []const u8{ &.{}, &.{"agent"} }) |argv| {
+        const attached = try parseAttachArgs(argv);
+        const run = try parseRunArgs(argv);
+        try std.testing.expect(attached.capability_names == null);
+        try std.testing.expect(run.capability_names == null);
+        try std.testing.expectEqual(argv.len, attached.command_start);
+        try std.testing.expectEqual(argv.len, run.command_start);
+    }
 }
 
 test "getTrackedEnvStr includes set and unset entries" {

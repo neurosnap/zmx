@@ -21,6 +21,9 @@ pub const HistoryFormat = util.HistoryFormat;
 pub const SessionEntry = util.SessionEntry;
 
 pub const CreateOptions = struct {
+    /// Optional capability definitions to add when creating a new daemon.
+    /// Always-active capabilities are included automatically before these additions.
+    optional_capabilities: []const Cfg.CapabilityDefinition = &.{},
     command: ?[]const []const u8 = null,
     cwd: ?[]const u8 = null,
     shell: ?[]const u8 = null,
@@ -30,6 +33,8 @@ pub const CreateOptions = struct {
 };
 
 pub const AttachOptions = struct {
+    /// See 'CreateOptions.optional_capabilities'
+    optional_capabilities: []const Cfg.CapabilityDefinition = &.{},
     command: ?[]const []const u8 = null,
     cwd: ?[]const u8 = null,
     shell: ?[]const u8 = null,
@@ -38,6 +43,8 @@ pub const AttachOptions = struct {
 };
 
 pub const RunOptions = struct {
+    /// See 'CreateOptions.optional_capabilities'
+    optional_capabilities: []const Cfg.CapabilityDefinition = &.{},
     detached: bool = false,
     cwd: ?[]const u8 = null,
     shell: ?[]const u8 = null,
@@ -60,7 +67,7 @@ pub fn create(alloc: Allocator, io: Io, name: []const u8, opts: CreateOptions) !
     const sesh = try socket.getSeshName(alloc, name);
     defer alloc.free(sesh);
 
-    var cfg = try Cfg.init(alloc, io);
+    var cfg = try Cfg.initWithOptionalCapabilities(alloc, io, opts.optional_capabilities);
     defer cfg.deinit(alloc);
 
     const socket_path = try socket.getSocketPath(alloc, cfg.socket_dir, sesh);
@@ -124,7 +131,13 @@ pub fn attach(alloc: Allocator, io: Io, name: []const u8, opts: AttachOptions) !
     signal.ignoreSigpipe();
     const cur_sesh = socket.getSeshNameFromEnv();
     if (cur_sesh.len > 0) {
-        var cfg = try Cfg.init(alloc, io);
+        // Switching sessions sends only a name to the attached client. It cannot
+        // carry a new capability selection, so reject one before requesting a switch.
+        if (opts.optional_capabilities.len != 0) {
+            return error.CapabilitiesRequireDirectAttach;
+        }
+
+        var cfg = try Cfg.initWithOptionalCapabilities(alloc, io, opts.optional_capabilities);
         defer cfg.deinit(alloc);
         const socket_path = try socket.getSocketPath(alloc, cfg.socket_dir, cur_sesh);
         defer alloc.free(socket_path);
@@ -142,7 +155,7 @@ pub fn attach(alloc: Allocator, io: Io, name: []const u8, opts: AttachOptions) !
     const sesh = try socket.getSeshName(alloc, name);
     defer alloc.free(sesh);
 
-    var cfg = try Cfg.init(alloc, io);
+    var cfg = try Cfg.initWithOptionalCapabilities(alloc, io, opts.optional_capabilities);
     defer cfg.deinit(alloc);
 
     const socket_path = try socket.getSocketPath(alloc, cfg.socket_dir, sesh);
@@ -432,7 +445,7 @@ pub fn run(
     const sesh = try socket.getSeshName(alloc, name);
     defer alloc.free(sesh);
 
-    var cfg = try Cfg.init(alloc, io);
+    var cfg = try Cfg.initWithOptionalCapabilities(alloc, io, opts.optional_capabilities);
     defer cfg.deinit(alloc);
 
     const socket_path = try socket.getSocketPath(alloc, cfg.socket_dir, sesh);

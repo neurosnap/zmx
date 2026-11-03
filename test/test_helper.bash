@@ -1,6 +1,6 @@
 # test_helper.bash — shared setup/teardown for zmx BATS tests
 
-REPO_DIR="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 setup() {
   # Build once per test suite (skips if already built)

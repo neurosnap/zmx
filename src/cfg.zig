@@ -6,15 +6,27 @@ pub const Cfg = @This();
 const std = @import("std");
 const lib_posix = @import("posix.zig");
 const cross = @import("cross");
+const has_daemon = @import("build_options").has_daemon;
+pub const CapabilityDefinition = if (has_daemon) @import("capability-api").Definition else void;
+const registry = @import("capabilities/registry.zig");
 
 socket_dir: []const u8,
 log_dir: []const u8,
+capabilities: []const CapabilityDefinition = &.{},
 max_scrollback_lines: usize = 10_000,
 dir_mode: u32 = 0o750,
 log_mode: u32 = 0o640,
 tracked_envs: []const u8 = "DISPLAY,SSH_AUTH_SOCK,SSH_AGENT_PID,SSH_CONNECTION,WINDOWID,XAUTHORITY,KITTY_LISTEN_ON,KITTY_PID,KITTY_WINDOW_ID",
 
 pub fn init(alloc: std.mem.Allocator, io: std.Io) !Cfg {
+    return initWithOptionalCapabilities(alloc, io, &.{});
+}
+
+/// Read configuration for a new daemon, including required and optional capabilities.
+/// The supplied list selects optional additions to the registry's always-active
+/// capabilities. The returned configuration owns the assembled list and releases
+/// it in 'deinit'.
+pub fn initWithOptionalCapabilities(alloc: std.mem.Allocator, io: std.Io, definitions: []const CapabilityDefinition) !Cfg {
     const socket_dir = try socketDir(alloc);
     errdefer alloc.free(socket_dir);
     const log_dir = try logDir(alloc);
@@ -30,7 +42,16 @@ pub fn init(alloc: std.mem.Allocator, io: std.Io) !Cfg {
     else
         0o640;
 
+    // Required behavior is assembled here for both CLI and library callers.
+    // Neither an empty optional list nor a different caller can remove it.
+    const capabilities: []const CapabilityDefinition = if (has_daemon)
+        try registry.select(alloc, definitions)
+    else
+        &.{};
+    errdefer alloc.free(capabilities);
+
     var cfg = Cfg{
+        .capabilities = capabilities,
         .socket_dir = socket_dir,
         .log_dir = log_dir,
         .dir_mode = dir_mode,
@@ -74,6 +95,7 @@ fn logDir(alloc: std.mem.Allocator) ![]const u8 {
 }
 
 pub fn deinit(self: *Cfg, alloc: std.mem.Allocator) void {
+    alloc.free(self.capabilities);
     if (self.socket_dir.len > 0) alloc.free(self.socket_dir);
     if (self.log_dir.len > 0) alloc.free(self.log_dir);
 }
@@ -160,4 +182,57 @@ test "mkdirAll fails on dangling symlink instead of looping" {
 
     const perms = std.Io.Dir.Permissions.fromMode(0o750);
     try std.testing.expectError(error.NotDir, mkdirAll(std.testing.io, target_path, perms));
+}
+
+test "explicit optional definitions preserve required capabilities" {
+    if (!has_daemon) {
+        return error.SkipZigTest;
+    }
+
+    const included = @import("capabilities/definitions.zig");
+    const definitions = [_]CapabilityDefinition{included.program_status};
+    const alloc = std.testing.allocator;
+    var required = try Cfg.initWithOptionalCapabilities(alloc, std.testing.io, &.{});
+    defer required.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 1), required.capabilities.len);
+    try std.testing.expectEqualStrings("osc7", required.capabilities[0].name);
+    var custom = try Cfg.initWithOptionalCapabilities(alloc, std.testing.io, &definitions);
+    defer custom.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 2), custom.capabilities.len);
+    try std.testing.expectEqualStrings("osc7", custom.capabilities[0].name);
+    try std.testing.expectEqualStrings("osc7501", custom.capabilities[1].name);
+    try std.testing.expect(custom.capabilities.ptr != definitions[0..].ptr);
+    const definition = included.program_status;
+    try std.testing.expectError(error.DuplicateCapability, Cfg.initWithOptionalCapabilities(alloc, std.testing.io, &.{ definition, definition }));
+}
+
+test "default capability selection ignores the former environment setting" {
+    if (!has_daemon) {
+        return error.SkipZigTest;
+    }
+
+    const alloc = std.testing.allocator;
+    const previous = if (lib_posix.getenv("ZMX_CAPABILITIES")) |value| try alloc.dupeSentinel(u8, value, 0) else null;
+    defer if (previous) |value| alloc.free(value);
+
+    defer {
+        if (previous) |value| {
+            _ = cross.setenv("ZMX_CAPABILITIES", value, 1);
+        } else {
+            _ = cross.unsetenv("ZMX_CAPABILITIES");
+        }
+    }
+
+    // Capability selection belongs to the caller. An inherited variable must
+    // neither enable optional behavior nor make an otherwise valid call fail.
+    for ([_][:0]const u8{ "osc7501", "missing" }) |value| {
+        _ = cross.setenv("ZMX_CAPABILITIES", value, 1);
+        var defaults = try Cfg.init(alloc, std.testing.io);
+        defer defaults.deinit(alloc);
+
+        try std.testing.expectEqual(@as(usize, 1), defaults.capabilities.len);
+        try std.testing.expectEqualStrings("osc7", defaults.capabilities[0].name);
+    }
 }

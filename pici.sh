@@ -15,7 +15,7 @@ zmx run build-release docker run --rm \
 
 zmx run fmt -d docker run --rm -v "$(pwd):/app" -t zig-zmx:latest zig fmt --check .
 zmx run test -d docker run --rm -v "$(pwd):/app" -t zig-zmx:latest zig build test
-zmx run integration -d docker run --rm -v "$(pwd):/app" -t zig-zmx:latest bats --jobs 1 test/*.bats
+zmx run integration -d docker run --rm -v "$(pwd):/app" -t zig-zmx:latest bats --jobs 1 --recursive test
 zmx wait "*"
 
 zmx run upload-build docker build -t zmx-upload -f Dockerfile.upload .
