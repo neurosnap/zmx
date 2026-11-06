@@ -25,7 +25,7 @@ Because of the IPC changes made to this project I also want the ABI contract to 
 ### Changed
 
 - Upgraded to zig 0.17
-- IPC messages now carry an explicity `protocol_version` field
+- IPC messages now carry an explicit `protocol_version` field
 - The daemon now responds with `Tag.Unsupported` (255) when receiving unknown IPC tags
 
 ### Fixed
