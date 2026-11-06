@@ -32,6 +32,15 @@ fn printError(io: std.Io, comptime fmt: []const u8, args: anytype) noreturn {
     std.process.exit(1);
 }
 pub fn main(init: std.process.Init) !void {
+    mainImpl(init) catch |err| switch (err) {
+        error.Sighup => signal.reraise(.HUP),
+        error.Sigint => signal.reraise(.INT),
+        error.Sigterm => signal.reraise(.TERM),
+        else => return err,
+    };
+}
+
+fn mainImpl(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
 
@@ -187,8 +196,9 @@ pub fn main(init: std.process.Init) !void {
             .shell = shell_env,
             .labels = parsed.labels,
             .tracked_env = env_str,
-        }) catch |err| {
-            return printError(io, "cannot connect to session \"{s}\": {s}", .{ parsed.session_name, @errorName(err) });
+        }) catch |err| switch (err) {
+            error.Sighup, error.Sigint, error.Sigterm => return err,
+            else => return printError(io, "cannot connect to session \"{s}\": {s}", .{ parsed.session_name, @errorName(err) }),
         };
         return;
     } else if (std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "r")) {
