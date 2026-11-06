@@ -4,6 +4,10 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
+### Fixed
+
+- Release binaries translate `src/c.h` for their own target, not the build host's, so macOS binaries built on Linux resize sessions again
+
 ## v1.0.0 - 2026-11-06
 
 This release sets a milestone for the maturity of this project. I have been daily driving zmx for almost a year at this point with very minor issues.
