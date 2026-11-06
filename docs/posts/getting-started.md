@@ -9,16 +9,20 @@ toc: 3
 
 ### binaries
 
-- https://zmx.sh/a/zmx-0.8.1-linux-aarch64.tar.gz
-- https://zmx.sh/a/zmx-0.8.1-linux-x86_64.tar.gz
-- https://zmx.sh/a/zmx-0.8.1-macos-aarch64.tar.gz
-- https://zmx.sh/a/zmx-0.8.1-macos-x86_64.tar.gz
+- https://zmx.sh/a/zmx-1.0.0-linux-aarch64.tar.gz
+- https://zmx.sh/a/zmx-1.0.0-linux-x86_64.tar.gz
+- https://zmx.sh/a/zmx-1.0.0-macos-aarch64.tar.gz
+- https://zmx.sh/a/zmx-1.0.0-macos-x86_64.tar.gz
 
 ### homebrew
 
 ```bash
 brew install neurosnap/tap/zmx
 ```
+
+### gh releases
+
+We upload our binaries to github as well: https://github.com/neurosnap/zmx/releases
 
 ### mise-en-place
 
