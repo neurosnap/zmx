@@ -11,10 +11,13 @@ zmx run build docker build -t zig-zmx .
 zmx run build-release docker run --rm \
   --ulimit stack=67108864:67108864 \
   -v "$(pwd):/app" \
-  -t zig-zmx:latest zig build release -j8
+  -t zig-zmx:latest bash -c "zig build release -j8 && mkdir -p zig-out/bin && tar -xzf zig-out/dist/zmx-*-linux-\$(uname -m).tar.gz -C zig-out/bin"
 
 zmx run fmt -d docker run --rm -v "$(pwd):/app" -t zig-zmx:latest zig fmt --check .
-zmx run test -d docker run --rm -v "$(pwd):/app" -t zig-zmx:latest zig build test
+zmx run test -d docker run --rm \
+  --ulimit stack=67108864:67108864 \
+  -v "$(pwd):/app" \
+  -t zig-zmx:latest zig build test
 zmx run integration -d docker run --rm -v "$(pwd):/app" -t zig-zmx:latest bats --jobs 1 test/*.bats
 zmx wait "*"
 

@@ -3,11 +3,23 @@
 REPO_DIR="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
 
 setup() {
+  ZMX="${ZMX:-$REPO_DIR/zig-out/bin/zmx}"
+
   # Build once per test suite (skips if already built)
-  if [[ ! -x "$REPO_DIR/zig-out/bin/zmx" ]]; then
-    cd "$REPO_DIR" && zig build
+  if [[ ! -x "$ZMX" ]]; then
+    local os
+    os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+    local arch
+    arch="$(uname -m)"
+    local dist_tar
+    dist_tar=$(ls -1t "$REPO_DIR/zig-out/dist/zmx-"*"-${os}-${arch}.tar.gz" 2>/dev/null | head -n1 || true)
+    if [[ -n "$dist_tar" && -f "$dist_tar" ]]; then
+      mkdir -p "$(dirname "$ZMX")"
+      tar -xzf "$dist_tar" -C "$(dirname "$ZMX")"
+    else
+      cd "$REPO_DIR" && zig build
+    fi
   fi
-  ZMX="$REPO_DIR/zig-out/bin/zmx"
 
   # Isolate socket dir so tests don't interfere with real sessions or each other
   export ZMX_DIR="$BATS_TEST_TMPDIR/zmx-sockets"
