@@ -197,6 +197,11 @@ pub fn build(b: *std.Build) void {
         const release_targets = linux_targets ++ macos_targets;
         for (release_targets) |release_target| {
             const resolved = b.resolveTargetQuery(release_target);
+            const release_translator: Translator = .init(translate_c, .{
+                .c_source_file = b.path("src/c.h"),
+                .target = resolved,
+                .optimize = .ReleaseSafe,
+            });
             const release_mod = b.createModule(.{
                 .root_source_file = b.path("src/main.zig"),
                 .target = resolved,
@@ -205,7 +210,7 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{
                     .{
                         .name = "cross",
-                        .module = translator.mod,
+                        .module = release_translator.mod,
                     },
                 },
             });
