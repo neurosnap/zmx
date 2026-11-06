@@ -4,6 +4,12 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
+## v1.0.0 - 2026-11-06
+
+This release sets a milestone for the maturity of this project.  I have been daily driving zmx for almost a year at this point with very minor issues.
+
+Because of the IPC changes made to this project I also want the ABI contract to be more reliably frozen and a v1 release reinforces that contract this project makes with users.
+
 ### Breaking
 
 - Standardized IPC header and payloads to 8-byte aligned `extern struct` layouts. Daemons and clients must be on the same version

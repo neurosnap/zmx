@@ -1,12 +1,12 @@
 .{
     .name = .zmx,
-    .version = "0.8.1",
+    .version = "1.0.0",
     .fingerprint = 0x28aad87005052b4e, // Changing this has security and trust implications.
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .ghostty = .{
-            .url = "git+https://github.com/ghostty-org/ghostty#22f100c6367045bb5fc86172f837047dee2f7670",
-            .hash = "ghostty-1.3.2-dev-5UdBC57IhQX5QCxEHr_MlUcomZtBUMVoo9BwUBIAtkln",
+            .url = "git+https://github.com/ghostty-org/ghostty#53e55147bbbb0157672dac0228aa7744e881f1fa",
+            .hash = "ghostty-1.4.1-dev-5UdBC-9XmgVchRr0CfxYzSRUiww0EdU1WAR3WwtMsqql",
         },
         .translate_c = .{
             .url = "git+https://codeberg.org/ziglang/translate-c?ref=zig-0.17.x#cfac21f3199b2b02ce3fd7db652aa456421fe4ab",
