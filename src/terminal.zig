@@ -170,7 +170,9 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
             var sb_bottom = sb_bottom_row;
             sb_bottom.x = @intCast(pages.cols - 1);
 
-            var scroll_fmt = ghostty_vt.formatter.TerminalFormatter.init(term, .vt);
+            // unwrap: a soft-wrapped row goes out as one long line, so the client wraps it itself and can
+            // still reflow it when it gets wider (with hard newlines a widened client keeps the narrow layout)
+            var scroll_fmt = ghostty_vt.formatter.TerminalFormatter.init(term, .{ .emit = .vt, .unwrap = true });
             scroll_fmt.content = .{
                 .selection = ghostty_vt.Selection.init(
                     screen_top,
@@ -199,7 +201,8 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
     }
 
     // Phase 2: visible screen with full extras (modes, cursor, keyboard, etc.)
-    var vis_fmt = ghostty_vt.formatter.TerminalFormatter.init(term, .vt);
+    // unwrap: see phase 1; the client has this terminal's size, so the rows land where they were
+    var vis_fmt = ghostty_vt.formatter.TerminalFormatter.init(term, .{ .emit = .vt, .unwrap = true });
 
     // Restrict content to the active viewport only
     const active_tl = pages.pin(.{ .active = .{ .x = 0, .y = 0 } });
@@ -758,6 +761,30 @@ test "serializeTerminalState alternate screen not leaked" {
     defer alloc.free(plain);
     try testing.expect(std.mem.indexOf(u8, plain, "ALT_MARK") == null);
     try testing.expect(std.mem.indexOf(u8, plain, "MAIN_MARK") != null);
+}
+
+test "serializeTerminalState keeps soft wraps so a wider client reflows them" {
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    // A 30-column line in a 20-column terminal soft-wraps onto a second row
+    // (e.g. a session whose client got narrower while it was detached).
+    var term = try testCreateTerminal(alloc, io, 20, 5, "\x1b[2J\x1b[H" ++
+        "abcdefghijklmnopqrstuvwxyz0123");
+    defer term.deinit(alloc);
+
+    var client = try serializeRoundtrip(alloc, io, &term);
+    defer client.deinit(alloc);
+    try expectScreensMatch(alloc, &term, &client);
+
+    // The client gets wider again: the replayed row must reflow back into
+    // one line, as it does in the daemon, instead of staying cut at 20.
+    try term.resize(alloc, ghostty_vt.Terminal.Resize{ .cols = 40, .rows = 5 });
+    try client.resize(alloc, ghostty_vt.Terminal.Resize{ .cols = 40, .rows = 5 });
+    try expectScreensMatch(alloc, &term, &client);
+    const text = try client.plainString(alloc);
+    defer alloc.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "abcdefghijklmnopqrstuvwxyz0123") != null);
 }
 
 test "serializeTerminalState size mismatch roundtrip" {

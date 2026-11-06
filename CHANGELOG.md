@@ -28,6 +28,7 @@ Use spec: https://common-changelog.org/
 - Prevent terminal and kitty keyboard queries from taking leadership control
 - Fixed missing terminal snapshot when attaching to a session originally started detached or via `zmx run`
 - Don't drop a client's unread input on hangup
+- Replay soft-wrapped rows unwrapped on attach, so a client that later gets wider reflows them instead of keeping lines cut at the width the session had while it was narrow
 
 ## v0.8.1 - 2026-09-05
 
