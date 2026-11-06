@@ -4,6 +4,8 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
+# v1.0.1 - 2026-11-06
+
 ### Fixed
 
 - Release binaries translate `src/c.h` for their own target, not the build host's, so macOS binaries built on Linux resize sessions again
