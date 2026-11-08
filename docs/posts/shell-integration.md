@@ -135,9 +135,9 @@ function _zmx_env_hook --on-event fish_prompt
   if test -n "$ZMX_SESSION"
     for line in (zmx print-env .)
       if string match -q -- "-*" $line
-        set -e (string sub -s 2 $line)
+        set -e (string sub -s 2 -- $line)
       else
-        set -gx (string split -m 1 "=" $line)
+        set -gx (string split -m 1 "=" -- $line)
       end
     end
   end
