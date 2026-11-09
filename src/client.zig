@@ -712,13 +712,19 @@ pub fn write(alloc: Allocator, io: Io, name: []const u8, remote_path: []const u8
     var sb = try ipc.SocketBuffer.init(alloc);
     defer sb.deinit();
 
-    const n = sb.read(result.fd) catch return error.ReadFailed;
-    if (n == 0) return error.ConnectionClosed;
+    // The Ack comes once the file is written, or the daemon gives up; session
+    // output arrives meanwhile.
+    while (true) {
+        const n = sb.read(result.fd) catch return error.ReadFailed;
+        if (n == 0) return error.ConnectionClosed;
 
-    while (sb.next()) |msg| {
-        if (msg.header.tag == .Ack) return;
+        while (sb.next()) |msg| {
+            if (msg.header.tag != .Ack) continue;
+            if (msg.payload.len == 0 or msg.payload[0] == 0) return;
+            if (msg.payload[0] == 255) return error.WriteAlreadyRunning;
+            return error.WriteFailed;
+        }
     }
-    return error.NoAckReceived;
 }
 
 /// Fetch session scrollback with optional row count.
