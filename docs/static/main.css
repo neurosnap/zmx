@@ -55,10 +55,6 @@
   margin: 0;
 }
 
-.toc > ul > li {
-  margin-bottom: var(--line-height);
-}
-
 .toc > ul > li > a {
   font-weight: bold;
 }
