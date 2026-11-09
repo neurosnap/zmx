@@ -50,7 +50,7 @@ nix run github:neurosnap/zmx
 
 ### packages (unofficial)
 
-- [Alpine Linux](https://pkgs.alpinelinux.org/package/edge/testing/x86_64/zmx)
+- [Alpine Linux](https://pkgs.alpinelinux.org/package/edge/community/x86_64/zmx)
 - [Arch AUR tracking releases](https://aur.archlinux.org/packages/zmx)
 - [Arch AUR tracking git](https://aur.archlinux.org/packages/zmx-git)
 - [openSUSE Tumbleweed](https://software.opensuse.org/package/zmx)
