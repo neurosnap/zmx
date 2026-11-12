@@ -229,6 +229,21 @@ pub fn clientLoop(client_sock_fd: i32, env_str: []const u8) !ClientResult {
     }
 }
 
+/// DSR 996: the terminal answers with its color scheme (CSI ? 997 ; 1|2 n),
+/// the same report a DECSET 2031 subscriber gets on a live switch.
+const color_scheme_query = "\x1b[?996n";
+
+/// Buffer a color scheme query for an attaching client when the program
+/// subscribed to color scheme reports.
+fn queueColorSchemeQuery(gpa: std.mem.Allocator, client: *Client, term: *ghostty_vt.Terminal) void {
+    if (!term.modes.get(.report_color_scheme)) return;
+    ipc.appendMessage(gpa, &client.write_buf, .Output, color_scheme_query) catch |err| {
+        std.log.warn("failed to buffer color scheme query err={s}", .{@errorName(err)});
+        return;
+    };
+    client.has_pending_output = true;
+}
+
 fn initTerminal(gpa: std.mem.Allocator, io: std.Io, size: ipc.Resize, cfg: *const Cfg) !ghostty_vt.Terminal {
     return ghostty_vt.Terminal.init(io, gpa, .{
         .cols = size.cols,
@@ -1029,6 +1044,15 @@ pub const Daemon = struct {
             }
         }
 
+        // A program that asked for color scheme reports (DECSET 2031) hears
+        // about a light/dark switch only from a terminal attached at that
+        // moment, so a session detached during the switch keeps the old
+        // scheme. Ask the leader's terminal for its scheme now; only the
+        // leader's input reaches the PTY, so its reply is the one that counts.
+        if (is_leader) {
+            queueColorSchemeQuery(gpa, client, term);
+        }
+
         // only resize if leader
         if (is_leader) {
             var ws = resize.winsize();
@@ -1481,6 +1505,32 @@ test "hasTerminalClient follows attach, detach and detach-all" {
     daemon.handleDetachAll(alloc);
     try std.testing.expect(!daemon.hasTerminalClient());
     try std.testing.expectEqual(@as(?i32, null), daemon.leader_client_fd);
+}
+
+test "attach asks for the color scheme only when the program subscribed" {
+    const alloc = std.testing.allocator;
+    var term = try ghostty_vt.Terminal.init(std.testing.io, alloc, .{ .cols = 80, .rows = 24 });
+    defer term.deinit(alloc);
+    var stream = term.vtStream();
+    defer stream.deinit();
+
+    const fds = try lib_posix.pipe2(.{});
+    defer lib_posix.close(fds[1]);
+    const client = try testClient(alloc, fds[0], true);
+    defer {
+        client.deinit(alloc);
+        alloc.destroy(client);
+    }
+
+    // No subscription: nothing is sent, so a shell never sees a stray reply.
+    queueColorSchemeQuery(alloc, client, &term);
+    try std.testing.expectEqual(@as(usize, 0), client.write_buf.items.len);
+    try std.testing.expect(!client.has_pending_output);
+
+    stream.nextSlice("\x1b[?2031h");
+    queueColorSchemeQuery(alloc, client, &term);
+    try std.testing.expect(client.has_pending_output);
+    try std.testing.expect(std.mem.endsWith(u8, client.write_buf.items, color_scheme_query));
 }
 
 test "send queues PTY input without changing leader" {

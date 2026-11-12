@@ -4,6 +4,10 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
+### Fixed
+
+- A program that asked for color scheme reports (DECSET 2031) now learns the attaching terminal's light/dark scheme on attach, so a session that was detached during a theme switch no longer keeps the old scheme
+
 # v1.0.1 - 2026-11-06
 
 ### Fixed
