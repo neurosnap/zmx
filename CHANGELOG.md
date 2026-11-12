@@ -4,6 +4,10 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
+### Added
+
+- `run --no-create` fails when the session does not exist instead of creating it
+
 ### Fixed
 
 - Prevent daemon shutdown crashes caused by freeing the caller-owned socket path with a different allocator
