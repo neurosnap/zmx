@@ -39,6 +39,8 @@ pub const AttachOptions = struct {
 
 pub const RunOptions = struct {
     detached: bool = false,
+    /// Fail with error.SessionNotFound instead of creating a missing session.
+    no_create: bool = false,
     cwd: ?[]const u8 = null,
     shell: ?[]const u8 = null,
     stdin_bytes: ?[]const u8 = null,
@@ -438,7 +440,7 @@ pub fn run(
     const socket_path = try socket.getSocketPath(alloc, cfg.socket_dir, sesh);
     defer alloc.free(socket_path);
 
-    if (has_daemon) {
+    if (has_daemon and !opts.no_create) {
         var daemon = Daemon.init(io, &cfg, sesh, socket_path);
         daemon.is_task_mode = true;
         if (opts.cwd) |cwd| daemon.setCwd(cwd);
@@ -485,7 +487,10 @@ pub fn run(
 
     if (cmd_to_send == null) return error.CommandRequired;
 
-    const client_sock = try socket.sessionConnect(socket_path);
+    const client_sock = socket.sessionConnect(socket_path) catch |err| switch (err) {
+        error.FileNotFound, error.ConnectionRefused => if (opts.no_create) return error.SessionNotFound else return err,
+        else => return err,
+    };
     defer lib_posix.close(client_sock);
 
     const term_size = ipc.getTerminalSize(lib_posix.STDOUT_FILENO);

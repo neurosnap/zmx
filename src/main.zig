@@ -210,9 +210,12 @@ fn mainImpl(init: std.process.Init) !void {
         var cmd_args_raw: std.ArrayList([]const u8) = .empty;
         defer cmd_args_raw.deinit(gpa);
         var detached = false;
+        var no_create = false;
         while (args.next()) |arg| {
-            // Once the command has started, -d belongs to the command.
-            if (cmd_args_raw.items.len == 0 and std.mem.startsWith(u8, arg, "-d")) {
+            // Once the command has started, flags belong to the command.
+            if (cmd_args_raw.items.len == 0 and std.mem.eql(u8, arg, "--no-create")) {
+                no_create = true;
+            } else if (cmd_args_raw.items.len == 0 and std.mem.startsWith(u8, arg, "-d")) {
                 detached = true;
             } else {
                 try cmd_args_raw.append(gpa, arg);
@@ -251,11 +254,13 @@ fn mainImpl(init: std.process.Init) !void {
 
         const exit_code = zmx.run(gpa, io, session_name, cmd_args_raw.items, .{
             .detached = detached,
+            .no_create = no_create,
             .cwd = cwd,
             .shell = shell_env,
             .stdin_bytes = stdin_bytes,
         }) catch |err| switch (err) {
             error.CommandRequired => return printError(io, "run requires a command (or pipe input via stdin)", .{}),
+            error.SessionNotFound => return printError(io, "session \"{s}\" not found (--no-create)", .{session_name}),
             else => return printError(io, "session not ready: {s}", .{@errorName(err)}),
         };
         lib_posix.exit(exit_code);
@@ -456,7 +461,7 @@ fn help(io: std.Io) !void {
         \\
         \\Commands:
         \\  [a]ttach [--labels kv] <name> [command...]                 Attach to session, creating if needed
-        \\  [r]un <name> [-d] [command...]                             Send command without attaching
+        \\  [r]un <name> [-d] [--no-create] [command...]               Send command without attaching
         \\  [s]end <name> <text...>                                    Send raw input to session PTY
         \\  [p]rint <name> <text...>                                   Inject text into session display
         \\  [wr]ite <name> <file_path>                                 Write stdin to file_path through the session
@@ -511,6 +516,10 @@ fn help(io: std.Io) !void {
         \\
         \\  `-d` will detach from the calling terminal. Use `wait` to track
         \\  its status.
+        \\
+        \\  `--no-create` fails instead of creating the session when it does
+        \\  not exist, so a command meant for a session that has exited (e.g.
+        \\  an ssh connection) never runs in a fresh local shell.
         \\
         \\  Examples:
         \\    zmx run dev ls

@@ -4,6 +4,10 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
+### Added
+
+- `run --no-create` fails when the session does not exist instead of creating it
+
 # v1.0.1 - 2026-11-06
 
 ### Fixed
