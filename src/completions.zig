@@ -175,6 +175,7 @@ const fish_completions =
     \\# Subcommand flags
     \\complete -c zmx -n "__fish_seen_subcommand_from a attach" -l labels -d 'Apply "key=value ..." labels as the session is created' -r
     \\complete -c zmx -n "__fish_seen_subcommand_from r run" -s d -d 'Detach from the calling terminal; use `wait` to track its status'
+    \\complete -c zmx -n "__fish_seen_subcommand_from r run" -l no-create -d 'Fail if the session does not exist instead of creating it'
     \\complete -c zmx -n "__fish_seen_subcommand_from r run" -l fish -d 'Required when the session runs fish shell'
     \\complete -c zmx -n "__fish_seen_subcommand_from l list" -l short -d 'Short output'
     \\complete -c zmx -n "__fish_seen_subcommand_from k kill" -l force -d 'Force kill'
@@ -203,6 +204,7 @@ const nu_completions =
     \\export extern "zmx run" [
     \\    name: string@"nu-complete zmx sessions"
     \\    -d
+    \\    --no-create
     \\    --fish
     \\    ...rest: string
     \\]
@@ -384,6 +386,7 @@ const yash_completions =
     \\function completion/zmx::run:arg {
     \\    OPTIONS=( #>#
     \\        "d; detach from calling terminal"
+    \\        "--no-create; fail if the session does not exist"
     \\        "--fish; session runs fish shell"
     \\    ) #<#
     \\    command -f completion//parseoptions -en
