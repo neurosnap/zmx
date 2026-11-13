@@ -304,7 +304,12 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
             });
         }
 
-        _ = try lib_posix.poll(poll_fds.items, -1);
+        // A pending write needs a clock tick even when nothing else happens.
+        _ = try lib_posix.poll(poll_fds.items, if (daemon.pending_write != null) 1000 else -1);
+
+        if (daemon.pending_write != null) {
+            try daemon.checkWriteDeadline(gpa, std.Io.Timestamp.now(io, .awake).toMilliseconds());
+        }
 
         if (poll_fds.items[2].revents & lib_posix.POLL.IN != 0) {
             signal.drainSignalPipe() catch {};
@@ -376,6 +381,7 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
                     // Only clients that sent .Init (a real zmx attach) count,
                     // not a `zmx run` tail-only client.
                     if (!daemon.hasTerminalClient() and
+                        daemon.pending_write == null and
                         daemon.pty_write_buf.items.len < Daemon.PTY_WRITE_BUF_MAX)
                     {
                         util.respondToDeviceAttributes(gpa, &daemon.pty_write_buf, buf[0..n]);
@@ -411,6 +417,8 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
                         );
                     }
 
+                    try daemon.scanWriteMarkers(gpa, buf[0..n]);
+
                     // Broadcast data to all clients.
                     // Rewrite OSC 133;A to include redraw=0 so the outer terminal
                     // does not clear prompt lines on resize (issue #111).
@@ -441,6 +449,7 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
                 };
                 if (n == 0) break;
                 daemon.pty_write_buf.replaceRange(gpa, 0, n, &[_]u8{}) catch unreachable;
+                if (daemon.pending_write) |*pending| pending.progress_ms = 0;
             }
         }
 
@@ -588,6 +597,27 @@ pub const Client = struct {
     }
 };
 
+const write_ready_marker = "ZMX_WRITE_READY";
+const write_done_marker = "ZMX_WRITE_DONE:";
+const write_status_busy = 255;
+const write_stall_ms = 60 * 1000;
+// A full-screen app may have eaten the command, so READY never comes.
+const write_abandon_ms = 10 * 60 * 1000;
+
+/// A `zmx write` waiting on the shell in the session.
+const PendingWrite = struct {
+    const carry_max = 32;
+
+    client: ?*Client,
+    encoded: []u8,
+    streaming: bool = false,
+    // When the shell last made progress, 0 until the next clock tick.
+    progress_ms: i64 = 0,
+    // A marker can straddle two PTY reads.
+    carry: [carry_max]u8 = undefined,
+    carry_len: usize = 0,
+};
+
 /// Daemon is responsible for managing a zmx session.
 ///
 /// It holds all the state for a running session.  Instead of a single daemon for all sessions, we
@@ -602,6 +632,9 @@ pub const Daemon = struct {
     socket_path: []const u8,
     // === opt ===
     pty_write_buf: std.ArrayList(u8) = .empty,
+    pending_write: ?PendingWrite = null,
+    // Input that arrives during a write: it would land in the file otherwise.
+    held_pty_input: std.ArrayList(u8) = .empty,
     clients: std.ArrayList(*Client) = .empty,
     labels: std.StringHashMapUnmanaged([]u8) = .empty,
     // This control which client is the leader.  The leader controls terminal state and
@@ -651,6 +684,8 @@ pub const Daemon = struct {
             gpa.free(entry.value_ptr.*);
         }
         self.labels.deinit(gpa);
+        if (self.pending_write) |pending| gpa.free(pending.encoded);
+        self.held_pty_input.deinit(gpa);
         self.pty_write_buf.deinit(gpa);
     }
 
@@ -693,6 +728,9 @@ pub const Daemon = struct {
                 .{ self.session_name, client.socket_fd },
             );
             self.leader_client_fd = null;
+        }
+        if (self.pending_write) |*pending| {
+            if (pending.client == client) pending.client = null;
         }
         client.deinit(gpa);
         gpa.destroy(client);
@@ -899,7 +937,8 @@ pub const Daemon = struct {
     /// new (not old) bytes avoids tearing a partially-accepted sequence.
     fn queuePtyInput(self: *Daemon, gpa: std.mem.Allocator, data: []const u8) void {
         if (data.len == 0) return;
-        if (self.pty_write_buf.items.len + data.len > PTY_WRITE_BUF_MAX) {
+        const queue = if (self.pending_write != null) &self.held_pty_input else &self.pty_write_buf;
+        if (queue.items.len + data.len > PTY_WRITE_BUF_MAX) {
             std.log.warn(
                 "pty input dropped {d} bytes (buffer full, shell not reading)",
                 .{data.len},
@@ -910,7 +949,7 @@ pub const Daemon = struct {
         // NOTE: for local dev only
         // std.log.debug("buffering pty input data={x}", .{data});
 
-        self.pty_write_buf.appendSlice(gpa, data) catch |err| {
+        queue.appendSlice(gpa, data) catch |err| {
             std.log.warn(
                 "pty input dropped {d} bytes: {s}",
                 .{ data.len, @errorName(err) },
@@ -1296,48 +1335,105 @@ pub const Daemon = struct {
         const file_path = payload[@sizeOf(u32)..][0..path_len];
         const file_content = payload[@sizeOf(u32) + path_len ..];
 
-        // Inject file creation through the PTY so it works over SSH.
-        // Base64-encode content and pipe through printf | base64 -d > file.
-        // Chunk large files to stay under command-line length limits.
-        // 48000 is divisible by 3 (clean base64 boundaries) and encodes
-        // to ~64KB, well under typical ARG_MAX.
-        // The commands skip queuePtyInput's cap: it would drop the chunks
-        // past PTY_WRITE_BUF_MAX and leave the file cut short. The payload
-        // is already bounded by ipc.MAX_PAYLOAD_LEN.
-        const chunk_size = 48000;
-        var offset: usize = 0;
-        var is_first = true;
-
-        while (offset < file_content.len or is_first) {
-            const end = @min(offset + chunk_size, file_content.len);
-            const chunk = file_content[offset..end];
-
-            const encoded_len = std.base64.standard.Encoder.calcSize(chunk.len);
-            const encoded = try gpa.alloc(u8, encoded_len);
-            defer gpa.free(encoded);
-            _ = std.base64.standard.Encoder.encode(encoded, chunk);
-
-            try self.pty_write_buf.appendSlice(gpa, "printf '%s' '");
-            try self.pty_write_buf.appendSlice(gpa, encoded);
-            if (is_first) {
-                try self.pty_write_buf.appendSlice(gpa, "' | base64 -d > '");
-            } else {
-                try self.pty_write_buf.appendSlice(gpa, "' | base64 -d >> '");
-            }
-            try self.pty_write_buf.appendSlice(gpa, file_path);
-            try self.pty_write_buf.appendSlice(gpa, "'");
-            try self.pty_write_buf.appendSlice(gpa, "\r");
-
-            offset = end;
-            is_first = false;
+        if (self.pending_write != null) {
+            try ipc.appendMessage(gpa, &client.write_buf, .Ack, &[_]u8{write_status_busy});
+            client.has_pending_output = true;
+            return;
         }
 
-        try ipc.appendMessage(gpa, &client.write_buf, .Ack, "");
-        client.has_pending_output = true;
+        const encoded = try gpa.alloc(u8, std.base64.standard.Encoder.calcSize(file_content.len));
+        errdefer gpa.free(encoded);
+        _ = std.base64.standard.Encoder.encode(encoded, file_content);
+
+        // Inject file creation through the PTY so it works over SSH. The
+        // base64 is streamed only after the remote tty is non-canonical: in
+        // canonical mode the kernel cuts long lines (4096 on Linux, 1024 on
+        // BSD). The empty quotes keep the echoed command from matching the
+        // markers.
+        try self.pty_write_buf.print(
+            gpa,
+            "sh -c 's=$(stty -g);if (: >\"$0\");then stty -icanon -echo;echo ZMX_WR\"\"ITE_READY;" ++
+                "head -c {d}|base64 -d >\"$0\";r=$?;stty \"$s\";else r=1;fi;echo ZMX_WR\"\"ITE_DONE:$r' '{s}'\r",
+            .{ encoded.len, file_path },
+        );
+        self.pending_write = .{ .client = client, .encoded = encoded };
         std.log.debug(
             "write command len={d} file_path={s}",
             .{ file_content.len, file_path },
         );
+    }
+
+    /// End the pending write and let the held input through.
+    fn finishWrite(self: *Daemon, gpa: std.mem.Allocator, status: u8) !void {
+        const pending = self.pending_write.?;
+        gpa.free(pending.encoded);
+        self.pending_write = null;
+
+        try self.pty_write_buf.appendSlice(gpa, self.held_pty_input.items);
+        self.held_pty_input.clearRetainingCapacity();
+
+        if (pending.client) |c| {
+            try ipc.appendMessage(gpa, &c.write_buf, .Ack, &[_]u8{status});
+            c.has_pending_output = true;
+        }
+    }
+
+    /// Give up on a write the shell stopped answering.
+    fn checkWriteDeadline(self: *Daemon, gpa: std.mem.Allocator, now_ms: i64) !void {
+        const pending = &self.pending_write.?;
+        if (pending.progress_ms == 0) pending.progress_ms = now_ms;
+        const idle_ms = now_ms - pending.progress_ms;
+
+        if (pending.streaming) {
+            if (idle_ms < write_stall_ms) return;
+            // Whatever is left would be typed at the shell; held input isn't queued yet.
+            self.pty_write_buf.clearRetainingCapacity();
+            try self.finishWrite(gpa, 1);
+            return;
+        }
+
+        // The command is still queued, so the shell may run it later: tell the
+        // client, but keep the write until then so another can't collide with it.
+        if (idle_ms >= write_stall_ms) {
+            if (pending.client) |c| {
+                try ipc.appendMessage(gpa, &c.write_buf, .Ack, &[_]u8{1});
+                c.has_pending_output = true;
+                pending.client = null;
+            }
+        }
+        if (idle_ms >= write_abandon_ms) try self.finishWrite(gpa, 1);
+    }
+
+    /// Follow a pending write through the shell's output: stream the file
+    /// after READY, answer the client after DONE.
+    fn scanWriteMarkers(self: *Daemon, gpa: std.mem.Allocator, data: []const u8) !void {
+        const pending = if (self.pending_write) |*p| p else return;
+
+        var scan_buf: [PendingWrite.carry_max + 4096]u8 = undefined;
+        @memcpy(scan_buf[0..pending.carry_len], pending.carry[0..pending.carry_len]);
+        @memcpy(scan_buf[pending.carry_len..][0..data.len], data);
+        var rest: []const u8 = scan_buf[0 .. pending.carry_len + data.len];
+
+        if (!pending.streaming) {
+            if (std.mem.indexOf(u8, rest, write_ready_marker)) |i| {
+                rest = rest[i + write_ready_marker.len ..];
+                pending.streaming = true;
+                pending.progress_ms = 0;
+                try self.pty_write_buf.appendSlice(gpa, pending.encoded);
+            }
+        }
+
+        // DONE also comes without READY when the file can't be created.
+        if (std.mem.indexOf(u8, rest, write_done_marker)) |i| {
+            const tail = rest[i + write_done_marker.len ..];
+            if (std.mem.indexOfAny(u8, tail, "\r\n")) |end| {
+                try self.finishWrite(gpa, std.fmt.parseInt(u8, tail[0..end], 10) catch 1);
+                return;
+            }
+        }
+
+        pending.carry_len = @min(PendingWrite.carry_max, rest.len);
+        @memcpy(pending.carry[0..pending.carry_len], rest[rest.len - pending.carry_len ..]);
     }
 
     fn handleEnvGet(self: *Daemon, gpa: std.mem.Allocator, client: *Client) !void {

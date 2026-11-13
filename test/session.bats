@@ -319,6 +319,42 @@ load test_helper
 # Write
 # ============================================================================
 
+@test "write: the file is complete when write returns" {
+  local src="$BATS_TEST_TMPDIR/src.bin" dst="$BATS_TEST_TMPDIR/dst.bin"
+  head -c 200000 /dev/urandom > "$src"
+
+  run timeout 10 "$ZMX" run test-write-sync echo write-ready-marker
+  [ "$status" -eq 0 ]
+  wait_for_output test-write-sync write-ready-marker
+
+  run bash -c 'timeout 10 "$0" write test-write-sync "$1" < "$2"' "$ZMX" "$dst" "$src"
+  [ "$status" -eq 0 ]
+  cmp "$src" "$dst"
+}
+
+@test "write: input sent during a write stays out of the file" {
+  local src="$BATS_TEST_TMPDIR/src.bin" dst="$BATS_TEST_TMPDIR/dst.bin"
+  head -c 100000 /dev/urandom > "$src"
+
+  run timeout 10 "$ZMX" run test-write-input echo write-ready-marker
+  [ "$status" -eq 0 ]
+  wait_for_output test-write-input write-ready-marker
+
+  "$ZMX" send test-write-input "sleep 2"$'\r'
+  sleep 0.3
+  timeout 15 "$ZMX" write test-write-input "$dst" < "$src" &
+  local writer=$!
+  sleep 0.3
+  "$ZMX" send test-write-input abcd
+  wait "$writer"
+  cmp "$src" "$dst"
+}
+
+@test "write: fails when the file can't be created" {
+  run bash -c 'echo hi | timeout 10 "$0" write test-write-bad "$1"' "$ZMX" "$BATS_TEST_TMPDIR/missing/dst.bin"
+  [ "$status" -ne 0 ]
+}
+
 @test "write: a file larger than the PTY input buffer arrives whole" {
   local src="$BATS_TEST_TMPDIR/src.bin" dst="$BATS_TEST_TMPDIR/dst.bin" i=0
   head -c 400000 /dev/urandom > "$src"
