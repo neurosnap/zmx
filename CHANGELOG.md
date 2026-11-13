@@ -4,6 +4,10 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
+### Fixed
+
+- Prevent daemon shutdown crashes caused by freeing the caller-owned socket path with a different allocator
+
 # v1.0.1 - 2026-11-06
 
 ### Fixed
