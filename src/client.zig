@@ -195,6 +195,8 @@ pub fn attach(alloc: Allocator, io: Io, name: []const u8, opts: AttachOptions) !
             if (looper.session_name) |target_name| {
                 _ = lib_posix.write(lib_posix.STDOUT_FILENO, restore_seq) catch {};
                 var new_opts = opts;
+                new_opts.labels = null;
+                new_opts.command = null;
                 if (looper.cwd) |new_cwd| new_opts.cwd = new_cwd;
                 return attach(alloc, io, target_name, new_opts);
             }
