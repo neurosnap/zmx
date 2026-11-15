@@ -80,3 +80,17 @@ wait_for_cwd() {
   echo "Timed out waiting for cwd '$pattern' in session '$name'" >&2
   return 1
 }
+
+# Helper: wait until a session has a given number of attached clients (up to N seconds).
+wait_for_clients() {
+  local name="$1" n="$2" timeout="${3:-5}" i=0
+  while (( i < timeout * 10 )); do
+    if "$ZMX" list 2>/dev/null | grep -F "name=$name"$'\t' | grep -qF "clients=$n"$'\t'; then
+      return 0
+    fi
+    sleep 0.1
+    (( i++ )) || true
+  done
+  echo "Timed out waiting for $n client(s) on '$name'" >&2
+  return 1
+}

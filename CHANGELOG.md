@@ -7,6 +7,7 @@ Use spec: https://common-changelog.org/
 ### Fixed
 
 - Prevent daemon shutdown crashes caused by freeing the caller-owned socket path with a different allocator
+- Stop applying a switching client's original `--labels` and command to the session it switches to ([#319](https://github.com/neurosnap/zmx/issues/319))
 
 # v1.0.1 - 2026-11-06
 
