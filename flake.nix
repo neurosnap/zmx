@@ -14,7 +14,7 @@
       system:
       let
         env = zig2nix.outputs.zig-env.${system} {
-          zig = zig2nix.outputs.packages.${system}.zig-0_16_0;
+          zig = zig2nix.outputs.packages.${system}.zig-0_17_1;
         };
       in
       with builtins;
