@@ -98,7 +98,32 @@ pub fn sessionExists(io: std.Io, dir: std.Io.Dir, name: []const u8) !bool {
     return true;
 }
 
+/// staging_dir holds a session socket between bind and listen. A refused probe deletes a socket as stale,
+/// and listing, in this zmx and older ones, never descends into a directory.
+pub const staging_dir = ".s";
+
+const Staged = struct {
+    fd: lib_posix.socket_t,
+    buf: [max_socket_path_len + 1]u8 = undefined,
+    len: usize = 0,
+
+    fn path(self: *const Staged) [:0]const u8 {
+        return self.buf[0..self.len :0];
+    }
+};
+
 pub fn createSocket(sesh: []const u8) !lib_posix.socket_t {
+    var staged = try bindStaged(sesh);
+    errdefer lib_posix.close(staged.fd);
+    defer if (staged.len > 0) lib_posix.unlink(staged.path());
+    try lib_posix.listen(staged.fd, 128);
+    if (staged.len > 0) try publish(&staged, sesh);
+    return staged.fd;
+}
+
+// bindStaged binds a fresh socket in the staging directory beside `sesh`, or under `sesh` itself when that
+// directory cannot be made or its path would not fit sockaddr_un, which leaves that case as exposed as before.
+fn bindStaged(sesh: []const u8) !Staged {
     // AF.UNIX: Unix domain socket for local IPC with client processes
     // SOCK.STREAM: Reliable, bidirectional communication
     // SOCK.NONBLOCK: Set socket to non-blocking
@@ -109,10 +134,32 @@ pub fn createSocket(sesh: []const u8) !lib_posix.socket_t {
     );
     errdefer lib_posix.close(fd);
 
-    var unix_addr = try lib_posix.initUnix(sesh);
+    var staged: Staged = .{ .fd = fd };
+    const dir = std.fs.path.dirname(sesh) orelse ".";
+    var dir_buf: [max_socket_path_len + 1]u8 = undefined;
+    const holder = std.mem.printSentinel(&dir_buf, "{s}/{s}", .{ dir, staging_dir }, 0) catch null;
+    if (holder != null and lib_posix.ensureDir(holder.?, 0o700)) {
+        if (std.mem.printSentinel(&staged.buf, "{s}/{d}", .{ holder.?, std.c.getpid() }, 0)) |name| {
+            staged.len = name.len;
+            // a creator that died between bind and publish left its name behind; this pid owns it now
+            lib_posix.unlink(staged.path());
+        } else |_| {}
+    }
+
+    var unix_addr = try lib_posix.initUnix(if (staged.len > 0) staged.path() else sesh);
     try lib_posix.bind(fd, &unix_addr.any, unix_addr.getOsSockLen());
-    try lib_posix.listen(fd, 128);
-    return fd;
+    return staged;
+}
+
+// publish gives the listening staged socket the session name, refusing when that name already exists, so a
+// losing creator reports the same AddressInUse a direct bind did and never removes the winner's socket.
+fn publish(staged: *const Staged, sesh: []const u8) !void {
+    var buf: [max_socket_path_len + 1]u8 = undefined;
+    const final = std.mem.printSentinel(&buf, "{s}", .{sesh}, 0) catch return error.NameTooLong;
+    lib_posix.link(staged.path(), final) catch |err| switch (err) {
+        error.PathAlreadyExists => return error.AddressInUse,
+        else => return err,
+    };
 }
 
 /// Maximum number of usable bytes in a Unix domain socket path.
@@ -241,4 +288,78 @@ test "parseSessionArg accepts a wildcard matching all sessions" {
     try std.testing.expect(match.is_prefix);
     try std.testing.expectEqualStrings("", match.name);
     try std.testing.expect(match.matches("any-session"));
+}
+
+extern "c" fn mkdtemp(template: [*:0]u8) ?[*:0]u8;
+
+const TestDir = struct {
+    template: [15:0]u8 = "/tmp/zmxsXXXXXX".*,
+    holder: [32:0]u8 = undefined,
+
+    fn make(self: *TestDir) ![]const u8 {
+        const made = mkdtemp(&self.template) orelse return error.SkipZigTest;
+        _ = try std.mem.printSentinel(&self.holder, "{s}/{s}", .{ std.mem.span(made), staging_dir }, 0);
+        return std.mem.span(made);
+    }
+
+    fn remove(self: *TestDir) void {
+        _ = std.c.rmdir(&self.holder);
+        _ = std.c.rmdir(&self.template);
+    }
+};
+
+fn countEntries(io: std.Io, path: []const u8) !usize {
+    var dir = try std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true });
+    defer dir.close(io);
+    var iter = dir.iterate();
+    var count: usize = 0;
+    while (try iter.next(io)) |_| count += 1;
+    return count;
+}
+
+test "a creating socket is not listed until it listens under the session name" {
+    const util = @import("util.zig");
+    const io = std.testing.io;
+    const alloc = std.testing.allocator;
+    var tmp: TestDir = .{};
+    const dir = try tmp.make();
+    defer tmp.remove();
+    var buf: [max_socket_path_len + 1]u8 = undefined;
+    const sesh = try std.mem.printSentinel(&buf, "{s}/sess", .{dir}, 0);
+
+    var staged = try bindStaged(sesh);
+    defer lib_posix.close(staged.fd);
+    defer lib_posix.unlink(sesh);
+    try std.testing.expect(staged.len > 0);
+
+    var during = try util.get_session_entries(alloc, io, dir);
+    defer during.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 0), during.items.len);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.access(staged.path(), 0));
+
+    try lib_posix.listen(staged.fd, 1);
+    try publish(&staged, sesh);
+    lib_posix.unlink(staged.path());
+    const client = try sessionConnect(sesh);
+    lib_posix.close(client);
+    try std.testing.expectEqual(@as(usize, 0), try countEntries(io, std.mem.span(@as([*:0]const u8, &tmp.holder))));
+}
+
+test "a second creator for a live session fails and leaves the first reachable" {
+    const io = std.testing.io;
+    var tmp: TestDir = .{};
+    const dir = try tmp.make();
+    defer tmp.remove();
+    var buf: [max_socket_path_len + 1]u8 = undefined;
+    const sesh = try std.mem.printSentinel(&buf, "{s}/sess", .{dir}, 0);
+
+    const first = try createSocket(sesh);
+    defer lib_posix.close(first);
+    defer lib_posix.unlink(sesh);
+
+    try std.testing.expectError(error.AddressInUse, createSocket(sesh));
+
+    const client = try sessionConnect(sesh);
+    lib_posix.close(client);
+    try std.testing.expectEqual(@as(usize, 0), try countEntries(io, std.mem.span(@as([*:0]const u8, &tmp.holder))));
 }
