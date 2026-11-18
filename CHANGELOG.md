@@ -10,6 +10,7 @@ Use spec: https://common-changelog.org/
 - Stop applying a switching client's original `--labels` and command to the session it switches to ([#319](https://github.com/neurosnap/zmx/issues/319))
 - Deliver a session's last output when its shell exits: the daemon keeps serving clients that are behind for up to 2 seconds, and an attach client writes what it has read and what is still queued on its socket, bounded, before it returns
 - Stop an exiting attach client from hanging on a terminal that stopped reading: the terminal reset is written for at most 500 ms and the terminal settings are restored without waiting for output to drain
+- Keep an attach client responsive to its daemon while its terminal is not reading: stdout is nonblocking for the whole client loop and written only when poll reports room, and the client stops reading the socket while 1 MiB of output is pending, so the backpressure reaches the daemon
 
 # v1.0.1 - 2026-11-06
 

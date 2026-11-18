@@ -20,6 +20,10 @@ pub fn clientLoop(client_sock_fd: i32, env_str: []const u8) !ClientResult {
     return clientLoopWithFds(client_sock_fd, env_str, lib_posix.STDIN_FILENO, lib_posix.STDOUT_FILENO);
 }
 
+// A high-water mark, not a memory bound: socket reads pause while this much output is pending, but zmx
+// has no IPC message cap (Header.len is u32), so one whole message can still arrive past it.
+const STDOUT_BUFFER_LIMIT: usize = 1 << 20;
+
 fn clientLoopWithFds(client_sock_fd: i32, env_str: []const u8, stdin_fd: i32, stdout_fd: i32) !ClientResult {
     std.log.info("client loop fd={d}", .{client_sock_fd});
     const gpa: std.mem.Allocator = blk: {
@@ -40,6 +44,16 @@ fn clientLoopWithFds(client_sock_fd: i32, env_str: []const u8, stdin_fd: i32, st
     signal.installWakeHandler(@backingInt(lib_posix.SIG.TERM));
     signal.installWakeHandler(@backingInt(lib_posix.SIG.HUP));
     signal.installWakeHandler(@backingInt(lib_posix.SIG.INT));
+
+    // After the handlers, so a SIGTERM/HUP/INT that lands once either is set unwinds through the
+    // restores below. Capture both before changing either: stdin and stdout may share a tty's
+    // open file description, also shared with the parent shell.
+    const stdin_orig_flags = try lib_posix.fcntl(stdin_fd, lib_posix.F.GETFL, 0);
+    const stdout_orig_flags = try lib_posix.fcntl(stdout_fd, lib_posix.F.GETFL, 0);
+    _ = try lib_posix.fcntl(stdin_fd, lib_posix.F.SETFL, stdin_orig_flags | lib_posix.O_NONBLOCK);
+    defer _ = lib_posix.fcntl(stdin_fd, lib_posix.F.SETFL, stdin_orig_flags) catch {};
+    _ = try lib_posix.fcntl(stdout_fd, lib_posix.F.SETFL, stdout_orig_flags | lib_posix.O_NONBLOCK);
+    defer _ = lib_posix.fcntl(stdout_fd, lib_posix.F.SETFL, stdout_orig_flags) catch {};
 
     // Make socket non-blocking to avoid blocking on writes
     var sock_flags = try lib_posix.fcntl(client_sock_fd, lib_posix.F.GETFL, 0);
@@ -67,13 +81,6 @@ fn clientLoopWithFds(client_sock_fd: i32, env_str: []const u8, stdin_fd: i32, st
     var stdout_buf = try std.ArrayList(u8).initCapacity(gpa, 4096);
     defer stdout_buf.deinit(gpa);
 
-    // Make stdin non-blocking. O_NONBLOCK is set on the open file description,
-    // which is shared with the parent shell; restore on exit to avoid
-    // corrupting the parent's stdin.
-    const stdin_orig_flags = try lib_posix.fcntl(stdin_fd, lib_posix.F.GETFL, 0);
-    _ = try lib_posix.fcntl(stdin_fd, lib_posix.F.SETFL, stdin_orig_flags | lib_posix.O_NONBLOCK);
-    defer _ = lib_posix.fcntl(stdin_fd, lib_posix.F.SETFL, stdin_orig_flags) catch {};
-
     const detach_key_disabled = util.isDetachKeyDisabled();
 
     while (true) {
@@ -85,8 +92,10 @@ fn clientLoopWithFds(client_sock_fd: i32, env_str: []const u8, stdin_fd: i32, st
             .revents = 0,
         });
 
-        // Poll socket for read, and also for write if we have pending data
-        var sock_events: i16 = lib_posix.POLL.IN;
+        // Stop reading further messages while STDOUT_BUFFER_LIMIT is pending, to backpressure the daemon.
+        // This is no memory bound: a message already being received is read whole (no IPC size cap).
+        // Keep the socket in poll even then: HUP/ERR do not need POLLIN.
+        var sock_events: i16 = if (stdout_buf.items.len < STDOUT_BUFFER_LIMIT) lib_posix.POLL.IN else 0;
         if (sock_write_buf.items.len > 0) {
             sock_events |= lib_posix.POLL.OUT;
         }
@@ -223,11 +232,17 @@ fn clientLoopWithFds(client_sock_fd: i32, env_str: []const u8, stdin_fd: i32, st
             }
         }
 
-        if (stdout_buf.items.len > 0) {
+        const stdout_errors = lib_posix.POLL.HUP | lib_posix.POLL.ERR | lib_posix.POLL.NVAL;
+        if (poll_fds.items.len > 3 and poll_fds.items[3].revents & (lib_posix.POLL.OUT | stdout_errors) != 0) {
+            const stdout_failed = poll_fds.items[3].revents & stdout_errors != 0;
             const n = lib_posix.write(stdout_fd, stdout_buf.items) catch |err| blk: {
-                if (err == error.WouldBlock) break :blk 0;
+                if (err == error.WouldBlock) {
+                    if (stdout_failed) return error.BrokenPipe;
+                    break :blk 0;
+                }
                 return err;
             };
+            if (n == 0 and stdout_failed) return error.BrokenPipe;
             if (n > 0) {
                 try stdout_buf.replaceRange(gpa, 0, n, &[_]u8{});
             }
@@ -1718,6 +1733,79 @@ test "handleEnvGet returns leader client's environment variables including unset
     try std.testing.expectEqualStrings("DISPLAY=:99\n", pay3);
 }
 
+test "client detaches within drain deadline when stdout reader stalls" {
+    const input = try lib_posix.pipe2(.{ .CLOEXEC = true });
+    defer for (input) |fd| lib_posix.close(fd);
+    const output = try lib_posix.pipe2(.{ .CLOEXEC = true });
+    defer for (output) |fd| lib_posix.close(fd);
+    const input_flags = try lib_posix.fcntl(input[0], lib_posix.F.GETFL, 0);
+    const initial_output_flags = try lib_posix.fcntl(output[1], lib_posix.F.GETFL, 0);
+    _ = try lib_posix.fcntl(output[1], lib_posix.F.SETFL, initial_output_flags | lib_posix.O_NONBLOCK);
+    try fillPipe(output[1]);
+    // Start with blocking stdout, just like an ordinary attach. Nobody reads
+    // the pipe, including after the daemon closes its socket.
+    _ = try lib_posix.fcntl(output[1], lib_posix.F.SETFL, initial_output_flags);
+    // Prefill may change kernel-maintained flags; compare the client's entry state.
+    const output_flags = try lib_posix.fcntl(output[1], lib_posix.F.GETFL, 0);
+
+    var sockets: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(lib_posix.AF.UNIX, lib_posix.SOCK.STREAM, 0, &sockets));
+    var client_owns_socket = false;
+    defer if (!client_owns_socket) lib_posix.close(sockets[0]);
+    var peer_owns_socket = false;
+    defer if (!peer_owns_socket) lib_posix.close(sockets[1]);
+
+    var saved_signals = SavedClientSignals.save();
+    defer saved_signals.restore();
+
+    var hangup_ms = std.atomic.Value(i64).init(0);
+    const DaemonPeer = struct {
+        fn run(fd: i32, hung_up: *std.atomic.Value(i64)) void {
+            ipc.send(fd, .Output, "last output\r\n") catch @panic("sending test output failed");
+            // Leave the daemon connected long enough to exercise ordinary
+            // output handling before the hangup starts the bounded drain.
+            const until = nowMs() + 150;
+            while (nowMs() < until) sleepMs(1);
+            // Stamped just before the close, so the measured hangup-to-return time can only be longer.
+            hung_up.store(nowMs(), .release);
+            lib_posix.close(fd);
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, DaemonPeer.run, .{ sockets[1], &hangup_ms });
+    peer_owns_socket = true;
+    var peer_joined = false;
+    defer if (!peer_joined) thread.join();
+    client_owns_socket = true;
+    var client = TestClient{};
+    const result = try client.runWithWatchdog(sockets[0], input[0], output[1], 15_000);
+    // the peer has stamped the hangup before the client can return, but join so the load is ordered
+    thread.join();
+    peer_joined = true;
+    const hung_up = hangup_ms.load(.acquire);
+    try std.testing.expect(hung_up != 0);
+    const elapsed = client.returned_ms - hung_up;
+    try std.testing.expectEqual(.detach, result.kind);
+    // Nominal is DRAIN_BUDGET_MS (2.0 s). The bound is generous on purpose: on a starved CI runner a
+    // process that is not scheduled cannot meet a wall-clock deadline. What matters is that the client
+    // returns in bounded time instead of blocking forever.
+    try std.testing.expect(elapsed < 10_000);
+    try std.testing.expectEqual(input_flags, try lib_posix.fcntl(input[0], lib_posix.F.GETFL, 0));
+    try std.testing.expectEqual(output_flags, try lib_posix.fcntl(output[1], lib_posix.F.GETFL, 0));
+}
+
+/// Fills a nonblocking pipe to the last byte: a pipe with room for a short write is not full on macOS.
+fn fillPipe(fd: i32) !void {
+    const chunk: [4096]u8 = @splat('x');
+    for ([_][]const u8{ &chunk, chunk[0..1] }) |bytes| {
+        while (true) {
+            _ = lib_posix.write(fd, bytes) catch |err| {
+                if (err == error.WouldBlock) break;
+                return err;
+            };
+        }
+    }
+}
+
 /// The handlers and self-pipe a client loop installs, restored when a test's client returns.
 const SavedClientSignals = struct {
     const signals = [_]lib_posix.SIG{ lib_posix.SIG.WINCH, lib_posix.SIG.TERM, lib_posix.SIG.HUP, lib_posix.SIG.INT };
@@ -2138,4 +2226,78 @@ test "a client sent everything waits for the teardown while a peer behind at the
         std.debug.print("the client behind read {d} output bytes, of {d} the shell wrote\n", .{ behind.output.items.len, expected.len });
         return error.TestUnexpectedResult;
     }
+}
+
+// Panic on timeout: unwinding a test with a stuck worker would close its fds
+// and invalidate its stack state, while joining it would hang the test runner.
+const TestClient = struct {
+    done: std.atomic.Value(bool) = .init(false),
+    result: anyerror!ClientResult = undefined,
+    returned_ms: i64 = 0,
+
+    fn run(self: *TestClient, sock: i32, input: i32, output: i32) void {
+        self.result = clientLoopWithFds(sock, "", input, output);
+        self.returned_ms = nowMs();
+        self.done.store(true, .release);
+    }
+
+    fn runWithWatchdog(self: *TestClient, sock: i32, input: i32, output: i32, timeout_ms: i64) !ClientResult {
+        const deadline = nowMs() + timeout_ms;
+        const thread = try std.Thread.spawn(.{}, run, .{ self, sock, input, output });
+        while (!self.done.load(.acquire)) {
+            if (nowMs() >= deadline) @panic("client loop watchdog expired");
+            sleepMs(1);
+        }
+        thread.join();
+        return self.result;
+    }
+};
+
+test "client returns promptly when stdout reader closes with daemon connected" {
+    const input = try lib_posix.pipe2(.{ .CLOEXEC = true });
+    defer for (input) |fd| lib_posix.close(fd);
+    const output = try lib_posix.pipe2(.{ .CLOEXEC = true });
+    defer lib_posix.close(output[1]);
+    var reader_open = true;
+    defer if (reader_open) lib_posix.close(output[0]);
+    const input_flags = try lib_posix.fcntl(input[0], lib_posix.F.GETFL, 0);
+    const initial_output_flags = try lib_posix.fcntl(output[1], lib_posix.F.GETFL, 0);
+    _ = try lib_posix.fcntl(output[1], lib_posix.F.SETFL, initial_output_flags | lib_posix.O_NONBLOCK);
+    try fillPipe(output[1]);
+    _ = try lib_posix.fcntl(output[1], lib_posix.F.SETFL, initial_output_flags);
+    // Prefill may change kernel-maintained flags; compare the client's entry state.
+    const output_flags = try lib_posix.fcntl(output[1], lib_posix.F.GETFL, 0);
+    lib_posix.close(output[0]);
+    reader_open = false;
+
+    // A full pipe with no reader reports POLLERR without POLLOUT on Linux.
+    var poll_fds = [_]lib_posix.pollfd{.{ .fd = output[1], .events = lib_posix.POLL.OUT, .revents = 0 }};
+    _ = try lib_posix.poll(&poll_fds, 0);
+    if (builtin.os.tag == .linux) {
+        try std.testing.expect(poll_fds[0].revents & lib_posix.POLL.ERR != 0);
+        try std.testing.expect(poll_fds[0].revents & lib_posix.POLL.OUT == 0);
+    }
+
+    var sockets: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(lib_posix.AF.UNIX, lib_posix.SOCK.STREAM, 0, &sockets));
+    var client_owns_socket = false;
+    defer if (!client_owns_socket) lib_posix.close(sockets[0]);
+    // Keep the daemon connected until the client has returned.
+    defer lib_posix.close(sockets[1]);
+    try ipc.send(sockets[1], .Output, "queued output\r\n");
+
+    var saved_signals = SavedClientSignals.save();
+    defer saved_signals.restore();
+    var saved_sigpipe: lib_posix.Sigaction = undefined;
+    lib_posix.sigaction(lib_posix.SIG.PIPE, null, &saved_sigpipe);
+    signal.ignoreSigpipe();
+    defer lib_posix.sigaction(lib_posix.SIG.PIPE, &saved_sigpipe, null);
+
+    var client = TestClient{};
+    const start = nowMs();
+    client_owns_socket = true;
+    try std.testing.expectError(error.BrokenPipe, client.runWithWatchdog(sockets[0], input[0], output[1], 1000));
+    try std.testing.expect(nowMs() - start < 1000);
+    try std.testing.expectEqual(input_flags, try lib_posix.fcntl(input[0], lib_posix.F.GETFL, 0));
+    try std.testing.expectEqual(output_flags, try lib_posix.fcntl(output[1], lib_posix.F.GETFL, 0));
 }
