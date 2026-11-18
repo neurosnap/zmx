@@ -555,8 +555,7 @@ fn help(io: std.Io) !void {
         \\Write:
         \\  Writes stdin to file_path inside the session. Works over SSH.
         \\  file_path can be absolute or relative to the session shell's cwd.
-        \\  Requires base64 and printf in the remote environment.
-        \\  Large files are chunked automatically (~48KB per chunk).
+        \\  Requires sh, stty, head and base64 in the remote environment.
         \\  File path must not contain single quotes.
         \\
         \\  Examples:
