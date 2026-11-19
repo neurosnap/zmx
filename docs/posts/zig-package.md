@@ -39,6 +39,6 @@ defer {
 
 ## notes
 
-- `zmx.run` creates the session (and daemon) if it doesn't exist, no need to call `zmx.create` first.
+- `zmx.run` creates the session (and daemon) if it doesn't exist, no need to call `zmx.create` first. Pass `.no_create = true` to get `error.SessionNotFound` instead.
 - `zmx.create` is only available when the package is built with `-Ddaemon=true` (the default).
 - See [`examples/`](https://github.com/neurosnap/zmx/tree/main/examples) for complete working programs.

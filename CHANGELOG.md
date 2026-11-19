@@ -4,6 +4,10 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
+### Added
+
+- `run --no-create` fails when the session does not exist instead of creating it
+
 ### Fixed
 
 - Allow Ctrl C, SIGTERM, and SIGHUP to stop the client while `zmx attach` moves its terminal to another session
