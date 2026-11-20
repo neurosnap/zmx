@@ -36,10 +36,17 @@ fn clientLoopWithFds(client_sock_fd: i32, env_str: []const u8, stdin_fd: i32, st
 
     try signal.openSignalPipe();
     defer signal.closeSignalPipe();
-    signal.installWakeHandler(@backingInt(lib_posix.SIG.WINCH));
-    signal.installWakeHandler(@backingInt(lib_posix.SIG.TERM));
-    signal.installWakeHandler(@backingInt(lib_posix.SIG.HUP));
-    signal.installWakeHandler(@backingInt(lib_posix.SIG.INT));
+    const handlers = [_]signal.WakeHandler{
+        signal.installWakeHandler(@backingInt(lib_posix.SIG.WINCH)),
+        signal.installWakeHandler(@backingInt(lib_posix.SIG.TERM)),
+        signal.installWakeHandler(@backingInt(lib_posix.SIG.HUP)),
+        signal.installWakeHandler(@backingInt(lib_posix.SIG.INT)),
+    };
+    // Restore the caller's handlers before closing their wake pipe. Otherwise
+    // Ctrl C (SIGINT), SIGTERM, and SIGHUP would reach handlers that can no
+    // longer wake the client. These signals could not stop it while its
+    // terminal is being attached to another session.
+    defer for (handlers) |handler| handler.restore();
 
     // Make socket non-blocking to avoid blocking on writes
     var sock_flags = try lib_posix.fcntl(client_sock_fd, lib_posix.F.GETFL, 0);
@@ -347,7 +354,7 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
     std.log.info("daemon started session={s} pty_fd={d}", .{ daemon.session_name, pty_fd });
 
     try signal.openSignalPipe();
-    signal.installWakeHandler(@backingInt(lib_posix.SIG.TERM));
+    _ = signal.installWakeHandler(@backingInt(lib_posix.SIG.TERM));
     var poll_fds = try std.ArrayList(lib_posix.pollfd).initCapacity(gpa, 8);
     defer poll_fds.deinit(gpa);
 
@@ -1535,6 +1542,37 @@ pub const Daemon = struct {
         client.has_pending_output = true;
     }
 };
+
+test "client loop restores prior signal handlers after the server connection closes" {
+    const signals = [_]lib_posix.SIG{ .WINCH, .TERM, .HUP, .INT };
+    var previous: [signals.len]lib_posix.Sigaction = undefined;
+    const ignored: lib_posix.Sigaction = .{
+        .handler = .{ .handler = lib_posix.SIG.IGN },
+        .mask = lib_posix.sigemptyset(),
+        .flags = 0,
+    };
+    for (signals, &previous) |sig, *action| {
+        lib_posix.sigaction(sig, &ignored, action);
+    }
+    defer for (signals, &previous) |sig, *action| {
+        lib_posix.sigaction(sig, action, null);
+    };
+
+    // Closing the peer makes the real client loop finish without a timer or
+    // another process. It still installs and removes all its signal handlers.
+    var sockets: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &sockets));
+    lib_posix.close(sockets[1]);
+    const result = try clientLoop(sockets[0], "");
+    try std.testing.expectEqual(.detach, result.kind);
+    try std.testing.expectEqual(@as(i32, -1), signal.sig_pipe[0]);
+    try std.testing.expectEqual(@as(i32, -1), signal.sig_pipe[1]);
+    for (signals) |sig| {
+        var action: lib_posix.Sigaction = undefined;
+        lib_posix.sigaction(sig, null, &action);
+        try std.testing.expectEqual(lib_posix.SIG.IGN, action.handler.handler);
+    }
+}
 
 test "daemon deinit leaves the caller-owned socket path intact" {
     var cfg = Cfg{ .socket_dir = "", .log_dir = "" };

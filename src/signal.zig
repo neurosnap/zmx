@@ -16,13 +16,26 @@ pub fn wakeSignalPipe(sig: lib_posix.SIG, _: *const lib_posix.siginfo_t, _: ?*an
 // std.posix.poll retries EINTR internally, so SA_RESTART is moot -- neither
 // setting wakes the loop. The handler writes to sig_pipe instead; poll()
 // wakes on its read end.
-pub fn installWakeHandler(sig: u6) void {
+/// Restores how the caller handled this signal before the client loop began.
+pub const WakeHandler = struct {
+    sig: lib_posix.SIG,
+    previous: lib_posix.Sigaction,
+
+    pub fn restore(self: WakeHandler) void {
+        lib_posix.sigaction(self.sig, &self.previous, null);
+    }
+};
+
+pub fn installWakeHandler(sig: u6) WakeHandler {
     const act: lib_posix.Sigaction = .{
         .handler = .{ .sigaction = wakeSignalPipe },
         .mask = lib_posix.sigemptyset(),
         .flags = lib_posix.SA.SIGINFO,
     };
-    lib_posix.sigaction(@as(lib_posix.SIG, @fromBackingInt(@intCast(sig))), &act, null);
+    const native_sig: lib_posix.SIG = @fromBackingInt(@intCast(sig));
+    var previous: lib_posix.Sigaction = undefined;
+    lib_posix.sigaction(native_sig, &act, &previous);
+    return .{ .sig = native_sig, .previous = previous };
 }
 
 pub fn ignoreSigpipe() void {
