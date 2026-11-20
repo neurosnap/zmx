@@ -6,6 +6,7 @@ Use spec: https://common-changelog.org/
 
 ### Fixed
 
+- Allow Ctrl C, SIGTERM, and SIGHUP to stop the client while `zmx attach` moves its terminal to another session
 - Prevent daemon shutdown crashes caused by freeing the caller-owned socket path with a different allocator
 - Stop applying a switching client's original `--labels` and command to the session it switches to ([#319](https://github.com/neurosnap/zmx/issues/319))
 - Publish a new session's socket under its name only once it listens, so a `zmx list` or attach probing it between bind and listen cannot delete it as stale and leave the daemon unreachable

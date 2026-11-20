@@ -193,6 +193,13 @@ pub fn attach(alloc: Allocator, io: Io, name: []const u8, opts: AttachOptions) !
         .detach => return,
         .switch_session => {
             if (looper.session_name) |target_name| {
+                // When `zmx attach <target>` moves this terminal to another
+                // session, leave raw mode so Ctrl C sends SIGINT instead of
+                // ordinary input. The user can then stop this client if
+                // connecting to the target session stalls.
+                if (stdin_is_tty) {
+                    _ = cross.tcsetattr(lib_posix.STDIN_FILENO, cross.TCSAFLUSH, &orig_termios);
+                }
                 _ = lib_posix.write(lib_posix.STDOUT_FILENO, restore_seq) catch {};
                 var new_opts = opts;
                 new_opts.labels = null;
