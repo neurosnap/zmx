@@ -387,6 +387,30 @@ pub fn listen(sock: socket_t, backlog: u31) ListenError!void {
     }
 }
 
+const LinkError = error{PathAlreadyExists} || UnexpectedError;
+
+/// link gives `old` a second name, failing when `new` already exists rather than replacing it.
+pub fn link(old: [*:0]const u8, new: [*:0]const u8) LinkError!void {
+    switch (errno(system.link(old, new))) {
+        .SUCCESS => return,
+        .EXIST => return error.PathAlreadyExists,
+        else => |err| return unexpectedErrno(err),
+    }
+}
+
+/// unlink removes `path`, ignoring any failure; callers use it on names they own.
+pub fn unlink(path: [*:0]const u8) void {
+    _ = system.unlink(path);
+}
+
+/// ensureDir attempts to create path, accepting an existing entry.
+pub fn ensureDir(path: [*:0]const u8, mode: system.mode_t) bool {
+    return switch (errno(system.mkdir(path, mode))) {
+        .SUCCESS, .EXIST => true,
+        else => false,
+    };
+}
+
 /// Obtains errno from the return value of a system function call.
 ///
 /// For some systems this will obtain the value directly from the syscall return value;
