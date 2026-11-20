@@ -169,9 +169,14 @@ pub fn attach(alloc: Allocator, io: Io, name: []const u8, opts: AttachOptions) !
 
     defer {
         if (stdin_is_tty) {
-            _ = cross.tcsetattr(lib_posix.STDIN_FILENO, cross.TCSAFLUSH, &orig_termios);
+            // TCSAFLUSH would also wait for output to drain, which a terminal that stopped reading never
+            // does. Restore at once, then discard unread input as it would; flushing second also clears
+            // the PENDIN a BSD kernel sets when canonical mode returns.
+            _ = cross.tcsetattr(lib_posix.STDIN_FILENO, cross.TCSANOW, &orig_termios);
+            _ = cross.tcflush(lib_posix.STDIN_FILENO, cross.TCIFLUSH);
         }
-        _ = lib_posix.write(lib_posix.STDOUT_FILENO, restore_seq) catch {};
+        // bounded: a terminal that stopped reading must not hold an exiting client
+        loop.writeBounded(restore_seq, 500);
     }
 
     if (stdin_is_tty) {
