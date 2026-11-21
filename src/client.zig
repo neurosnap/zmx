@@ -39,6 +39,7 @@ pub const AttachOptions = struct {
 
 pub const RunOptions = struct {
     detached: bool = false,
+    vt: bool = false,
     cwd: ?[]const u8 = null,
     shell: ?[]const u8 = null,
     stdin_bytes: ?[]const u8 = null,
@@ -326,7 +327,7 @@ fn tailInternal(
     alloc: Allocator,
     client_socket_fds: []const i32,
     detached: bool,
-    is_run_cmd: bool,
+    mode: enum { tail, run, run_vt },
     writer: ?*Io.Writer,
 ) !u8 {
     var poll_fds = try std.ArrayList(lib_posix.pollfd).initCapacity(alloc, client_socket_fds.len + 1);
@@ -392,18 +393,18 @@ fn tailInternal(
                         .Output => {
                             if (msg.payload.len > 0) {
                                 var payload = msg.payload;
-                                if (!detached and is_run_cmd) {
+                                if (!detached and mode != .tail) {
                                     payload = skipCommandEcho(payload, &is_first_line);
                                 }
 
                                 if (payload.len > 0) {
-                                    const plain = util.stripAnsi(alloc, payload) catch continue;
-                                    defer alloc.free(plain);
-                                    if (plain.len > 0) {
+                                    const output = if (mode == .run_vt) payload else util.stripAnsi(alloc, payload) catch continue;
+                                    defer if (mode != .run_vt) alloc.free(output);
+                                    if (output.len > 0) {
                                         if (writer) |w| {
-                                            try w.writeAll(plain);
+                                            try w.writeAll(output);
                                         } else {
-                                            try out_buf.appendSlice(alloc, plain);
+                                            try out_buf.appendSlice(alloc, output);
                                         }
                                     }
                                 }
@@ -524,7 +525,7 @@ pub fn run(
     };
 
     const fds = [_]i32{client_sock};
-    return tailInternal(alloc, &fds, opts.detached, true, opts.output_writer);
+    return tailInternal(alloc, &fds, opts.detached, if (opts.vt) .run_vt else .run, opts.output_writer);
 }
 
 /// Wait for one or more task-mode sessions to complete and return aggregate exit code.
@@ -647,7 +648,7 @@ pub fn tail(alloc: Allocator, io: Io, names: []const []const u8, writer: ?*Io.Wr
         try ipc.send(sock, .Tail, "");
     }
 
-    return tailInternal(alloc, fds.items, false, false, writer);
+    return tailInternal(alloc, fds.items, false, .tail, writer);
 }
 
 /// Send raw input bytes to a session's PTY (fire-and-forget, like `zmx send`).

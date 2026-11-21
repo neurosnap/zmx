@@ -210,10 +210,13 @@ fn mainImpl(init: std.process.Init) !void {
         var cmd_args_raw: std.ArrayList([]const u8) = .empty;
         defer cmd_args_raw.deinit(gpa);
         var detached = false;
+        var vt = false;
         while (args.next()) |arg| {
             // Once the command has started, -d belongs to the command.
             if (cmd_args_raw.items.len == 0 and std.mem.startsWith(u8, arg, "-d")) {
                 detached = true;
+            } else if (cmd_args_raw.items.len == 0 and std.mem.eql(u8, arg, "--vt")) {
+                vt = true;
             } else {
                 try cmd_args_raw.append(gpa, arg);
             }
@@ -251,6 +254,7 @@ fn mainImpl(init: std.process.Init) !void {
 
         const exit_code = zmx.run(gpa, io, session_name, cmd_args_raw.items, .{
             .detached = detached,
+            .vt = vt,
             .cwd = cwd,
             .shell = shell_env,
             .stdin_bytes = stdin_bytes,
@@ -456,7 +460,7 @@ fn help(io: std.Io) !void {
         \\
         \\Commands:
         \\  [a]ttach [--labels kv] <name> [command...]                 Attach to session, creating if needed
-        \\  [r]un <name> [-d] [command...]                             Send command without attaching
+        \\  [r]un <name> [-d] [--vt] [command...]                      Send command without attaching
         \\  [s]end <name> <text...>                                    Send raw input to session PTY
         \\  [p]rint <name> <text...>                                   Inject text into session display
         \\  [wr]ite <name> <file_path>                                 Write stdin to file_path through the session
@@ -511,6 +515,7 @@ fn help(io: std.Io) !void {
         \\
         \\  `-d` will detach from the calling terminal. Use `wait` to track
         \\  its status.
+        \\  `--vt` preserves terminal escape sequences in the output.
         \\
         \\  Examples:
         \\    zmx run dev ls
