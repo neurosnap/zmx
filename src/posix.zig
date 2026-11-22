@@ -688,7 +688,7 @@ fn openZ(file_path: [*:0]const u8, flags: O, perm: mode_t) OpenError!fd_t {
             .MFILE => return error.ProcessFdQuotaExceeded,
             .NAMETOOLONG => return error.NameTooLong,
             .NFILE => return error.SystemFdQuotaExceeded,
-            .NODEV => return error.NoDevice,
+            .NODEV, .NXIO => return error.NoDevice,
             .NOENT => return error.FileNotFound,
             .SRCH => return error.ProcessNotFound,
             .NOMEM => return error.SystemResources,
