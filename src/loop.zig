@@ -419,12 +419,8 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
                     }
 
                     // Broadcast data to all clients.
-                    // Rewrite OSC 133;A to include redraw=0 so the outer terminal
-                    // does not clear prompt lines on resize (issue #111).
-                    const broadcast_data = util.rewritePromptRedraw(gpa, buf[0..n]) orelse buf[0..n];
-                    defer if (broadcast_data.ptr != buf[0..n].ptr) gpa.free(broadcast_data);
                     for (daemon.clients.items) |client| {
-                        ipc.appendMessage(gpa, &client.write_buf, .Output, broadcast_data) catch |err| {
+                        ipc.appendMessage(gpa, &client.write_buf, .Output, buf[0..n]) catch |err| {
                             std.log.warn(
                                 "failed to buffer output for client err={s}",
                                 .{@errorName(err)},
@@ -1020,12 +1016,8 @@ pub const Daemon = struct {
             );
             if (util.serializeTerminalState(gpa, term)) |term_output| {
                 std.log.debug("serialize terminal state", .{});
-                // Rewrite OSC 133;A to include redraw=0 so the outer terminal
-                // does not clear prompt lines on resize (issue #111).
-                const restore_data = util.rewritePromptRedraw(gpa, term_output) orelse term_output;
                 defer gpa.free(term_output);
-                defer if (restore_data.ptr != term_output.ptr) gpa.free(restore_data);
-                ipc.appendMessage(gpa, &client.write_buf, .Output, restore_data) catch |err| {
+                ipc.appendMessage(gpa, &client.write_buf, .Output, term_output) catch |err| {
                     std.log.warn(
                         "failed to buffer terminal state for client err={s}",
                         .{@errorName(err)},
