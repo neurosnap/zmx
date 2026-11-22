@@ -9,6 +9,7 @@ Use spec: https://common-changelog.org/
 - Allow Ctrl C, SIGTERM, and SIGHUP to stop the client while `zmx attach` moves its terminal to another session
 - Prevent daemon shutdown crashes caused by freeing the caller-owned socket path with a different allocator
 - Stop applying a switching client's original `--labels` and command to the session it switches to ([#319](https://github.com/neurosnap/zmx/issues/319))
+- Stop rewriting OSC `133;A` prompt marks, which left duplicate multi-line prompts after a resize ([#326](https://github.com/neurosnap/zmx/issues/326))
 
 # v1.0.1 - 2026-11-06
 
