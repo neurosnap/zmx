@@ -12,7 +12,7 @@ load test_helper
 # ============================================================================
 
 @test "run: stdin pipe executes command" {
-  run bash -c 'printf "echo stdin-marker-abc123\n" | timeout 10 "$0" run test-stdin-basic' "$ZMX"
+  run bash -c 'printf "echo stdin-marker-abc123\n" | timeout --foreground 10 "$0" run test-stdin-basic' "$ZMX"
   [ "$status" -eq 0 ]
 
   wait_for_output test-stdin-basic stdin-marker-abc123
@@ -21,7 +21,7 @@ load test_helper
 }
 
 @test "run: stdin with special characters passes through unmangled" {
-  run bash -c 'printf "echo '\''hello \$USER \$(whoami) \\\"double\\\" ; # comment'\''\n" | timeout 10 "$0" run test-stdin-special' "$ZMX"
+  run bash -c 'printf "echo '\''hello \$USER \$(whoami) \\\"double\\\" ; # comment'\''\n" | timeout --foreground 10 "$0" run test-stdin-special' "$ZMX"
   [ "$status" -eq 0 ]
 
   wait_for_output test-stdin-special '$USER'
@@ -33,7 +33,7 @@ load test_helper
 @test "run: multiline stdin script executes all lines" {
   local script
   script=$(printf 'echo line-one-aaa\necho line-two-bbb\necho line-three-ccc\n')
-  run bash -c 'printf "%s" "$1" | timeout 10 "$0" run test-stdin-multi' "$ZMX" "$script"
+  run bash -c 'printf "%s" "$1" | timeout --foreground 10 "$0" run test-stdin-multi' "$ZMX" "$script"
   [ "$status" -eq 0 ]
 
   wait_for_output test-stdin-multi line-three-ccc
@@ -48,7 +48,7 @@ load test_helper
   # the task marker is sent on its own line.
   local script
   script=$(printf "cat <<'EOF'\nThis has \"double\" and 'single' quotes\nand \$variables that should not expand\nEOF\n")
-  run bash -c 'printf "%s" "$1" | timeout 10 "$0" run test-stdin-heredoc' "$ZMX" "$script"
+  run bash -c 'printf "%s" "$1" | timeout --foreground 10 "$0" run test-stdin-heredoc' "$ZMX" "$script"
   [ "$status" -eq 0 ]
 
   wait_for_output test-stdin-heredoc '$variables that should not expand'
@@ -57,7 +57,7 @@ load test_helper
 }
 
 @test "run: args-only still works" {
-  run timeout 10 env SHELL=/bin/bash "$ZMX" run test-args-only echo args-only-marker-999
+  run timeout --foreground 10 env SHELL="$BASH" "$ZMX" run test-args-only echo args-only-marker-999
   [ "$status" -eq 0 ]
 
   wait_for_output test-args-only args-only-marker-999
