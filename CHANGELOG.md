@@ -6,6 +6,7 @@ Use spec: https://common-changelog.org/
 
 ### Fixed
 
+- Default an empty `TERM` to `xterm-256color` when starting a session
 - Allow Ctrl C, SIGTERM, and SIGHUP to stop the client while `zmx attach` moves its terminal to another session
 - Prevent daemon shutdown crashes caused by freeing the caller-owned socket path with a different allocator
 - Stop applying a switching client's original `--labels` and command to the session it switches to ([#319](https://github.com/neurosnap/zmx/issues/319))
