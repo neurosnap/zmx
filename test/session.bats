@@ -40,13 +40,13 @@ load test_helper
 }
 
 @test "run: blocking returns after command completes" {
-  run timeout 5 env SHELL=/bin/bash "$ZMX" run test-blocking echo hello
+  run timeout --foreground 5 env SHELL="$BASH" "$ZMX" run test-blocking echo hello
   [ "$status" -eq 0 ]
   [[ "$output" == *"session \"test-blocking\" created"* ]]
 }
 
 @test "run: -d after the command is passed to the command" {
-  run timeout 5 "$ZMX" run test-dash-d printf 'arg=%s\n' -d
+  run timeout --foreground 5 "$ZMX" run test-dash-d printf 'arg=%s\n' -d
   [ "$status" -eq 0 ]
   [[ "$output" != *"command sent"* ]]
   wait_for_output test-dash-d "arg=-d"
@@ -258,7 +258,7 @@ load test_helper
   wait_for_output test-wait done
 
   # `wait` should return once the command finishes
-  run timeout 10 "$ZMX" wait test-wait
+  run timeout --foreground 10 "$ZMX" wait test-wait
   [ "$status" -eq 0 ]
 }
 
@@ -323,11 +323,11 @@ load test_helper
   local src="$BATS_TEST_TMPDIR/src.bin" dst="$BATS_TEST_TMPDIR/dst.bin" i=0
   head -c 400000 /dev/urandom > "$src"
 
-  run timeout 10 "$ZMX" run test-write-large echo write-ready-marker
+  run timeout --foreground 10 "$ZMX" run test-write-large echo write-ready-marker
   [ "$status" -eq 0 ]
   wait_for_output test-write-large write-ready-marker
 
-  run bash -c 'timeout 10 "$0" write test-write-large "$1" < "$2"' "$ZMX" "$dst" "$src"
+  run bash -c 'timeout --foreground 10 "$0" write test-write-large "$1" < "$2"' "$ZMX" "$dst" "$src"
   [ "$status" -eq 0 ]
 
   while (( i < 300 )) && ! cmp -s "$src" "$dst"; do
