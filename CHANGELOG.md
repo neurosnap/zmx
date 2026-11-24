@@ -4,6 +4,8 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
+## v1.0.2 - 2026-11-24
+
 ### Fixed
 
 - Default an empty `TERM` to `xterm-256color` when starting a session
