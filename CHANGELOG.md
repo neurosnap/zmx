@@ -10,6 +10,7 @@ Use spec: https://common-changelog.org/
 - Allow Ctrl C, SIGTERM, and SIGHUP to stop the client while `zmx attach` moves its terminal to another session
 - Prevent daemon shutdown crashes caused by freeing the caller-owned socket path with a different allocator
 - Stop applying a switching client's original `--labels` and command to the session it switches to ([#319](https://github.com/neurosnap/zmx/issues/319))
+- A program that asked for color scheme reports (DECSET 2031) now learns the attaching terminal's light/dark scheme on attach, so a session that was detached during a theme switch no longer keeps the old scheme
 
 # v1.0.1 - 2026-11-06
 
