@@ -4,6 +4,10 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
+### Added
+
+- `run --no-create` fails when the session does not exist instead of creating it
+
 ### Fixed
 
 - Default an empty `TERM` to `xterm-256color` when starting a session
