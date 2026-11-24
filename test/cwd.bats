@@ -101,3 +101,32 @@ osc7_session() {
     wait_for_cwd "$name" "cwd=$uri"
   done
 }
+
+@test "attach: cwd starts the command in an absolute directory with spaces" {
+  local dir="$BATS_TEST_TMPDIR/project dir"
+  mkdir -p "$dir"
+  pty_attach 10 -c "$dir" test-attach-cwd sh -c 'pwd; sleep 30' 3>&- &
+  wait_for_output test-attach-cwd "$dir"
+  kill %1 2>/dev/null || true
+}
+
+@test "attach: cwd resolves relative paths from the caller" {
+  cd "$BATS_TEST_TMPDIR"
+  mkdir -p project
+  pty_attach 10 --cwd=project test-attach-relative sh -c 'pwd; sleep 30' 3>&- &
+  wait_for_output test-attach-relative "$BATS_TEST_TMPDIR/project"
+  kill %1 2>/dev/null || true
+}
+
+@test "attach: cwd leaves an existing session's directory unchanged" {
+  local dir="$BATS_TEST_TMPDIR/original"
+  mkdir -p "$dir" "$BATS_TEST_TMPDIR/other"
+  cd "$dir"
+  "$ZMX" run test-attach-existing -d sh -c 'read -r trigger; pwd; sleep 30'
+  wait_for_session test-attach-existing
+  pty_attach 10 --cwd "$BATS_TEST_TMPDIR/other" test-attach-existing 3>&- &
+  wait_for_clients test-attach-existing 1
+  "$ZMX" send test-attach-existing $'check\r'
+  wait_for_output test-attach-existing "$dir"
+  kill %1 2>/dev/null || true
+}

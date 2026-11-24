@@ -43,7 +43,14 @@ const bash_completions =
     \\  fi
     \\
     \\  case "$prev" in
-    \\    attach|run|send|print|write|kill|get|set|clear|print-env|wait|tail)
+    \\    --cwd|-c)
+    \\      while IFS= read -r dir; do COMPREPLY+=("$dir"); done < <(compgen -d -- "$cur")
+    \\      ;;
+    \\    attach|a)
+    \\      local sessions=$(zmx list --short 2>/dev/null | tr '\n' ' ')
+    \\      COMPREPLY=($(compgen -W "-c --cwd --labels $sessions" -- "$cur"))
+    \\      ;;
+    \\    run|send|print|write|kill|get|set|clear|print-env|wait|tail)
     \\      local sessions=$(zmx list --short 2>/dev/null | tr '\n' ' ')
     \\      COMPREPLY=($(compgen -W "$sessions" -- "$cur"))
     \\      ;;
@@ -104,7 +111,11 @@ const zsh_completions =
     \\      ;;
     \\    args)
     \\      case $words[2] in
-    \\        attach|a|kill|k|run|r|send|s|print|p|write|wr|get|g|set|clear|print-env|wait|w|tail|t)
+    \\        attach|a)
+    \\          _zmx_sessions
+    \\          _values 'options' '-c' '--cwd' '--labels'
+    \\          ;;
+    \\        kill|k|run|r|send|s|print|p|write|wr|get|g|set|clear|print-env|wait|w|tail|t)
     \\          _zmx_sessions
     \\          ;;
     \\        history|hi)
@@ -120,6 +131,9 @@ const zsh_completions =
     \\      esac
     \\      ;;
     \\    trailing)
+    \\      if [[ $words[2] == (attach|a) && $words[CURRENT-1] == (--cwd|-c) ]]; then
+    \\        _files -/
+    \\      fi
     \\      # Additional args for commands like 'attach' or 'run'
     \\      ;;
     \\  esac
@@ -173,6 +187,7 @@ const fish_completions =
     \\complete -c zmx -n "__fish_is_nth_token 2; and __fish_seen_subcommand_from c completions" -a 'bash zsh fish nu yash' -d Shell
     \\
     \\# Subcommand flags
+    \\complete -c zmx -n "__fish_seen_subcommand_from a attach" -s c -l cwd -d 'Starting directory for a new session' -r -a '(__fish_complete_directories)'
     \\complete -c zmx -n "__fish_seen_subcommand_from a attach" -l labels -d 'Apply "key=value ..." labels as the session is created' -r
     \\complete -c zmx -n "__fish_seen_subcommand_from r run" -s d -d 'Detach from the calling terminal; use `wait` to track its status'
     \\complete -c zmx -n "__fish_seen_subcommand_from r run" -l fish -d 'Required when the session runs fish shell'
@@ -197,6 +212,7 @@ const nu_completions =
     \\export extern "zmx attach" [
     \\    name: string@"nu-complete zmx sessions"
     \\    --labels: string
+    \\    --cwd(-c): path
     \\    ...rest: string
     \\]
     \\
@@ -362,6 +378,8 @@ const yash_completions =
     \\function completion/zmx::attach:arg {
     \\    OPTIONS=( #>#
     \\        "--labels:; apply labels as session is created"
+    \\        "c:; starting directory for a new session"
+    \\        "--cwd:; starting directory for a new session"
     \\    ) #<#
     \\    command -f completion//parseoptions -en
     \\    case $ARGOPT in
@@ -369,6 +387,9 @@ const yash_completions =
     \\        command -f completion//completeoptions
     \\        ;;
     \\    (--labels)
+    \\        ;;
+    \\    (--cwd|-c)
+    \\        complete -P "$PREFIX" -d
     \\        ;;
     \\    (*)
     \\        command -f completion//getoperands

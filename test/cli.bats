@@ -104,6 +104,24 @@ load test_helper
   [[ "$output" == *"--labels requires"* ]]
 }
 
+@test "attach rejects missing or empty cwd" {
+  for arg in -c --cwd --cwd=; do
+    run "$ZMX" attach "$arg"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--cwd requires a directory"* ]]
+  done
+}
+
+@test "attach rejects invalid cwd before creating a session" {
+  for dir in "$BATS_TEST_TMPDIR/missing" "$BATS_TEST_FILENAME"; do
+    run "$ZMX" attach --cwd "$dir" test-invalid-cwd
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"cannot open directory"* ]]
+  done
+  run "$ZMX" list --short
+  [ -z "$output" ]
+}
+
 @test "print-env with no argument outside session exits non-zero" {
   run env -u ZMX_SESSION "$ZMX" print-env
   [ "$status" -ne 0 ]

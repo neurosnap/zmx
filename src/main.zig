@@ -173,6 +173,9 @@ fn mainImpl(init: std.process.Init) !void {
         if (parsed.missing_labels_value) {
             return printError(io, "--labels requires \"key=value ...\"", .{});
         }
+        if (parsed.missing_cwd_value) {
+            return printError(io, "--cwd requires a directory", .{});
+        }
         // Before ensureSession, so a rejected label does not leave a session
         // behind that the caller never asked for.
         if (parsed.labels) |kvs| assertLabels(io, kvs);
@@ -184,7 +187,22 @@ fn mainImpl(init: std.process.Init) !void {
 
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
         const cwd_len = std.process.currentPath(io, &cwd_buf) catch 0;
-        const cwd = cwd_buf[0..cwd_len];
+        const cwd_override = if (parsed.cwd) |path| blk: {
+            if (path.len == 0) return printError(io, "--cwd requires a directory", .{});
+            const absolute = if (std.fs.path.isAbsolute(path))
+                try gpa.dupe(u8, path)
+            else relative: {
+                const len = try std.process.currentPath(io, &cwd_buf);
+                break :relative try std.fs.path.join(gpa, &.{ cwd_buf[0..len], path });
+            };
+            const dir = std.Io.Dir.openDirAbsolute(io, absolute, .{}) catch |err| {
+                return printError(io, "cannot open directory \"{s}\": {s}", .{ path, @errorName(err) });
+            };
+            dir.close(io);
+            break :blk absolute;
+        } else null;
+        defer if (cwd_override) |path| gpa.free(path);
+        const cwd = cwd_override orelse cwd_buf[0..cwd_len];
 
         const env_keys = lib_posix.getenv("ZMX_TRACK_ENV") orelse cfg.tracked_envs;
         const env_str = try getTrackedEnvStr(gpa, env_keys, init.environ_map);
@@ -455,7 +473,7 @@ fn help(io: std.Io) !void {
         \\Usage: zmx <command> [args...]
         \\
         \\Commands:
-        \\  [a]ttach [--labels kv] <name> [command...]                 Attach to session, creating if needed
+        \\  [a]ttach [--cwd dir] [--labels kv] <name> [command...]     Attach to session, creating if needed
         \\  [r]un <name> [-d] [command...]                             Send command without attaching
         \\  [s]end <name> <text...>                                    Send raw input to session PTY
         \\  [p]rint <name> <text...>                                   Inject text into session display
@@ -477,6 +495,7 @@ fn help(io: std.Io) !void {
         \\Attach:
         \\  This will spawn a login $SHELL with a PTY.  You can provide a
         \\  command instead of creating a shell.
+        \\  -c, --cwd sets the starting directory for a new session.
         \\
         \\  --labels applies labels as the session is created, in the same form
         \\  `zmx set` takes. A caller that creates and then labels in two steps
@@ -1127,9 +1146,11 @@ const AttachArgs = struct {
     /// `--labels "k=v ..."`: labels to apply once the session exists, in the
     /// same space-separated form `zmx set` takes.
     labels: ?[]const u8 = null,
+    cwd: ?[]const u8 = null,
     want_help: bool = false,
     /// `--labels` was given with nothing to apply.
     missing_labels_value: bool = false,
+    missing_cwd_value: bool = false,
 };
 
 /// Parses the arguments that follow `zmx attach`. Flags are only recognized
@@ -1157,6 +1178,20 @@ fn parseAttachArgs(argv: []const []const u8) AttachArgs {
             }
             i += 1;
             parsed.labels = argv[i];
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--cwd=")) {
+            parsed.cwd = arg["--cwd=".len..];
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--cwd") or std.mem.eql(u8, arg, "-c")) {
+            if (i + 1 >= argv.len) {
+                parsed.missing_cwd_value = true;
+                parsed.command_start = argv.len;
+                return parsed;
+            }
+            i += 1;
+            parsed.cwd = argv[i];
             continue;
         }
         parsed.session_name = arg;
@@ -1289,6 +1324,28 @@ test "parseAttachArgs reads --labels in both forms" {
         try std.testing.expect(!parsed.missing_labels_value);
         try std.testing.expectEqual(argv.len, parsed.command_start);
     }
+}
+
+test "parseAttachArgs reads cwd options with labels and command" {
+    for ([_][]const []const u8{
+        &.{ "-c", "project dir", "--labels", "a=1", "dev", "pwd", "-c" },
+        &.{ "--cwd", "project dir", "--labels", "a=1", "dev", "pwd", "--cwd" },
+        &.{ "--labels=a=1", "--cwd=project dir", "dev", "pwd", "--cwd" },
+    }) |argv| {
+        const parsed = parseAttachArgs(argv);
+        try std.testing.expectEqualStrings("project dir", parsed.cwd.?);
+        try std.testing.expectEqualStrings("a=1", parsed.labels.?);
+        try std.testing.expectEqualStrings("dev", parsed.session_name);
+        try std.testing.expectEqualSlices([]const u8, argv[argv.len - 2 ..], argv[parsed.command_start..]);
+    }
+}
+
+test "parseAttachArgs reports missing cwd and leaves command options intact" {
+    try std.testing.expect(parseAttachArgs(&.{"--cwd"}).missing_cwd_value);
+    try std.testing.expect(parseAttachArgs(&.{"-c"}).missing_cwd_value);
+    const parsed = parseAttachArgs(&.{ "dev", "--cwd", "/tmp" });
+    try std.testing.expectEqual(@as(?[]const u8, null), parsed.cwd);
+    try std.testing.expectEqual(@as(usize, 1), parsed.command_start);
 }
 
 test "parseAttachArgs combines --labels with a session command" {

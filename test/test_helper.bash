@@ -94,3 +94,30 @@ wait_for_clients() {
   echo "Timed out waiting for $n client(s) on '$name'" >&2
   return 1
 }
+
+# pty_attach <hold_seconds> <attach args...>: run `zmx attach <args...>` in a pty
+# for hold_seconds, draining its output so the client never blocks on writes.
+pty_attach() {
+  local hold="$1"
+  shift
+  python3 - "$ZMX" "$hold" "$@" 3>&- <<'PY'
+import fcntl, os, pty, select, struct, subprocess, sys, termios, time
+
+zmx, hold, args = sys.argv[1], float(sys.argv[2]), sys.argv[3:]
+env = {k: v for k, v in os.environ.items() if k != "ZMX_SESSION"}
+env.update(SHELL="/bin/sh", TERM="xterm-256color")
+master, slave = pty.openpty()
+fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+proc = subprocess.Popen([zmx, "attach", *args], stdin=slave, stdout=slave, stderr=slave, env=env)
+deadline = time.monotonic() + hold
+while time.monotonic() < deadline and proc.poll() is None:
+    if select.select([master], [], [], 0.05)[0]:
+        try:
+            os.read(master, 65536)
+        except OSError:
+            break
+if proc.poll() is None:
+    proc.kill()
+    proc.wait(timeout=5)
+PY
+}

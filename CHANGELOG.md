@@ -4,6 +4,10 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
+### Added
+
+- `zmx attach --cwd <dir> <name>` sets the starting directory for a new session (`-c` alias)
+
 ## v1.0.2 - 2026-11-24
 
 ### Fixed
