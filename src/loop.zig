@@ -1348,13 +1348,22 @@ pub const Daemon = struct {
         // base64 is streamed only after the remote tty is non-canonical: in
         // canonical mode the kernel cuts long lines (4096 on Linux, 1024 on
         // BSD). The empty quotes keep the echoed command from matching the
-        // markers.
-        try self.pty_write_buf.print(
-            gpa,
-            "sh -c 's=$(stty -g);if (: >\"$0\");then stty -icanon -echo;echo ZMX_WR\"\"ITE_READY;" ++
-                "head -c {d}|base64 -d >\"$0\";r=$?;stty \"$s\";else r=1;fi;echo ZMX_WR\"\"ITE_DONE:$r' '{s}'\r",
-            .{ encoded.len, file_path },
-        );
+        // markers. Skip head/base64 for empty files because BSD head rejects
+        // `-c 0`.
+        if (encoded.len == 0) {
+            try self.pty_write_buf.print(
+                gpa,
+                "sh -c 'if (: >\"$0\");then r=0;else r=1;fi;echo ZMX_WR\"\"ITE_DONE:$r' '{s}'\r",
+                .{file_path},
+            );
+        } else {
+            try self.pty_write_buf.print(
+                gpa,
+                "sh -c 's=$(stty -g);if (: >\"$0\");then stty -icanon -echo;echo ZMX_WR\"\"ITE_READY;" ++
+                    "head -c {d}|base64 -d >\"$0\";r=$?;stty \"$s\";else r=1;fi;echo ZMX_WR\"\"ITE_DONE:$r' '{s}'\r",
+                .{ encoded.len, file_path },
+            );
+        }
         self.pending_write = .{ .client = client, .encoded = encoded };
         std.log.debug(
             "write command len={d} file_path={s}",

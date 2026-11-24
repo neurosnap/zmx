@@ -355,6 +355,23 @@ load test_helper
   [ "$status" -ne 0 ]
 }
 
+@test "write: empty file succeeds without head error" {
+  local dst="$BATS_TEST_TMPDIR/empty.bin"
+
+  run timeout 10 "$ZMX" run test-write-empty echo write-ready-marker
+  [ "$status" -eq 0 ]
+  wait_for_output test-write-empty write-ready-marker
+
+  run bash -c 'timeout 10 "$0" write test-write-empty "$1" < /dev/null' "$ZMX" "$dst"
+  [ "$status" -eq 0 ]
+  [ -f "$dst" ]
+  [ ! -s "$dst" ]
+
+  run "$ZMX" history test-write-empty
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"illegal byte count"* ]]
+}
+
 @test "write: a file larger than the PTY input buffer arrives whole" {
   local src="$BATS_TEST_TMPDIR/src.bin" dst="$BATS_TEST_TMPDIR/dst.bin" i=0
   head -c 400000 /dev/urandom > "$src"
