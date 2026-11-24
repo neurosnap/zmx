@@ -298,6 +298,30 @@ pub fn kill(alloc: Allocator, io: Io, name: []const u8, opts: KillOptions) !Kill
     return .killed;
 }
 
+fn skipCommandEcho(bytes: []const u8, first_line: *bool) []const u8 {
+    if (!first_line.*) return bytes;
+    const nl = std.mem.indexOfScalar(u8, bytes, '\n') orelse return bytes[bytes.len..];
+    first_line.* = false;
+    return bytes[nl + 1 ..];
+}
+
+test "command echo split across reads" {
+    const input = "make; echo ZMX_TASK_COMPLETED:abcd:$?\r\n\x1b[33mwarning\x1b[0m\r\n";
+    const expected = "\x1b[33mwarning\x1b[0m\r\n";
+    for (1..input.len + 1) |chunk_size| {
+        var first_line = true;
+        var output: std.ArrayList(u8) = .empty;
+        defer output.deinit(std.testing.allocator);
+        var offset: usize = 0;
+        while (offset < input.len) {
+            const end = @min(offset + chunk_size, input.len);
+            try output.appendSlice(std.testing.allocator, skipCommandEcho(input[offset..end], &first_line));
+            offset = end;
+        }
+        try std.testing.expectEqualStrings(expected, output.items);
+    }
+}
+
 fn tailInternal(
     alloc: Allocator,
     client_socket_fds: []const i32,
@@ -368,14 +392,8 @@ fn tailInternal(
                         .Output => {
                             if (msg.payload.len > 0) {
                                 var payload = msg.payload;
-                                if (!detached and is_run_cmd and is_first_line) {
-                                    if (std.mem.indexOfScalar(u8, payload, '\n')) |nl| {
-                                        is_first_line = false;
-                                        payload = payload[nl + 1 ..];
-                                    } else {
-                                        is_first_line = false;
-                                        payload = payload[payload.len..];
-                                    }
+                                if (!detached and is_run_cmd) {
+                                    payload = skipCommandEcho(payload, &is_first_line);
                                 }
 
                                 if (payload.len > 0) {
