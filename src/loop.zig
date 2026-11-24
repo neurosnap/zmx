@@ -412,6 +412,7 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
 
                             // Notify connected clients
                             for (daemon.clients.items) |c| {
+                                if (!c.wants_output) continue;
                                 ipc.appendMessage(gpa, &c.write_buf, .TaskComplete, &[_]u8{exit_code}) catch {};
                                 c.has_pending_output = true;
                             }
@@ -426,8 +427,9 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
 
                     try daemon.scanWriteMarkers(gpa, buf[0..n]);
 
-                    // Broadcast data to all clients.
+                    // Broadcast data to subscribed clients.
                     for (daemon.clients.items) |client| {
+                        if (!client.wants_output) continue;
                         ipc.appendMessage(gpa, &client.write_buf, .Output, buf[0..n]) catch |err| {
                             std.log.warn(
                                 "failed to buffer output for client err={s}",
@@ -518,6 +520,7 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
                         .EnvSet => try daemon.handleEnvSet(gpa, client, msg.payload),
                         .History => try daemon.handleHistory(gpa, client, &term, msg.payload),
                         .Capture => try daemon.handleCapture(gpa, client, &term, msg.payload),
+                        .Tail => client.wants_output = true,
                         .Run => try daemon.handleRun(gpa, io, client, msg.payload),
                         .Ack, .TaskComplete, .LabelData, .EnvData, .Unsupported => {},
                         .Write => try daemon.handleWrite(gpa, client, msg.payload),
@@ -583,6 +586,7 @@ pub const Client = struct {
     socket_fd: i32,
     has_pending_output: bool = false,
     is_terminal: bool = false, // sent .Init (a `zmx attach`), not a run/send/tail client
+    wants_output: bool = false, // subscribed to .Output/.TaskComplete (sent .Init, .Run, or .Tail)
     read_buf: ipc.SocketBuffer,
     write_buf: std.ArrayList(u8),
     env_str: ?[]u8 = null,
@@ -1030,6 +1034,7 @@ pub const Daemon = struct {
             client.has_pending_output = false;
         }
         client.is_terminal = true;
+        client.wants_output = true;
 
         if (self.leader_client_fd == null) {
             try self.setLeader(gpa, client);
@@ -1240,6 +1245,7 @@ pub const Daemon = struct {
 
         if (payload.len == 0) return;
 
+        client.wants_output = true;
         const cmd = payload;
 
         // Chain the exit marker with `;` on the same line. `$?` captures the

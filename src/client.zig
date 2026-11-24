@@ -644,6 +644,7 @@ pub fn tail(alloc: Allocator, io: Io, names: []const []const u8, writer: ?*Io.Wr
         defer alloc.free(socket_path);
         const sock = try socket.sessionConnect(socket_path);
         try fds.append(alloc, sock);
+        try ipc.send(sock, .Tail, "");
     }
 
     return tailInternal(alloc, fds.items, false, false, writer);
