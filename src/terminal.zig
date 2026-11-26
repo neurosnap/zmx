@@ -170,8 +170,6 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
             var sb_bottom = sb_bottom_row;
             sb_bottom.x = @intCast(pages.cols - 1);
 
-            // unwrap: a soft-wrapped row is sent as one long line, so the
-            // client wraps it itself and can still reflow it when it resizes.
             var scroll_fmt = ghostty_vt.formatter.TerminalFormatter.init(term, .{ .emit = .vt, .unwrap = true });
             scroll_fmt.content = .{
                 .selection = ghostty_vt.Selection.init(
@@ -201,8 +199,6 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
     }
 
     // Phase 2: visible screen with full extras (modes, cursor, keyboard, etc.)
-    // unwrap: see phase 1. The client has this terminal's size, so the
-    // rows wrap exactly where they were.
     var vis_fmt = ghostty_vt.formatter.TerminalFormatter.init(term, .{ .emit = .vt, .unwrap = true });
 
     // Restrict content to the active viewport only
@@ -768,7 +764,6 @@ test "serializeTerminalState keeps soft wraps so a wider client reflows them" {
     const alloc = testing.allocator;
     const io = testing.io;
 
-    // A 30-column line in a 20-column terminal soft-wraps onto a second row.
     var term = try testCreateTerminal(alloc, io, 20, 5, "\x1b[2J\x1b[H" ++
         "abcdefghijklmnopqrstuvwxyz0123");
     defer term.deinit(alloc);
@@ -777,8 +772,6 @@ test "serializeTerminalState keeps soft wraps so a wider client reflows them" {
     defer client.deinit(alloc);
     try expectScreensMatch(alloc, &term, &client);
 
-    // Widened, the replayed row must reflow back into one line, as it does
-    // in the daemon, instead of staying cut at 20 columns.
     try term.resize(alloc, .{ .cols = 40, .rows = 5 });
     try client.resize(alloc, .{ .cols = 40, .rows = 5 });
     try expectScreensMatch(alloc, &term, &client);
@@ -789,7 +782,6 @@ test "serializeTerminalState keeps soft wraps in scrollback" {
     const alloc = testing.allocator;
     const io = testing.io;
 
-    // The wrapped line scrolls into history, which phase 1 replays.
     var term = try testCreateTerminal(alloc, io, 20, 3, "abcdefghijklmnopqrstuvwxyz0123\r\n" ++
         "1\r\n2\r\n3\r\n4");
     defer term.deinit(alloc);
