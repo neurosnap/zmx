@@ -4,6 +4,8 @@ Use spec: https://common-changelog.org/
 
 ## Staged
 
+- Keep soft-wrapped lines wrapped when replaying a session on attach, so they reflow when the client is resized instead of staying cut at the old width (#312)
+
 ## v1.0.2 - 2026-11-24
 
 ### Fixed
