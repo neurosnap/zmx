@@ -71,7 +71,13 @@ zig build -Doptimize=ReleaseSafe --prefix ~/.local
 
 ## usage
 
-> **Important:** We recommend closing the terminal window to detach from the session, but you can also press `ctrl+\` or run `zmx detach`. If you need `ctrl+\` for something else (e.g. vim's `ctrl+\ ctrl+n` to escape its own `:terminal`), set `ZMX_NO_DETACH_KEY` to disable the shortcut and rely on `zmx detach` or closing the window instead.
+> **Important:** We recommend closing the terminal window to detach from the session, but you can also press `ctrl+\` or run `zmx detach`.
+
+To use `ctrl+\ ctrl+n` in Vim or Neovim, disable the detach shortcut when attaching.
+
+```sh
+ZMX_NO_DETACH_KEY=1 zmx attach editor
+```
 
 Run `zmx help` for more information on usage, with examples.
 
