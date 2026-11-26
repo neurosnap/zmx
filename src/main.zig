@@ -69,6 +69,7 @@ fn mainImpl(init: std.process.Init) !void {
         return list(gpa, io, &cfg, false);
     };
 
+    const create_only = std.mem.eql(u8, cmd, "create") or std.mem.eql(u8, cmd, "new");
     if (std.mem.eql(u8, cmd, "version") or std.mem.eql(u8, cmd, "v") or std.mem.eql(u8, cmd, "-v") or std.mem.eql(u8, cmd, "--version")) {
         return printVersion(io, &cfg);
     } else if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "h") or std.mem.eql(u8, cmd, "-h")) {
@@ -159,14 +160,14 @@ fn mainImpl(init: std.process.Init) !void {
         const sesh = try socket.getSeshName(gpa, raw_name);
         defer gpa.free(sesh);
         return history(gpa, io, &cfg, sesh, format, scrollback_rows);
-    } else if (std.mem.eql(u8, cmd, "attach") or std.mem.eql(u8, cmd, "a")) {
-        var attach_args: std.ArrayList([]const u8) = .empty;
-        defer attach_args.deinit(gpa);
+    } else if (create_only or std.mem.eql(u8, cmd, "attach") or std.mem.eql(u8, cmd, "a")) {
+        var session_args: std.ArrayList([]const u8) = .empty;
+        defer session_args.deinit(gpa);
         while (args.next()) |arg| {
-            try attach_args.append(gpa, arg);
+            try session_args.append(gpa, arg);
         }
 
-        const parsed = parseAttachArgs(attach_args.items);
+        const parsed = parseAttachArgs(session_args.items);
         if (parsed.want_help) {
             return help(io);
         }
@@ -178,13 +179,27 @@ fn mainImpl(init: std.process.Init) !void {
         if (parsed.labels) |kvs| assertLabels(io, kvs);
 
         var command: ?[][]const u8 = null;
-        if (parsed.command_start < attach_args.items.len) {
-            command = attach_args.items[parsed.command_start..];
+        if (parsed.command_start < session_args.items.len) {
+            command = session_args.items[parsed.command_start..];
         }
 
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
         const cwd_len = std.process.currentPath(io, &cwd_buf) catch 0;
         const cwd = cwd_buf[0..cwd_len];
+
+        if (create_only) {
+            const created = zmx.create(gpa, io, parsed.session_name, .{
+                .command = command,
+                .cwd = cwd,
+                .shell = shell_env,
+                .labels = parsed.labels,
+            }) catch |err| switch (err) {
+                error.SessionNameRequired => return printError(io, "session name required", .{}),
+                else => return printError(io, "cannot create session \"{s}\": {s}", .{ parsed.session_name, @errorName(err) }),
+            };
+            if (!created) return printError(io, "session \"{s}\" already exists", .{parsed.session_name});
+            return;
+        }
 
         const env_keys = lib_posix.getenv("ZMX_TRACK_ENV") orelse cfg.tracked_envs;
         const env_str = try getTrackedEnvStr(gpa, env_keys, init.environ_map);
@@ -459,6 +474,7 @@ fn help(io: std.Io) !void {
         \\Usage: zmx <command> [args...]
         \\
         \\Commands:
+        \\  create|new [--labels kv] <name> [command...]               Create a session without attaching
         \\  [a]ttach [--labels kv] <name> [command...]                 Attach to session, creating if needed
         \\  [r]un <name> [-d] [--vt] [command...]                      Send command without attaching
         \\  [s]end <name> <text...>                                    Send raw input to session PTY
@@ -478,7 +494,7 @@ fn help(io: std.Io) !void {
         \\  [v]ersion                                                  Show version and metadata (socket dir, log dir)
         \\  [h]elp                                                     Show this help
         \\
-        \\Attach:
+        \\Create and attach:
         \\  This will spawn a login $SHELL with a PTY.  You can provide a
         \\  command instead of creating a shell.
         \\
@@ -487,6 +503,7 @@ fn help(io: std.Io) !void {
         \\  leaves an unlabelled session behind if it dies between them.
         \\
         \\  Examples:
+        \\    zmx create dev
         \\    zmx attach dev
         \\    zmx attach dev vim
         \\    zmx attach --labels "project=api role=worker" build
@@ -1137,7 +1154,7 @@ const AttachArgs = struct {
     missing_labels_value: bool = false,
 };
 
-/// Parses the arguments that follow `zmx attach`. Flags are only recognized
+/// Parses the arguments that follow `zmx attach` or `zmx create`. Flags are only recognized
 /// before the session name, so everything after it stays part of the command
 /// handed to the session.
 fn parseAttachArgs(argv: []const []const u8) AttachArgs {

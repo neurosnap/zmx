@@ -79,6 +79,7 @@ Run `zmx help` for more information on usage, with examples.
 Usage: zmx <command> [args...]
 
 Commands:
+  create|new [--labels kv] <name> [command...]             Create a session without attaching
   [a]ttach <name> [command...]                             Attach to session, creating if needed
   [r]un <name> [-d] [--vt] [command...]                    Send command without attaching
   [s]end <name> <text...>                                  Send raw input to session PTY
