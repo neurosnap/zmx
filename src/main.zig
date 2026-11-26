@@ -314,6 +314,7 @@ fn mainImpl(init: std.process.Init) !void {
             matchers.deinit(gpa);
         }
         var force = false;
+        var has_prefix = false;
         while (args.next()) |session_name| {
             if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
                 return help(io);
@@ -324,11 +325,12 @@ fn mainImpl(init: std.process.Init) !void {
             }
             const m = try socket.parseSessionArg(gpa, session_name);
             try matchers.append(gpa, m);
+            if (m.is_prefix) has_prefix = true;
         }
         if (matchers.items.len == 0) {
             return printError(io, "session name required", .{});
         }
-        const sessions = try zmx.list(gpa, io);
+        const sessions = if (has_prefix) try zmx.list(gpa, io) else &.{};
         defer {
             for (sessions) |session| {
                 session.deinit(gpa);
@@ -336,36 +338,29 @@ fn mainImpl(init: std.process.Init) !void {
             gpa.free(sessions);
         }
 
-        var killed_any = false;
-        for (sessions) |session| {
-            for (matchers.items) |m| {
-                if (!m.matches(session.name)) continue;
-                kill(gpa, io, &cfg, session.name, force) catch |err| {
-                    if (err == error.SessionNotFound and force) {
-                        killed_any = true;
-                        continue;
-                    }
-                    try stderr.print("failed to kill session={s}: {s}\n", .{ session.name, @errorName(err) });
-                    try stderr.flush();
-                };
-                killed_any = true;
-                break;
+        var targets: std.StringArrayHashMapUnmanaged(void) = .empty;
+        defer targets.deinit(gpa);
+        for (matchers.items) |m| {
+            if (m.is_prefix) {
+                for (sessions) |session| {
+                    if (m.matches(session.name)) try targets.put(gpa, session.name, {});
+                }
+            } else {
+                try targets.put(gpa, m.name, {});
             }
         }
-        if (!killed_any) {
-            for (matchers.items) |m| {
-                if (m.is_prefix) continue;
-                kill(gpa, io, &cfg, m.name, force) catch |err| {
-                    if (err == error.SessionNotFound and force) {
-                        killed_any = true;
-                        continue;
-                    }
-                    return printError(io, "failed to kill session={s}: {s}", .{ m.name, @errorName(err) });
-                };
-                killed_any = true;
-            }
-            if (!killed_any) return printError(io, "no matching sessions found", .{});
+        if (targets.count() == 0) return printError(io, "no matching sessions found", .{});
+
+        var failed = false;
+        for (targets.keys()) |name| {
+            kill(gpa, io, name, force) catch |err| {
+                if (force and err == error.SessionNotFound) continue;
+                try stderr.print("failed to kill session={s}: {s}\n", .{ name, @errorName(err) });
+                failed = true;
+            };
         }
+        try stderr.flush();
+        if (failed) std.process.exit(1);
     } else if (std.mem.eql(u8, cmd, "wait") or std.mem.eql(u8, cmd, "w")) {
         var matchers: std.ArrayList(socket.SessionMatch) = .empty;
         defer {
@@ -866,10 +861,10 @@ fn detachAll(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg) !void {
     };
 }
 
-fn kill(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []const u8, force: bool) !void {
-    _ = cfg;
+fn kill(alloc: std.mem.Allocator, io: std.Io, session_name: []const u8, force: bool) !void {
     std.log.info("kill session={s}", .{session_name});
-    const status = zmx.kill(alloc, io, session_name, .{ .force = force }) catch |err| switch (err) {
+    const name = session_name[socket.getSeshPrefix().len..];
+    const status = zmx.kill(alloc, io, name, .{ .force = force }) catch |err| switch (err) {
         error.SessionNotFound => return error.SessionNotFound,
         error.SessionUnresponsive => return error.SessionUnresponsive,
         error.BrokenPipe, error.ConnectionResetByPeer => return,

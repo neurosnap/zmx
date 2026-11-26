@@ -10,6 +10,10 @@ Use spec: https://common-changelog.org/
 
 - `zmx run <name> --vt` preserves terminal escape sequences in the command output
 
+### Fixed
+
+- `zmx kill` exits nonzero if any named session fails to terminate or is missing. `--force` tolerates missing names.
+
 ## v1.0.2 - 2026-11-24
 
 ### Fixed

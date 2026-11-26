@@ -208,6 +208,18 @@ load test_helper
   [[ "$output" == *"killed session kill-b"* ]]
 }
 
+@test "kill: reports missing names and kills the remaining targets" {
+  "$ZMX" run kill-live -d true
+
+  run "$ZMX" kill missing kill-live
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"missing: SessionNotFound"* ]]
+  [[ "$output" == *"killed session kill-live"* ]]
+
+  run "$ZMX" kill --force missing
+  [ "$status" -eq 0 ]
+}
+
 @test "kill --force: removes socket file for dead session" {
   "$ZMX" run test-force -d true
   wait_for_session test-force
