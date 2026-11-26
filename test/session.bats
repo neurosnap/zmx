@@ -52,6 +52,18 @@ load test_helper
   wait_for_output test-dash-d "arg=-d"
 }
 
+@test "run: --vt preserves terminal escape sequences" {
+  local cmd=(sh -c 'printf "\033[31marg=%s\033[0m\033[K\n" "$1"; exit 7' sh --vt)
+  run timeout --foreground 5 "$ZMX" run test-plain "${cmd[@]}"
+  [ "$status" -eq 7 ]
+  [[ "$output" == *"arg=--vt"* ]]
+  [[ "$output" != *$'\033'* ]]
+
+  run timeout --foreground 5 "$ZMX" run test-vt --vt "${cmd[@]}"
+  [ "$status" -eq 7 ]
+  [[ "$output" == *$'\033[31marg=--vt\033[0m\033[K'* ]]
+}
+
 @test "run: requires a command argument" {
   run "$ZMX" run test-nocmd
   [ "$status" -ne 0 ]

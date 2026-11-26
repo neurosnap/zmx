@@ -6,6 +6,10 @@ Use spec: https://common-changelog.org/
 
 - Keep soft-wrapped lines wrapped when replaying a session on attach, so they reflow when the client is resized instead of staying cut at the old width
 
+### Added
+
+- `zmx run <name> --vt` preserves terminal escape sequences in the command output
+
 ## v1.0.2 - 2026-11-24
 
 ### Fixed
