@@ -508,10 +508,7 @@ fn help(io: std.Io) !void {
         \\  Commands run inside a PTY using bash
         \\  Commands are passed as-is: do not wrap in quotes.
         \\  Commands run sequentially: do not send multiple in parallel.
-        \\  Stdin is redirected from /dev/null to prevent interactive programs
-        \\  (pagers, editors, prompts) from blocking. Use `zmx send` for
-        \\  commands that need user input, or pipe data directly:
-        \\    echo "data" | zmx run dev cat
+        \\  If no command-line arguments are specified, zmx reads from stdin.
         \\
         \\  `-d` will detach from the calling terminal. Use `wait` to track
         \\  its status.
@@ -521,8 +518,7 @@ fn help(io: std.Io) !void {
         \\    zmx run dev ls
         \\    zmx run dev zig build
         \\    zmx run dev grep -r TODO src
-        \\    zmx run dev git log --oneline          # pager won't block
-        \\    echo "hello" | zmx run dev cat         # piped stdin still works
+        \\    zmx run dev git --no-pager log --oneline
         \\
         \\    # heredoc
         \\    printf "cat << 'EOF'\r\nHello $USER\r\nToday is $(date).\r\nEOF" | zmx run dev
