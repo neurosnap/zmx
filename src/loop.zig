@@ -13,6 +13,7 @@ const daemonize = @import("daemonize.zig");
 const builtin = @import("builtin");
 const terminal = @import("terminal.zig");
 const ghostty_vt = terminal.ghostty_vt;
+const StatusStream = @import("program_status.zig").Stream;
 
 /// clientLoop sends ipc commands to its corresponding daemon.  It uses poll() as its non-blocking
 /// mechanism. It will send stdin to the daemon and receive stdout from the daemon.
@@ -258,7 +259,7 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
     const init_size = ipc.getTerminalSize(pty_fd);
     var term = try initTerminal(gpa, io, init_size, daemon.cfg);
     defer term.deinit(gpa);
-    var vt_stream = term.vtStream();
+    var vt_stream = StatusStream.init(&term);
     defer vt_stream.deinit();
 
     // Carries the tail of the previous PTY read so the task-exit marker
@@ -378,7 +379,12 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
                     daemon.running = false;
                 } else {
                     // Feed PTY output to terminal emulator for state tracking
-                    vt_stream.nextSlice(buf[0..n]);
+                    const answer_queries = !daemon.hasTerminalClient() and daemon.pending_write == null and
+                        daemon.pty_write_buf.items.len < Daemon.PTY_WRITE_BUF_MAX;
+                    vt_stream.feed(buf[0..n], if (answer_queries) .{
+                        .queue = &daemon.pty_write_buf,
+                        .limit = Daemon.PTY_WRITE_BUF_MAX,
+                    } else null);
                     daemon.setPwd(&term);
                     daemon.has_pty_output = true;
 
@@ -387,10 +393,7 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
                     // This prevents fish from waiting 10s for unanswered queries.
                     // Only clients that sent .Init (a real zmx attach) count,
                     // not a `zmx run` tail-only client.
-                    if (!daemon.hasTerminalClient() and
-                        daemon.pending_write == null and
-                        daemon.pty_write_buf.items.len < Daemon.PTY_WRITE_BUF_MAX)
-                    {
+                    if (answer_queries) {
                         util.respondToDeviceAttributes(gpa, &daemon.pty_write_buf, buf[0..n]);
                     }
 
@@ -497,8 +500,8 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
                     switch (msg.header.tag) {
                         .Input => try daemon.handleInput(gpa, client, msg.payload),
                         .Send => daemon.handleSend(gpa, msg.payload),
-                        .Output => try daemon.handleOutput(gpa, msg.payload, &term, &vt_stream),
-                        .Init => try daemon.handleInit(gpa, client, pty_fd, &term, msg.payload),
+                        .Output => try daemon.handleOutput(gpa, msg.payload, &term, &vt_stream.stream),
+                        .Init => try daemon.handleInit(gpa, client, pty_fd, &vt_stream, msg.payload),
                         .Switch => try daemon.handleSwitch(gpa, msg.payload),
                         .Resize => try daemon.handleResize(gpa, client, pty_fd, &term, msg.payload),
                         .Detach => {
@@ -596,6 +599,15 @@ pub const Client = struct {
         self.read_buf.deinit();
         self.write_buf.deinit(self.alloc);
         if (self.env_str) |s| gpa.free(s);
+    }
+
+    fn restoreProgramStatus(self: *Client, gpa: std.mem.Allocator, stream: *StatusStream) !void {
+        var replay: std.Io.Writer.Allocating = .init(gpa);
+        defer replay.deinit();
+        try stream.writeReplay(&replay.writer);
+        if (replay.written().len == 0) return;
+        try ipc.appendMessage(gpa, &self.write_buf, .Output, replay.written());
+        self.has_pending_output = true;
     }
 
     fn setEnv(self: *Client, gpa: std.mem.Allocator, env_str: []const u8) !void {
@@ -1024,10 +1036,11 @@ pub const Daemon = struct {
         gpa: std.mem.Allocator,
         client: *Client,
         pty_fd: i32,
-        term: *ghostty_vt.Terminal,
+        vt_stream: *StatusStream,
         payload: []const u8,
     ) !void {
         if (payload.len != @sizeOf(ipc.Resize)) return;
+        const term = vt_stream.stream.handler.terminal;
 
         if (!client.is_terminal) {
             client.write_buf.clearRetainingCapacity();
@@ -1070,6 +1083,9 @@ pub const Daemon = struct {
                 client.has_pending_output = true;
             }
         }
+
+        client.restoreProgramStatus(gpa, vt_stream) catch |err|
+            std.log.warn("failed to restore program status err={s}", .{@errorName(err)});
 
         // only resize if leader
         if (is_leader) {

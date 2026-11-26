@@ -4,17 +4,31 @@
 
 load test_helper
 
-# fake_attach <session> <rows> <cols> [hold_seconds]
+# fake_attach <session> <rows> <cols> [hold_seconds | input query reply]
 fake_attach() {
-  local session="$1" rows="$2" cols="$3" hold="${4:-0.2}"
-  python3 - "$ZMX_DIR" "$session" "$rows" "$cols" "$hold" 3>&- <<'PY'
+  python3 - "$ZMX_DIR" "$@" 3>&- <<'PY'
 import os, socket, struct, sys, time
-sock_dir, name, rows, cols, hold = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), float(sys.argv[5])
+sock_dir, name, rows, cols = sys.argv[1:5]
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 s.connect(os.path.join(sock_dir, name))
-payload = struct.pack("<HHHH", rows, cols, 0, 0)            # ipc.Resize
+payload = struct.pack("<HHHH", int(rows), int(cols), 0, 0)            # ipc.Resize
 s.sendall(struct.pack("<BBHI", 7, 1, 0, len(payload)) + payload)  # ipc.Header (tag=7, ver=1, res=0, len)
-time.sleep(hold)
+if len(sys.argv) > 6:
+    initial, query, reply = map(os.fsencode, sys.argv[5:])
+    def send_input(data):
+        s.sendall(struct.pack("<BBHI", 0, 1, 0, len(data)) + data)
+    s.settimeout(5)
+    send_input(initial)
+    with s.makefile("rb") as stream:
+        output = b""
+        while query not in output:
+            tag, _, _, size = struct.unpack("<BBHI", stream.read(8))
+            data = stream.read(size)
+            if tag == 1:
+                output = output[-len(query):] + data
+    send_input(reply)
+else:
+    time.sleep(float(sys.argv[5]) if len(sys.argv) > 5 else 0.2)
 s.close()
 PY
 }
@@ -48,6 +62,26 @@ count() { "$ZMX" history "$1" | grep -o "$2" | wc -l | tr -d ' '; }
   fake_attach test-da2 24 80 5 &
   wait_for_output test-da2 "DA1_TIMEOUT" 5
   kill %1 2>/dev/null || true
+}
+
+@test "OSC 7501 queries get one reply from the daemon or the attached terminal" {
+  "$ZMX" run status -d bash -c '
+    stty -echo -icanon
+    printf -v prefix "\033]7501;?"
+    printf -v bel "\007"
+    printf "%s%s" "$prefix" "$bel"
+    IFS= read -r -t 5 -d "$bel" reply || exit 1
+    [[ $reply == "$prefix" || $reply == "$prefix":* ]] || exit 1
+    printf "DETACHED_%s\n" OK
+
+    IFS= read -r start && [[ $start == start ]] || exit 1
+    printf "%s%s" "$prefix" "$bel"
+    IFS= read -r -t 5 reply && [[ $reply == "$prefix:states=idle$bel" ]] || exit 1
+    printf "ATTACHED_%s\n" OK
+  '
+  wait_for_output status DETACHED_OK
+  fake_attach status 24 80 $'start\n' $'\033]7501;?\a' $'\033]7501;?:states=idle\a\n'
+  wait_for_output status ATTACHED_OK
 }
 
 @test "re-attach at the same size delivers SIGWINCH to foreground process" {
