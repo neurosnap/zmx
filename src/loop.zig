@@ -728,20 +728,24 @@ pub const Daemon = struct {
 
     pub fn closeClient(self: *Daemon, gpa: std.mem.Allocator, client: *Client, i: usize, shutdown_on_last: bool) bool {
         const fd = client.socket_fd;
-        // leader is disconnected, remove ref and let another client claim leader on input
-        if (self.leader_client_fd == client.socket_fd) {
-            std.log.info(
-                "unsetting leader session={s} fd={d}",
-                .{ self.session_name, client.socket_fd },
-            );
-            self.leader_client_fd = null;
-        }
         if (self.pending_write) |*pending| {
             if (pending.client == client) pending.client = null;
         }
         client.deinit(gpa);
         gpa.destroy(client);
         _ = self.clients.orderedRemove(i);
+        // When the leader disconnects, the oldest attached terminal takes over.
+        if (self.leader_client_fd == fd) {
+            std.log.info("unsetting leader session={s} fd={d}", .{ self.session_name, fd });
+            self.leader_client_fd = null;
+            for (self.clients.items) |remaining| {
+                if (!remaining.is_terminal) continue;
+                self.setLeader(gpa, remaining) catch |err| {
+                    std.log.warn("failed to request terminal size err={s}", .{@errorName(err)});
+                };
+                break;
+            }
+        }
         std.log.info("client disconnected fd={d} remaining={d}", .{ fd, self.clients.items.len });
         if (shutdown_on_last and self.clients.items.len == 0) {
             self.shutdown(gpa);
@@ -919,11 +923,11 @@ pub const Daemon = struct {
 
     fn setLeader(self: *Daemon, gpa: std.mem.Allocator, client: *Client) !void {
         std.log.info("setting new leader client_fd={d}", .{client.socket_fd});
-        self.leader_client_fd = client.socket_fd;
         // Send a resize message to the client so it can send us back their window size
         // so we can resize the pty and ghostty state.
         try ipc.appendMessage(gpa, &client.write_buf, .Resize, "");
         client.has_pending_output = true;
+        self.leader_client_fd = client.socket_fd;
     }
 
     fn getLeaderClient(self: *Daemon) ?*Client {
@@ -1120,7 +1124,7 @@ pub const Daemon = struct {
 
     pub fn handleDetachAll(self: *Daemon, gpa: std.mem.Allocator) void {
         std.log.info("detach all clients={d}", .{self.clients.items.len});
-        // Go through closeClient so the leader is cleared like any other detach.
+        self.leader_client_fd = null;
         while (self.clients.items.len > 0) {
             const last = self.clients.items.len - 1;
             _ = self.closeClient(gpa, self.clients.items[last], last, false);
@@ -1631,6 +1635,27 @@ test "hasTerminalClient follows attach, detach and detach-all" {
     daemon.handleDetachAll(alloc);
     try std.testing.expect(!daemon.hasTerminalClient());
     try std.testing.expectEqual(@as(?i32, null), daemon.leader_client_fd);
+}
+
+test "a remaining attached terminal takes over when the leader disconnects" {
+    const alloc = std.testing.allocator;
+    var daemon = testDaemon();
+    defer daemon.clients.deinit(alloc);
+    defer daemon.handleDetachAll(alloc);
+
+    const a = try lib_posix.pipe2(.{});
+    const b = try lib_posix.pipe2(.{});
+    defer lib_posix.close(b[1]);
+    try daemon.clients.append(alloc, try testClient(alloc, a[0], false));
+    const leader = try testClient(alloc, a[1], true);
+    try daemon.clients.append(alloc, leader);
+    const follower = try testClient(alloc, b[0], true);
+    try daemon.clients.append(alloc, follower);
+
+    try daemon.setLeader(alloc, leader);
+    daemon.handleDetach(alloc, leader, 1);
+    try std.testing.expectEqual(follower.socket_fd, daemon.leader_client_fd);
+    try std.testing.expectEqual(.Resize, std.mem.bytesToValue(ipc.Header, follower.write_buf.items).tag);
 }
 
 test "send queues PTY input without changing leader" {
