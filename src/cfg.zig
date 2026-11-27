@@ -184,6 +184,28 @@ test "mkdirAll fails on dangling symlink instead of looping" {
     try std.testing.expectError(error.NotDir, mkdirAll(std.testing.io, target_path, perms));
 }
 
+test "explicit optional definitions preserve required capabilities" {
+    if (!has_daemon) {
+        return error.SkipZigTest;
+    }
+
+    const included = @import("capabilities/definitions.zig");
+    const definitions = [_]CapabilityDefinition{included.program_status};
+    const alloc = std.testing.allocator;
+    var required = try Cfg.initWithOptionalCapabilities(alloc, std.testing.io, &.{});
+    defer required.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 0), required.capabilities.len);
+    var custom = try Cfg.initWithOptionalCapabilities(alloc, std.testing.io, &definitions);
+    defer custom.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 1), custom.capabilities.len);
+    try std.testing.expectEqualStrings("osc7501", custom.capabilities[0].name);
+    try std.testing.expect(custom.capabilities.ptr != definitions[0..].ptr);
+    const definition = included.program_status;
+    try std.testing.expectError(error.DuplicateCapability, Cfg.initWithOptionalCapabilities(alloc, std.testing.io, &.{ definition, definition }));
+}
+
 test "default capability selection ignores the former environment setting" {
     if (!has_daemon) {
         return error.SkipZigTest;
@@ -203,7 +225,7 @@ test "default capability selection ignores the former environment setting" {
 
     // Capability selection belongs to the caller. An inherited variable must
     // neither enable optional behavior nor make an otherwise valid call fail.
-    for ([_][:0]const u8{ "example", "missing" }) |value| {
+    for ([_][:0]const u8{ "osc7501", "missing" }) |value| {
         _ = cross.setenv("ZMX_CAPABILITIES", value, 1);
         var defaults = try Cfg.init(alloc, std.testing.io);
         defer defaults.deinit(alloc);

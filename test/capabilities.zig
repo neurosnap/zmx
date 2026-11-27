@@ -8,6 +8,10 @@ const Session = fixtures.Session;
 const repeat = fixtures.repeat;
 const alloc = std.testing.allocator;
 
+comptime {
+    _ = @import("program_status/test.zig");
+}
+
 test "libzmx exposes the capability authoring API without daemon runtime controls" {
     const declarations = std.meta.declarations(api);
     try std.testing.expectEqual(@as(usize, 4), declarations.len);

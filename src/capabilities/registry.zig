@@ -7,7 +7,7 @@ const api = @import("capability-api");
 const runtime = @import("capability-runtime");
 const definitions = @import("definitions.zig");
 
-const catalog = [_]api.Definition{};
+const catalog = [_]api.Definition{definitions.program_status};
 
 /// Look up comma-separated optional capability names for the command line.
 /// The result contains only the requested optional definitions in request order.
@@ -69,6 +69,27 @@ fn assemble(alloc: std.mem.Allocator, available: []const api.Definition, optiona
     try result.appendSlice(alloc, optional);
     try runtime.validate(result.items);
     return try result.toOwnedSlice(alloc);
+}
+
+test "optional capability names preserve required behavior and reject invalid selections" {
+    const alloc = std.testing.allocator;
+    for ([_][]const u8{ "missing", "osc7501,missing", ",osc7501", "osc7501,", " osc7501" }) |names| {
+        try std.testing.expectError(error.UnknownCapability, resolveOptional(alloc, names));
+    }
+
+    for ([_][]const u8{"osc7501,osc7501"}) |names| {
+        try std.testing.expectError(error.DuplicateCapability, resolveOptional(alloc, names));
+    }
+
+    const empty = try resolveOptional(alloc, "");
+    defer alloc.free(empty);
+
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
+    const enabled = try resolveOptional(alloc, "osc7501");
+    defer alloc.free(enabled);
+
+    try std.testing.expectEqual(@as(usize, 1), enabled.len);
+    try std.testing.expectEqualStrings("osc7501", enabled[0].name);
 }
 
 const RegistryProbe = struct {

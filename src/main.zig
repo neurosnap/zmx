@@ -499,6 +499,7 @@ fn help(io: std.Io) !void {
         \\  Examples:
         \\    zmx attach dev
         \\    zmx attach dev vim
+        \\    zmx attach --capabilities=osc7501 agent
         \\    zmx attach --labels "project=api role=worker" build
         \\
         \\History:
