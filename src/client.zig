@@ -534,14 +534,9 @@ pub fn wait(alloc: Allocator, io: Io, names: []const []const u8) !u8 {
     var cfg = try Cfg.init(alloc, io);
     defer cfg.deinit(alloc);
 
-    var matchers = try std.ArrayList(socket.SessionMatch).initCapacity(alloc, names.len);
-    defer {
-        for (matchers.items) |m| alloc.free(m.name);
-        matchers.deinit(alloc);
-    }
-    for (names) |name| {
-        try matchers.append(alloc, try socket.parseSessionArg(alloc, name));
-    }
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var targets: util.SessionNames = .empty;
 
     var agg_exit_code: u8 = 0;
     while (true) {
@@ -552,18 +547,15 @@ pub fn wait(alloc: Allocator, io: Io, names: []const []const u8) !u8 {
             sessions.deinit(alloc);
         }
 
+        if (targets.count() == 0) {
+            targets = try util.expandSessionArgs(arena.allocator(), io, cfg.socket_dir, names, sessions.items);
+        }
+
         var total: usize = 0;
         var done: usize = 0;
 
         for (sessions.items) |session| {
-            var matched = false;
-            for (matchers.items) |m| {
-                if (m.matches(session.name)) {
-                    matched = true;
-                    break;
-                }
-            }
-            if (!matched) continue;
+            if (!targets.contains(session.name)) continue;
             total += 1;
             if (session.is_error) {
                 agg_exit_code = 1;
@@ -587,60 +579,17 @@ pub fn tail(alloc: Allocator, io: Io, names: []const []const u8, writer: ?*Io.Wr
     var cfg = try Cfg.init(alloc, io);
     defer cfg.deinit(alloc);
 
-    var matchers = try std.ArrayList(socket.SessionMatch).initCapacity(alloc, names.len);
-    defer {
-        for (matchers.items) |m| alloc.free(m.name);
-        matchers.deinit(alloc);
-    }
-    for (names) |name| {
-        try matchers.append(alloc, try socket.parseSessionArg(alloc, name));
-    }
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const targets = try util.expandSessionArgs(arena.allocator(), io, cfg.socket_dir, names, null);
 
-    var resolved_names: std.ArrayList([]const u8) = .empty;
-    defer {
-        for (resolved_names.items) |n| alloc.free(n);
-        resolved_names.deinit(alloc);
-    }
-
-    var any_prefix = false;
-    for (matchers.items) |m| {
-        if (m.is_prefix) {
-            any_prefix = true;
-            break;
-        }
-    }
-
-    if (any_prefix) {
-        var sessions = try util.get_session_entries(alloc, io, cfg.socket_dir);
-        defer {
-            for (sessions.items) |s| s.deinit(alloc);
-            sessions.deinit(alloc);
-        }
-        for (sessions.items) |s| {
-            for (matchers.items) |m| {
-                if (m.matches(s.name)) {
-                    try resolved_names.append(alloc, try alloc.dupe(u8, s.name));
-                    break;
-                }
-            }
-        }
-    }
-
-    for (matchers.items) |m| {
-        if (!m.is_prefix) {
-            try resolved_names.append(alloc, try alloc.dupe(u8, m.name));
-        }
-    }
-
-    if (resolved_names.items.len == 0) return error.SessionNotFound;
-
-    var fds = try std.ArrayList(i32).initCapacity(alloc, resolved_names.items.len);
+    var fds = try std.ArrayList(i32).initCapacity(alloc, targets.count());
     defer {
         for (fds.items) |fd| lib_posix.close(fd);
         fds.deinit(alloc);
     }
 
-    for (resolved_names.items) |session_name| {
+    for (targets.keys()) |session_name| {
         const socket_path = try socket.getSocketPath(alloc, cfg.socket_dir, session_name);
         defer alloc.free(socket_path);
         const sock = try socket.sessionConnect(socket_path);

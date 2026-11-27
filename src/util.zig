@@ -38,6 +38,34 @@ pub const SessionEntry = struct {
     }
 };
 
+pub const SessionNames = std.StringArrayHashMapUnmanaged(void);
+
+pub fn expandSessionArgs(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    socket_dir: []const u8,
+    args: []const []const u8,
+    sessions: ?[]const SessionEntry,
+) !SessionNames {
+    var available = sessions;
+    var names: SessionNames = .empty;
+    for (args) |arg| {
+        const match = try socket.parseSessionArg(arena, arg);
+        if (!match.is_prefix) {
+            try names.put(arena, match.name, {});
+            continue;
+        }
+        if (available == null) available = (try get_session_entries(arena, io, socket_dir)).items;
+        for (available.?) |session| {
+            if (match.matches(session.name) and !names.contains(session.name)) {
+                try names.put(arena, try arena.dupe(u8, session.name), {});
+            }
+        }
+    }
+    if (names.count() == 0) return error.SessionNameRequired;
+    return names;
+}
+
 pub fn get_session_entries(
     alloc: std.mem.Allocator,
     io: std.Io,

@@ -122,5 +122,5 @@ export ZMX_SESSION_PREFIX="d."
 zmx a runner # ZMX_SESSION=d.runner
 zmx a tests  # ZMX_SESSION=d.tests
 zmx k tests  # kills d.tests
-zmx wait     # suspends until all tasks prefixed with "d." are complete
+zmx wait '*' # waits for tasks in the current set of d.* sessions
 ```
