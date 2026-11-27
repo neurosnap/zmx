@@ -1,3 +1,5 @@
+const std = @import("std");
+
 comptime {
     _ = @import("main.zig");
     _ = @import("util.zig");
@@ -9,6 +11,9 @@ comptime {
     _ = @import("terminal.zig");
     _ = @import("cfg.zig");
     _ = @import("daemonize.zig");
-    _ = @import("lib.zig");
     _ = @import("client.zig");
+}
+
+test {
+    std.testing.refAllDecls(@import("lib.zig"));
 }
