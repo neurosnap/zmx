@@ -577,7 +577,7 @@ pub fn wait(alloc: Allocator, io: Io, names: []const []const u8) !u8 {
         }
 
         if (total > 0 and done == total) return agg_exit_code;
-        std.time.sleep(50 * std.time.ns_per_ms);
+        try Io.sleep(io, Io.Duration.fromMilliseconds(50), .real);
     }
 }
 
