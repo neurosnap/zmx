@@ -306,13 +306,8 @@ fn mainImpl(init: std.process.Init) !void {
         var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
         const stderr = &stderr_writer.interface;
 
-        var matchers: std.ArrayList(socket.SessionMatch) = .empty;
-        defer {
-            for (matchers.items) |m| {
-                gpa.free(m.name);
-            }
-            matchers.deinit(gpa);
-        }
+        var names: std.ArrayList([]const u8) = .empty;
+        defer names.deinit(gpa);
         var force = false;
         while (args.next()) |session_name| {
             if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
@@ -322,12 +317,9 @@ fn mainImpl(init: std.process.Init) !void {
                 force = true;
                 continue;
             }
-            const m = try socket.parseSessionArg(gpa, session_name);
-            try matchers.append(gpa, m);
+            try names.append(gpa, session_name);
         }
-        if (matchers.items.len == 0) {
-            return printError(io, "session name required", .{});
-        }
+        if (names.items.len == 0) return printError(io, "session name required", .{});
         const sessions = try zmx.list(gpa, io);
         defer {
             for (sessions) |session| {
@@ -336,55 +328,45 @@ fn mainImpl(init: std.process.Init) !void {
             gpa.free(sessions);
         }
 
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+        const targets = util.expandSessionArgs(arena.allocator(), io, cfg.socket_dir, names.items, sessions) catch |err| switch (err) {
+            error.SessionNameRequired => return printError(io, "session name required", .{}),
+            else => return err,
+        };
+
         var killed_any = false;
         for (sessions) |session| {
-            for (matchers.items) |m| {
-                if (!m.matches(session.name)) continue;
-                kill(gpa, io, &cfg, session.name, force) catch |err| {
-                    if (err == error.SessionNotFound and force) {
-                        killed_any = true;
-                        continue;
-                    }
-                    try stderr.print("failed to kill session={s}: {s}\n", .{ session.name, @errorName(err) });
-                    try stderr.flush();
-                };
-                killed_any = true;
-                break;
-            }
+            if (!targets.contains(session.name)) continue;
+            kill(gpa, io, &cfg, session.name, force) catch |err| {
+                if (err == error.SessionNotFound and force) {
+                    killed_any = true;
+                    continue;
+                }
+                try stderr.print("failed to kill session={s}: {s}\n", .{ session.name, @errorName(err) });
+                try stderr.flush();
+            };
+            killed_any = true;
         }
         if (!killed_any) {
-            for (matchers.items) |m| {
-                if (m.is_prefix) continue;
-                kill(gpa, io, &cfg, m.name, force) catch |err| {
-                    if (err == error.SessionNotFound and force) {
-                        killed_any = true;
-                        continue;
-                    }
-                    return printError(io, "failed to kill session={s}: {s}", .{ m.name, @errorName(err) });
+            for (targets.keys()) |name| {
+                kill(gpa, io, &cfg, name, force) catch |err| {
+                    if (err == error.SessionNotFound and force) continue;
+                    return printError(io, "failed to kill session={s}: {s}", .{ name, @errorName(err) });
                 };
-                killed_any = true;
             }
-            if (!killed_any) return printError(io, "no matching sessions found", .{});
         }
     } else if (std.mem.eql(u8, cmd, "wait") or std.mem.eql(u8, cmd, "w")) {
-        var matchers: std.ArrayList(socket.SessionMatch) = .empty;
-        defer {
-            for (matchers.items) |m| {
-                gpa.free(m.name);
-            }
-            matchers.deinit(gpa);
+        var names: std.ArrayList([]const u8) = .empty;
+        defer names.deinit(gpa);
+        while (args.next()) |name| {
+            if (detectHelp(name)) return help(io);
+            try names.append(gpa, name);
         }
-        while (args.next()) |session_name| {
-            if (std.mem.eql(u8, session_name, "--help") or std.mem.eql(u8, session_name, "-h")) {
-                return help(io);
-            }
-            const m = try socket.parseSessionArg(gpa, session_name);
-            try matchers.append(gpa, m);
-        }
-        if (matchers.items.len == 0) {
-            return printError(io, "session name required", .{});
-        }
-        return wait(gpa, io, &cfg, matchers);
+        return wait(gpa, io, cfg.socket_dir, names.items) catch |err| switch (err) {
+            error.SessionNameRequired => printError(io, "session name required", .{}),
+            else => return err,
+        };
     } else if (std.mem.eql(u8, cmd, "tail") or std.mem.eql(u8, cmd, "t")) {
         var names: std.ArrayList([]const u8) = .empty;
         defer names.deinit(gpa);
@@ -394,11 +376,8 @@ fn mainImpl(init: std.process.Init) !void {
             }
             try names.append(gpa, session_name);
         }
-        if (names.items.len == 0) {
-            return printError(io, "session name required", .{});
-        }
         _ = zmx.tail(gpa, io, names.items, null) catch |err| switch (err) {
-            error.SessionNotFound => return printError(io, "no matching sessions found", .{}),
+            error.SessionNameRequired => return printError(io, "session name required", .{}),
             else => return err,
         };
     } else if (std.mem.eql(u8, cmd, "write") or std.mem.eql(u8, cmd, "wr")) {
@@ -638,8 +617,12 @@ fn printCompletions(io: std.Io, shell: completions.Shell) !void {
     try w.interface.flush();
 }
 
-fn wait(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, matchers: std.ArrayList(socket.SessionMatch)) !void {
-    _ = cfg;
+fn wait(alloc: std.mem.Allocator, io: std.Io, socket_dir: []const u8, args: []const []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    if (args.len == 0) return error.SessionNameRequired;
+    var targets: util.SessionNames = .empty;
+
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
@@ -666,18 +649,14 @@ fn wait(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, matchers: std.ArrayList
             }
             alloc.free(sessions);
         }
+        if (targets.count() == 0) {
+            targets = try util.expandSessionArgs(arena.allocator(), io, socket_dir, args, sessions);
+        }
         var total: i32 = 0;
         var done: i32 = 0;
 
         for (sessions) |session| {
-            var found = false;
-            for (matchers.items) |m| {
-                if (m.matches(session.name)) {
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) continue;
+            if (!targets.contains(session.name)) continue;
 
             total += 1;
             if (session.is_error) {
@@ -775,14 +754,7 @@ fn wait(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, matchers: std.ArrayList
         alloc.free(sessions);
     }
     for (sessions) |session| {
-        var found = false;
-        for (matchers.items) |m| {
-            if (m.matches(session.name)) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) continue;
+        if (!targets.contains(session.name)) continue;
         if (session.task_exit_code.? > 0) {
             try stdout.print("---\n", .{});
             try stdout.print("[{d}] failed task={s} exit_status={d}\n", .{
@@ -869,7 +841,8 @@ fn detachAll(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg) !void {
 fn kill(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []const u8, force: bool) !void {
     _ = cfg;
     std.log.info("kill session={s}", .{session_name});
-    const status = zmx.kill(alloc, io, session_name, .{ .force = force }) catch |err| switch (err) {
+    const name = session_name[socket.getSeshPrefix().len..];
+    const status = zmx.kill(alloc, io, name, .{ .force = force }) catch |err| switch (err) {
         error.SessionNotFound => return error.SessionNotFound,
         error.SessionUnresponsive => return error.SessionUnresponsive,
         error.BrokenPipe, error.ConnectionResetByPeer => return,

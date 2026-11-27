@@ -86,6 +86,14 @@ load test_helper
   [[ "$output" == *"session name required"* ]]
 }
 
+@test "unmatched session patterns are equivalent to no arguments" {
+  for cmd in kill wait tail; do
+    run "$ZMX" "$cmd" 'missing*'
+    [ "$status" -eq 1 ]
+    [ "$output" = "error: session name required" ]
+  done
+}
+
 @test "send with no argument exits non-zero" {
   run "$ZMX" send
   [ "$status" -ne 0 ]
