@@ -26,6 +26,12 @@
 - Use `zmx` as a zig package
 - This project does **NOT** provide windows, tabs, or splits
 
+## daemon capabilities
+
+Capabilities let applications embedding libzmx add session behavior through a
+shared API. See [daemon capabilities](docs/capabilities.md) for configuration
+and implementation.
+
 ## demos
 
 - [zmx - intro](https://youtu.be/UIXj0_rhPgI)

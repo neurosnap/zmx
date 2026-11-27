@@ -41,6 +41,7 @@ Because of the IPC changes made to this project I also want the ABI contract to 
 
 ### Added
 
+- A daemon capability interface for session features
 - zmx as a zig package
 - Completions for [`yash`](https://magicant.github.io/yash/)
 - History command now accepts --screen (print only active screen) and --scrollback (num of rows to print)
