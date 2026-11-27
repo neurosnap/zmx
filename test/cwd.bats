@@ -10,6 +10,20 @@
 
 load test_helper
 
+@test "create: cwd starts the command in an absolute directory with spaces" {
+  local dir="$BATS_TEST_TMPDIR/project dir"
+  mkdir -p "$dir"
+  "$ZMX" create -c "$dir" test-create-cwd sh -c 'pwd; exec cat'
+  wait_for_output test-create-cwd "$dir"
+}
+
+@test "create: cwd resolves relative paths from the caller" {
+  cd "$BATS_TEST_TMPDIR"
+  mkdir -p project
+  "$ZMX" new --cwd=project test-create-relative sh -c 'pwd; exec cat'
+  wait_for_output test-create-relative "$BATS_TEST_TMPDIR/project"
+}
+
 # Emit an OSC 7 for $2 from inside session $1, as a shell integration would.
 osc7_session() {
   local name="$1" path="$2" encoded

@@ -4,6 +4,27 @@
 
 load test_helper
 
+@test "create rejects missing or empty cwd" {
+  for arg in -c --cwd --cwd=; do
+    run "$ZMX" create "$arg"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--cwd requires a directory"* ]]
+  done
+  run "$ZMX" create --cwd "" test-empty-cwd
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"--cwd requires a directory"* ]]
+  [ -z "$("$ZMX" list --short)" ]
+}
+
+@test "create rejects invalid cwd before creating a session" {
+  for dir in "$BATS_TEST_TMPDIR/missing" "$BATS_TEST_FILENAME"; do
+    run "$ZMX" create --cwd "$dir" test-invalid-cwd
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"cannot open directory"* ]]
+  done
+  [ -z "$("$ZMX" list --short)" ]
+}
+
 # ============================================================================
 # Invalid commands must exit non-zero
 # ============================================================================
