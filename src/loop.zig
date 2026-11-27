@@ -69,6 +69,7 @@ pub fn clientLoop(client_sock_fd: i32, env_str: []const u8) !ClientResult {
 
     var stdout_buf = try std.ArrayList(u8).initCapacity(gpa, 4096);
     defer stdout_buf.deinit(gpa);
+    var stdout_offset: usize = 0;
 
     const stdin_fd = lib_posix.STDIN_FILENO;
 
@@ -103,7 +104,7 @@ pub fn clientLoop(client_sock_fd: i32, env_str: []const u8) !ClientResult {
 
         try poll_fds.append(gpa, .{ .fd = signal.sig_pipe[0], .events = lib_posix.POLL.IN, .revents = 0 });
 
-        if (stdout_buf.items.len > 0) {
+        if (stdout_offset < stdout_buf.items.len) {
             try poll_fds.append(gpa, .{
                 .fd = lib_posix.STDOUT_FILENO,
                 .events = lib_posix.POLL.OUT,
@@ -219,13 +220,18 @@ pub fn clientLoop(client_sock_fd: i32, env_str: []const u8) !ClientResult {
             }
         }
 
-        if (stdout_buf.items.len > 0) {
-            const n = lib_posix.write(lib_posix.STDOUT_FILENO, stdout_buf.items) catch |err| blk: {
+        const unwritten = stdout_buf.items[stdout_offset..];
+        if (unwritten.len > 0) {
+            const n = lib_posix.write(lib_posix.STDOUT_FILENO, unwritten) catch |err| blk: {
                 if (err == error.WouldBlock) break :blk 0;
                 return err;
             };
             if (n > 0) {
-                try stdout_buf.replaceRange(gpa, 0, n, &[_]u8{});
+                stdout_offset += n;
+                if (stdout_offset >= stdout_buf.items.len - stdout_offset) {
+                    stdout_buf.replaceRangeAssumeCapacity(0, stdout_offset, &.{});
+                    stdout_offset = 0;
+                }
             }
         }
 
