@@ -12,4 +12,5 @@
 //! });
 //! ```
 //! Always-active capabilities are included automatically. Do not add them again.
+pub const working_directory = @import("working_directory/main.zig").definition;
 pub const program_status = @import("program_status/main.zig").definition;

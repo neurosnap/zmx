@@ -195,12 +195,14 @@ test "explicit optional definitions preserve required capabilities" {
     var required = try Cfg.initWithOptionalCapabilities(alloc, std.testing.io, &.{});
     defer required.deinit(alloc);
 
-    try std.testing.expectEqual(@as(usize, 0), required.capabilities.len);
+    try std.testing.expectEqual(@as(usize, 1), required.capabilities.len);
+    try std.testing.expectEqualStrings("osc7", required.capabilities[0].name);
     var custom = try Cfg.initWithOptionalCapabilities(alloc, std.testing.io, &definitions);
     defer custom.deinit(alloc);
 
-    try std.testing.expectEqual(@as(usize, 1), custom.capabilities.len);
-    try std.testing.expectEqualStrings("osc7501", custom.capabilities[0].name);
+    try std.testing.expectEqual(@as(usize, 2), custom.capabilities.len);
+    try std.testing.expectEqualStrings("osc7", custom.capabilities[0].name);
+    try std.testing.expectEqualStrings("osc7501", custom.capabilities[1].name);
     try std.testing.expect(custom.capabilities.ptr != definitions[0..].ptr);
     const definition = included.program_status;
     try std.testing.expectError(error.DuplicateCapability, Cfg.initWithOptionalCapabilities(alloc, std.testing.io, &.{ definition, definition }));
@@ -230,6 +232,7 @@ test "default capability selection ignores the former environment setting" {
         var defaults = try Cfg.init(alloc, std.testing.io);
         defer defaults.deinit(alloc);
 
-        try std.testing.expectEqual(@as(usize, 0), defaults.capabilities.len);
+        try std.testing.expectEqual(@as(usize, 1), defaults.capabilities.len);
+        try std.testing.expectEqualStrings("osc7", defaults.capabilities[0].name);
     }
 }

@@ -1868,6 +1868,39 @@ test "capability replies preserve the daemon PTY queue whole message limit" {
     try std.testing.expectEqualStrings("complete-reply", daemon.pty_write_buf.items);
 }
 
+test "Ghostty directory updates session metadata and preserves the last known directory on reset" {
+    const alloc = std.testing.allocator;
+    const cfg = Cfg{ .socket_dir = "", .log_dir = "" };
+    var daemon = testDaemon();
+    var term = try initTerminal(alloc, std.testing.io, .{ .cols = 80, .rows = 24 }, &cfg);
+    defer term.deinit(alloc);
+
+    var session = try capabilities.Session.init(alloc, &.{@import("capabilities/definitions.zig").working_directory});
+    defer session.deinit();
+
+    var stream = capabilities.initStream(&term, &session, daemon.capabilityReplies());
+    defer stream.deinit();
+
+    daemon.capability_stream = &stream;
+    daemon.setCwd("/tmp/start");
+    daemon.setPwd(&term);
+    try std.testing.expectEqualStrings("/tmp/start", daemon.cwd_path);
+
+    stream.nextSlice("\x1b]7;file://localhost/tmp/new%20directory\x07");
+    daemon.setPwd(&term);
+    try std.testing.expectEqualStrings("/tmp/new directory", daemon.cwd_path);
+    try std.testing.expectEqualStrings("file://localhost/tmp/new%20directory", daemon.cwd);
+
+    stream.nextSlice("\x1bc");
+    daemon.setPwd(&term);
+    try std.testing.expectEqualStrings("/tmp/new directory", daemon.cwd_path);
+
+    stream.nextSlice("\x1b]7;file://remote.invalid/tmp/remote\x07");
+    daemon.setPwd(&term);
+    try std.testing.expectEqualStrings("file://remote.invalid/tmp/remote", daemon.cwd);
+    try std.testing.expectEqualStrings("", daemon.cwd_path);
+}
+
 test "session directory metadata uses Ghostty without a capability callback" {
     const alloc = std.testing.allocator;
     const cfg = Cfg{ .socket_dir = "", .log_dir = "" };

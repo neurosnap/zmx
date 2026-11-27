@@ -7,7 +7,7 @@ const api = @import("capability-api");
 const runtime = @import("capability-runtime");
 const definitions = @import("definitions.zig");
 
-const catalog = [_]api.Definition{definitions.program_status};
+const catalog = [_]api.Definition{ definitions.working_directory, definitions.program_status };
 
 /// Look up comma-separated optional capability names for the command line.
 /// The result contains only the requested optional definitions in request order.
@@ -77,7 +77,7 @@ test "optional capability names preserve required behavior and reject invalid se
         try std.testing.expectError(error.UnknownCapability, resolveOptional(alloc, names));
     }
 
-    for ([_][]const u8{"osc7501,osc7501"}) |names| {
+    for ([_][]const u8{ "osc7501,osc7501", "osc7", "osc7,osc7501" }) |names| {
         try std.testing.expectError(error.DuplicateCapability, resolveOptional(alloc, names));
     }
 

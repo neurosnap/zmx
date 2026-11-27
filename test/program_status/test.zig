@@ -287,6 +287,37 @@ test "Program Status records survive an oversized unrelated unfinished command" 
     try std.testing.expect(std.mem.endsWith(u8, recovered, "\x1b]7501;state=idle"));
 }
 
+test "Program Status save failure does not prevent OSC 7 directory restoration" {
+    const directory = "\x1b]7;file://localhost/tmp\x1b\\";
+    var session: Session = .{};
+    try session.init(&.{
+        @import("zmx").capability_definitions.working_directory,
+        @import("zmx").capability_definitions.program_status,
+    });
+    defer session.deinit();
+
+    session.stream.nextSlice(directory);
+    sendReport(&session, "state=done:app=test");
+
+    // Lose one Program Status update while leaving the shared parser available.
+    // A reconnect should still restore the independent directory information.
+    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    session.host.alloc = failing.allocator();
+    sendReport(&session, "state=blocked");
+    session.host.alloc = alloc;
+    try std.testing.expect(failing.has_induced_failure);
+    const incomplete = try session.snapshot();
+    defer alloc.free(incomplete);
+
+    try std.testing.expectEqualStrings(directory, incomplete);
+    sendReport(&session, "state=clear");
+    sendReport(&session, "state=idle");
+    const recovered = try session.snapshot();
+    defer alloc.free(recovered);
+
+    try std.testing.expectEqualStrings(directory ++ clear ++ "\x1b]7501;state=idle\x1b\\", recovered);
+}
+
 test "Program Status capacity allocation failure suppresses restore without leaking copied bytes" {
     var session: Session = .{};
     try session.init(&osc_definitions);

@@ -10,6 +10,7 @@ const alloc = std.testing.allocator;
 
 comptime {
     _ = @import("program_status/test.zig");
+    _ = @import("working_directory/test.zig");
 }
 
 test "libzmx exposes the capability authoring API without daemon runtime controls" {
