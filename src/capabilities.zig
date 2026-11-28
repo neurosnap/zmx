@@ -6,7 +6,9 @@ const ghostty = @import("ghostty-vt");
 const Allocator = std.mem.Allocator;
 
 // The fixed set of handlers run by every daemon, in observation and restore order.
-const States = struct {};
+const States = struct {
+    program_status: @import("capabilities/program_status.zig") = .{},
+};
 
 /// An 'Event' is a parsed action or an accepted shell notification.
 /// Its bytes are borrowed until 'observe' returns.
@@ -229,4 +231,5 @@ test "a failed handler restore preserves queued output and later snapshots" {
 
 test {
     _ = @import("capabilities/test.zig");
+    _ = @import("capabilities/program_status_test.zig");
 }

@@ -26,6 +26,13 @@
 - Use `zmx` as a zig package
 - This project does **NOT** provide windows, tabs, or splits
 
+## program status
+
+zmx remembers [OSC 7501 Program Status](https://www.superlogical.com/rex/docs/build/program-status)
+reports and restores them when a terminal reconnects. Programs can report whether
+they are working, waiting for input, or finished, including separate child tasks.
+See [daemon capabilities](docs/capabilities.md) for the internal handler structure.
+
 ## demos
 
 - [zmx - intro](https://youtu.be/UIXj0_rhPgI)
