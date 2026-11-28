@@ -70,22 +70,15 @@ pub fn create(alloc: Allocator, io: Io, name: []const u8, opts: CreateOptions) !
     var dir = try std.Io.Dir.openDirAbsolute(io, cfg.socket_dir, .{});
     defer dir.close(io);
 
-    const exists = try socket.sessionExists(io, dir, sesh);
-    var should_create = !exists;
-    if (exists) {
+    if (try socket.sessionExists(io, dir, sesh)) {
         if (ipc.connectSession(socket_path)) |fd| {
             lib_posix.close(fd);
             return false;
         } else |err| switch (err) {
-            error.ConnectionRefused => {
-                socket.cleanupStaleSocket(io, dir, sesh);
-                should_create = true;
-            },
-            else => return false,
+            error.ConnectionRefused => socket.cleanupStaleSocket(io, dir, sesh),
+            else => return err,
         }
     }
-
-    if (!should_create) return false;
 
     var daemon = Daemon.init(io, &cfg, sesh, socket_path);
     daemon.command = opts.command;
@@ -94,13 +87,16 @@ pub fn create(alloc: Allocator, io: Io, name: []const u8, opts: CreateOptions) !
     daemon.is_task_mode = opts.is_task_mode;
     daemon.quiet = opts.quiet;
 
-    const is_daemon_proc = try daemon.ensureSession(io);
+    const is_daemon_proc = daemon.run(io, dir, sesh) catch |err| switch (err) {
+        error.AddressInUse => return false,
+        else => return err,
+    };
     if (is_daemon_proc) {
         std.process.exit(0);
     }
 
     if (opts.labels) |kvs| {
-        try set(alloc, io, sesh, kvs);
+        try set(alloc, io, name, kvs);
     }
 
     return true;
