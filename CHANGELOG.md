@@ -8,6 +8,8 @@ Use spec: https://common-changelog.org/
 
 ### Added
 
+- Restore OSC 7501 Program Status reports when a terminal reconnects
+
 - `zmx run <name> --vt` preserves terminal escape sequences in the command output
 
 ## v1.0.2 - 2026-11-24
