@@ -16,3 +16,6 @@ prevent other handlers from restoring.
 OSC 7501 Program Status keeps the latest report for each task. It answers support
 queries while detached and restores the reports on reconnect. Its task records,
 limits, and prompt/reset rules live in `src/capabilities/program_status.zig`.
+
+OSC 7 working directory restoration reads Ghostty's existing directory value.
+The daemon's directory tracking for session listings and new shells is unchanged.

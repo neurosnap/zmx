@@ -1851,7 +1851,7 @@ test "handleInit queues the saved screen before capability restoration and unfin
     defer stream.deinit();
 
     daemon.capability_stream = &stream;
-    stream.nextSlice("screen-survives\x1b]0;unfinished");
+    stream.nextSlice("\x1b]7;file://localhost/tmp\x07screen-survives\x1b]0;unfinished");
     daemon.has_pty_output = true;
 
     const pipes = try lib_posix.pipe2(.{});
@@ -1875,11 +1875,14 @@ test "handleInit queues the saved screen before capability restoration and unfin
     const screen = messages.next().?;
     try std.testing.expectEqual(.Output, screen.header.tag);
     try std.testing.expect(std.mem.indexOf(u8, screen.payload, "screen-survives") != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, screen.payload, 0) == null);
     var remaining: std.ArrayList(u8) = .empty;
     defer remaining.deinit(alloc);
     while (messages.next()) |message| {
         try std.testing.expectEqual(.Output, message.header.tag);
         try remaining.appendSlice(alloc, message.payload);
     }
+    try std.testing.expect(std.mem.startsWith(u8, remaining.items, "\x1b]7;file://localhost/tmp\x1b\\"));
+    try std.testing.expect(std.mem.indexOfScalar(u8, remaining.items, 0) == null);
     try std.testing.expect(std.mem.endsWith(u8, remaining.items, "\x1b]0;unfinished"));
 }

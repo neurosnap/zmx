@@ -7,6 +7,7 @@ const Allocator = std.mem.Allocator;
 
 // The fixed set of handlers run by every daemon, in observation and restore order.
 const States = struct {
+    working_directory: @import("capabilities/working_directory.zig") = .{},
     program_status: @import("capabilities/program_status.zig") = .{},
 };
 
@@ -232,4 +233,5 @@ test "a failed handler restore preserves queued output and later snapshots" {
 test {
     _ = @import("capabilities/test.zig");
     _ = @import("capabilities/program_status_test.zig");
+    _ = @import("capabilities/working_directory_test.zig");
 }
