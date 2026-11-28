@@ -1,3 +1,4 @@
+const osc7 = @import("osc/osc7.zig");
 const std = @import("std");
 const build_options = @import("build_options");
 const util = @import("util.zig");
@@ -77,24 +78,6 @@ pub fn isUserInput(payload: []const u8) bool {
         i += 1;
     }
     return false;
-}
-
-/// Emit the terminal's pwd as OSC 7.
-///
-/// This replaces the formatter's own `extra.pwd`, which writes
-/// `terminal.pwd.items` verbatim. `Terminal.setPwd` appends a NUL sentinel to
-/// that buffer, so the formatter's OSC 7 carries a stray `\x00` before the
-/// terminator. `getPwd()` returns the same bytes without the sentinel.
-///
-/// The NUL is not cosmetic: a client that records what it receives (kitty
-/// writing its session file, for one) persists the NUL and then fails to parse
-/// its own state back. See https://github.com/neurosnap/zmx/issues/222.
-fn writePwd(writer: *std.Io.Writer, term: *const ghostty_vt.Terminal) void {
-    const pwd = term.getPwd() orelse return;
-    if (pwd.len == 0) return;
-    writer.print("\x1b]7;{s}\x1b\\", .{pwd}) catch |err| {
-        std.log.warn("failed to format pwd err={s}", .{@errorName(err)});
-    };
 }
 
 fn writeDynamicColor(
@@ -236,7 +219,7 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
         return null;
     };
 
-    writePwd(&builder.writer, term);
+    osc7.writeCwd(&builder.writer, term.getPwd());
 
     // The formatter has no title extra and never emits OSC 0/1/2, so the title
     // has to be replayed separately or an attaching client shows whatever its
@@ -319,7 +302,7 @@ pub fn serializeTerminalRange(
         return null;
     };
 
-    if (format == .vt) writePwd(&builder.writer, term);
+    if (format == .vt) osc7.writeCwd(&builder.writer, term.getPwd());
 
     const output = builder.writer.buffered();
     if (output.len == 0) return null;

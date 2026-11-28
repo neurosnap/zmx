@@ -1,3 +1,4 @@
+const osc7 = @import("osc/osc7.zig");
 const std = @import("std");
 const ipc = @import("ipc.zig");
 const log = @import("log.zig");
@@ -385,7 +386,7 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
                 } else {
                     // Feed PTY output to terminal emulator for state tracking
                     vt_stream.nextSlice(buf[0..n]);
-                    daemon.setPwd(&term);
+                    daemon.cwd.update(term.getPwd());
                     daemon.has_pty_output = true;
 
                     // When no real terminal client has attached yet, respond to
@@ -656,18 +657,7 @@ pub const Daemon = struct {
     running: bool = true,
     pid: i32 = undefined,
     command: ?[]const []const u8 = null,
-    /// The session's working directory in OSC 7 form, `file://<host><path>`.
-    /// Kept as a URI rather than a path so `zmx list` shows the host, which is
-    /// what tells you a session is inside SSH. Points into `cwd_buf` once set,
-    /// so a Daemon must not be copied by value after that.
-    cwd: []const u8 = "",
-    /// The same directory as a path that can be opened: percent-decoding
-    /// applied, scheme and host stripped. Empty when the cwd is on another
-    /// host, since then it names no directory here and nothing should chdir
-    /// into it. Points into `cwd_path_buf`.
-    cwd_path: []const u8 = "",
-    cwd_buf: [std.fs.max_path_bytes]u8 = undefined,
-    cwd_path_buf: [std.fs.max_path_bytes]u8 = undefined,
+    cwd: osc7.Directory = .{},
     has_pty_output: bool = false,
     created_at: u64, // unix timestamp (ns)
     is_task_mode: bool = false, // flag for when session is run as a task
@@ -824,18 +814,20 @@ pub const Daemon = struct {
         var keep_fds_open = [_]i32{ server_sock_fd, dir.handle, log_fd };
         const cmd = try daemonize.createCmdZ(self.shell, self.is_task_mode, self.command);
 
-        // `cwd_path` is the decoded path, and is empty when the cwd is on
+        // `local_path` is the decoded path, and is null when the cwd is on
         // another host: OSC 7 crosses SSH boundaries, so a session that ssh'd
         // elsewhere reports a directory that does not exist on this machine.
-        std.log.info("checking pwd={s} path={s}", .{ self.cwd, self.cwd_path });
-        if (self.cwd_path.len > 0) {
-            const pwd_dir = std.Io.Dir.openDirAbsolute(io, self.cwd_path, .{}) catch |err| blk: {
-                std.log.warn("failed to open dir={s} err={s}", .{ self.cwd_path, @errorName(err) });
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const local_path = self.cwd.localPath(&path_buf);
+        std.log.info("checking pwd={s} path={s}", .{ self.cwd.uri, local_path orelse "" });
+        if (local_path) |path| {
+            const pwd_dir = std.Io.Dir.openDirAbsolute(io, path, .{}) catch |err| blk: {
+                std.log.warn("failed to open dir={s} err={s}", .{ path, @errorName(err) });
                 break :blk null;
             };
             if (pwd_dir) |pdir| {
                 defer std.Io.Dir.close(pdir, io);
-                std.log.info("set directory dir={s}", .{self.cwd_path});
+                std.log.info("set directory dir={s}", .{path});
                 try std.process.setCurrentDir(io, pdir);
             }
         }
@@ -1003,12 +995,13 @@ pub const Daemon = struct {
                 // in the right directory. A remote cwd is left out: it names no
                 // directory here, so the new session is better off with the
                 // attaching client's own cwd than with a path it cannot enter.
-                if (self.cwd.len > 0 and self.cwd_path.len > 0) {
-                    var payload = gpa.alloc(u8, session_name.len + 1 + self.cwd.len) catch return;
+                var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+                if (self.cwd.localPath(&path_buf) != null) {
+                    var payload = gpa.alloc(u8, session_name.len + 1 + self.cwd.uri.len) catch return;
                     defer gpa.free(payload);
                     @memcpy(payload[0..session_name.len], session_name);
                     payload[session_name.len] = '\n';
-                    @memcpy(payload[session_name.len + 1 ..], self.cwd);
+                    @memcpy(payload[session_name.len + 1 ..], self.cwd.uri);
                     ipc.appendMessage(gpa, &client.write_buf, .Switch, payload) catch |err| {
                         std.log.warn(
                             "failed to buffer terminal state for client err={s}",
@@ -1155,7 +1148,7 @@ pub const Daemon = struct {
     }
 
     pub fn handleInfo(self: *Daemon, gpa: std.mem.Allocator, client: *Client, term: *ghostty_vt.Terminal) !void {
-        self.setPwd(term);
+        self.cwd.update(term.getPwd());
 
         // zeroes() so asBytes() doesn't ship struct padding + unused cmd/cwd
         // tail bytes (daemon stack contents) to clients.
@@ -1198,8 +1191,8 @@ pub const Daemon = struct {
             }
         }
 
-        info.cwd_len = @intCast(@min(self.cwd.len, ipc.MAX_CWD_LEN));
-        @memcpy(info.cwd[0..info.cwd_len], self.cwd[0..info.cwd_len]);
+        info.cwd_len = @intCast(@min(self.cwd.uri.len, ipc.MAX_CWD_LEN));
+        @memcpy(info.cwd[0..info.cwd_len], self.cwd.uri[0..info.cwd_len]);
 
         try ipc.appendMessage(gpa, &client.write_buf, .Info, std.mem.asBytes(&info));
         client.has_pending_output = true;
@@ -1212,7 +1205,7 @@ pub const Daemon = struct {
         term: *ghostty_vt.Terminal,
         payload: []const u8,
     ) !void {
-        self.setPwd(term);
+        self.cwd.update(term.getPwd());
         const format: util.HistoryFormat = if (payload.len > 0)
             @fromBackingInt(@intCast(payload[0]))
         else
@@ -1237,7 +1230,7 @@ pub const Daemon = struct {
         if (payload.len != @sizeOf(ipc.Capture)) return;
         const request = std.mem.bytesToValue(ipc.Capture, payload);
         const format = std.enums.fromInt(util.HistoryFormat, request.format) orelse return;
-        self.setPwd(term);
+        self.cwd.update(term.getPwd());
         const output = util.serializeTerminalRange(gpa, term, format, request.rows);
         defer if (output) |text| gpa.free(text);
         try ipc.appendMessage(gpa, &client.write_buf, .Capture, output orelse "");
@@ -1282,54 +1275,9 @@ pub const Daemon = struct {
         std.log.debug("run command len={d}", .{payload.len});
     }
 
-    /// Store the session's working directory as a plain path.
-    ///
-    /// Accepts either an OSC 7 value (`file://<host><path>`, percent-encoded)
-    /// or a path. Decoding here rather than at each use keeps `zmx list`
-    /// printing a path and lets the chdir on session create find directories
-    /// whose names needed escaping.
-    ///
-    /// The value is copied, so callers may pass a temporary.
-    pub fn setCwd(self: *Daemon, value: []const u8) void {
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        var host_buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
-        const hostname = std.posix.gethostname(&host_buf) catch "";
-        const cwd = util.parseOsc7Cwd(&buf, value, hostname) orelse {
-            std.log.warn("ignoring unusable cwd={s}", .{value});
-            return;
-        };
-
-        // Store the URI form. A caller that handed us a plain path gets one
-        // built here, so `cwd` has the same shape no matter the source. A value
-        // that already was a URI is kept verbatim, so `list` shows what the
-        // shell actually reported.
-        self.cwd = if (std.fs.path.isAbsolute(value))
-            util.toOsc7Cwd(&self.cwd_buf, value, hostname) orelse return
-        else blk: {
-            if (value.len > self.cwd_buf.len) return;
-            @memcpy(self.cwd_buf[0..value.len], value);
-            break :blk self.cwd_buf[0..value.len];
-        };
-
-        // Only keep an openable path when it names a directory on this host.
-        if (cwd.is_local and cwd.path.len <= self.cwd_path_buf.len) {
-            @memcpy(self.cwd_path_buf[0..cwd.path.len], cwd.path);
-            self.cwd_path = self.cwd_path_buf[0..cwd.path.len];
-        } else {
-            self.cwd_path = "";
-        }
-        std.log.info("set cwd={s} path={s}", .{ self.cwd, self.cwd_path });
-    }
-
-    fn setPwd(self: *Daemon, term: *ghostty_vt.Terminal) void {
-        const pwd = term.getPwd() orelse return;
-        if (std.mem.eql(u8, self.cwd, pwd)) return;
-        self.setCwd(pwd);
-    }
-
     pub fn handleOutput(self: *Daemon, gpa: std.mem.Allocator, payload: []const u8, term: *ghostty_vt.Terminal, vt_stream: anytype) !void {
         vt_stream.nextSlice(payload);
-        self.setPwd(term);
+        self.cwd.update(term.getPwd());
         self.has_pty_output = true;
         for (self.clients.items) |client| {
             try ipc.appendMessage(gpa, &client.write_buf, .Output, payload);

@@ -89,7 +89,7 @@ pub fn create(alloc: Allocator, io: Io, name: []const u8, opts: CreateOptions) !
 
     var daemon = Daemon.init(io, &cfg, sesh, socket_path);
     daemon.command = opts.command;
-    if (opts.cwd) |cwd| daemon.setCwd(cwd);
+    daemon.cwd.update(opts.cwd);
     if (opts.shell) |sh| daemon.shell = sh;
     daemon.is_task_mode = opts.is_task_mode;
     daemon.quiet = opts.quiet;
@@ -152,7 +152,7 @@ pub fn attach(alloc: Allocator, io: Io, name: []const u8, opts: AttachOptions) !
     if (has_daemon) {
         var daemon = Daemon.init(io, &cfg, sesh, socket_path);
         daemon.command = opts.command;
-        if (opts.cwd) |cwd| daemon.setCwd(cwd);
+        daemon.cwd.update(opts.cwd);
         if (opts.shell) |sh| daemon.shell = sh;
         const is_daemon_proc = try daemon.ensureSession(io);
         if (is_daemon_proc) std.process.exit(0);
@@ -469,7 +469,7 @@ pub fn run(
     if (has_daemon) {
         var daemon = Daemon.init(io, &cfg, sesh, socket_path);
         daemon.is_task_mode = true;
-        if (opts.cwd) |cwd| daemon.setCwd(cwd);
+        daemon.cwd.update(opts.cwd);
         if (opts.shell) |sh| daemon.shell = sh;
         const is_daemon_proc = try daemon.ensureSession(io);
         if (is_daemon_proc) std.process.exit(0);
