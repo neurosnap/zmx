@@ -35,7 +35,7 @@ const bash_completions =
     \\  cur="${COMP_WORDS[COMP_CWORD]}"
     \\  prev="${COMP_WORDS[COMP_CWORD-1]}"
     \\
-    \\  local commands="attach run send print write detach list kill history get set clear print-env wait tail completions version help"
+    \\  local commands="create attach run send print write detach list kill history get set clear print-env wait tail completions version help"
     \\
     \\  if [[ $COMP_CWORD -eq 1 ]]; then
     \\    COMPREPLY=($(compgen -W "$commands" -- "$cur"))
@@ -43,6 +43,14 @@ const bash_completions =
     \\  fi
     \\
     \\  case "$prev" in
+    \\    --cwd|-c)
+    \\      if [[ ${COMP_WORDS[1]} == create || ${COMP_WORDS[1]} == new ]]; then
+    \\        while IFS= read -r dir; do COMPREPLY+=("$dir"); done < <(compgen -d -- "$cur")
+    \\      fi
+    \\      ;;
+    \\    create|new)
+    \\      COMPREPLY=($(compgen -W "-c --cwd --labels" -- "$cur"))
+    \\      ;;
     \\    attach|run|send|print|write|kill|get|set|clear|print-env|wait|tail)
     \\      local sessions=$(zmx list --short 2>/dev/null | tr '\n' ' ')
     \\      COMPREPLY=($(compgen -W "$sessions" -- "$cur"))
@@ -81,6 +89,7 @@ const zsh_completions =
     \\    commands)
     \\      local -a commands
     \\      commands=(
+    \\        'create:Create a session without attaching'
     \\        'attach:Attach to session, creating if needed'
     \\        'run:Send command without attaching'
     \\        'send:Send raw input to session PTY'
@@ -104,6 +113,9 @@ const zsh_completions =
     \\      ;;
     \\    args)
     \\      case $words[2] in
+    \\        create|new)
+    \\          _values 'options' '-c' '--cwd' '--labels'
+    \\          ;;
     \\        attach|a|kill|k|run|r|send|s|print|p|write|wr|get|g|set|clear|print-env|wait|w|tail|t)
     \\          _zmx_sessions
     \\          ;;
@@ -120,6 +132,9 @@ const zsh_completions =
     \\      esac
     \\      ;;
     \\    trailing)
+    \\      if [[ $words[2] == (create|new) && $words[CURRENT-1] == (--cwd|-c) ]]; then
+    \\        _files -/
+    \\      fi
     \\      # Additional args for commands like 'attach' or 'run'
     \\      ;;
     \\  esac
@@ -147,6 +162,7 @@ const fish_completions =
     \\complete -c zmx -x -n '__fish_is_nth_token 1' -s h -d 'Show help message'
     \\
     \\# zmx subcommands
+    \\complete -c zmx -n "__fish_is_nth_token 1" -a create -d 'Create a session without attaching'
     \\complete -c zmx -n "__fish_is_nth_token 1" -a attach -d 'Attach to session, creating if needed'
     \\complete -c zmx -n "__fish_is_nth_token 1" -a run -d 'Send command without attaching'
     \\complete -c zmx -n "__fish_is_nth_token 1" -a send -d 'Send raw input to session PTY'
@@ -173,7 +189,8 @@ const fish_completions =
     \\complete -c zmx -n "__fish_is_nth_token 2; and __fish_seen_subcommand_from c completions" -a 'bash zsh fish nu yash' -d Shell
     \\
     \\# Subcommand flags
-    \\complete -c zmx -n "__fish_seen_subcommand_from a attach" -l labels -d 'Apply "key=value ..." labels as the session is created' -r
+    \\complete -c zmx -n "__fish_seen_subcommand_from new create a attach" -l labels -d 'Apply "key=value ..." labels as the session is created' -r
+    \\complete -c zmx -n "__fish_seen_subcommand_from new create" -s c -l cwd -d 'Starting directory for the session' -r -a '(__fish_complete_directories)'
     \\complete -c zmx -n "__fish_seen_subcommand_from r run" -s d -d 'Detach from the calling terminal; use `wait` to track its status'
     \\complete -c zmx -n "__fish_seen_subcommand_from r run" -l vt -d 'Preserve terminal escape sequences in output'
     \\complete -c zmx -n "__fish_seen_subcommand_from r run" -l fish -d 'Required when the session runs fish shell'
@@ -194,6 +211,13 @@ const nu_completions =
     \\def "nu-complete zmx complete" [] {
     \\    [bash fish nu yash zsh]
     \\}
+    \\
+    \\export extern "zmx create" [
+    \\    name: string
+    \\    --labels: string
+    \\    --cwd(-c): path
+    \\    ...rest: string
+    \\]
     \\
     \\export extern "zmx attach" [
     \\    name: string@"nu-complete zmx sessions"
@@ -277,7 +301,7 @@ const yash_completions =
     \\        else
     \\            typeset zmxcmd="${WORDS[2]}"
     \\            case $zmxcmd in
-    \\            (a|attach)
+    \\            (a|attach|new|create)
     \\                command -f completion/zmx::attach:arg
     \\                ;;
     \\            (r|run)
@@ -331,6 +355,7 @@ const yash_completions =
     \\}
     \\
     \\function completion/zmx::completecmd {
+    \\    complete -P "$PREFIX" -D "Create a session without attaching" create new
     \\    complete -P "$PREFIX" -D "Attach to session, creating if needed" attach a
     \\    complete -P "$PREFIX" -D "Send command without attaching" run r
     \\    complete -P "$PREFIX" -D "Send raw input to session PTY" send s
@@ -365,6 +390,11 @@ const yash_completions =
     \\    OPTIONS=( #>#
     \\        "--labels:; apply labels as session is created"
     \\    ) #<#
+    \\    case ${WORDS[2]} in
+    \\    (create|new)
+    \\        OPTIONS=("${OPTIONS[@]}" "c:; starting directory for the session" "--cwd:; starting directory for the session")
+    \\        ;;
+    \\    esac
     \\    command -f completion//parseoptions -en
     \\    case $ARGOPT in
     \\    (-)
@@ -372,10 +402,13 @@ const yash_completions =
     \\        ;;
     \\    (--labels)
     \\        ;;
+    \\    (--cwd|-c)
+    \\        complete -P "$PREFIX" -d
+    \\        ;;
     \\    (*)
     \\        command -f completion//getoperands
     \\        if [ ${WORDS[#]} -eq 1 ]; then
-    \\            command -f completion/zmx::sessions
+    \\            case ${WORDS[2]} in a|attach) command -f completion/zmx::sessions ;; esac
     \\        else
     \\            complete -P "$PREFIX" -c
     \\        fi

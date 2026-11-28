@@ -8,6 +8,7 @@ Use spec: https://common-changelog.org/
 
 ### Added
 
+- `zmx create` starts a session without attaching
 - `zmx run <name> --vt` preserves terminal escape sequences in the command output
 
 ## v1.0.2 - 2026-11-24

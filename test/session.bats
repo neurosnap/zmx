@@ -18,6 +18,17 @@ load test_helper
 # Session creation
 # ============================================================================
 
+@test "create starts a detached session and rejects an existing name" {
+  ZMX_SESSION_PREFIX=dev- "$ZMX" create --labels role=build worker sh -c 'echo ready; exec cat'
+  wait_for_output dev-worker ready
+  [ "$("$ZMX" get dev-worker role)" = build ]
+
+  run "$ZMX" new dev-worker
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"already exists"* ]]
+  wait_for_clients dev-worker 0
+}
+
 @test "run: creates a session" {
   run "$ZMX" run test-create -d echo hello
   [ "$status" -eq 0 ]
@@ -80,7 +91,7 @@ load test_helper
 }
 
 @test "subcommands handle --help and -h without side effects" {
-  for cmd in attach send print write kill wait tail history list completions; do
+  for cmd in create attach send print write kill wait tail history list completions; do
     run "$ZMX" "$cmd" --help
     [ "$status" -eq 0 ]
     [[ "$output" == *"Usage:"* ]]

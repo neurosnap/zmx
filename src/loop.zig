@@ -816,7 +816,7 @@ pub const Daemon = struct {
         return self.run(io, dir, sesh_name);
     }
 
-    fn run(self: *Daemon, io: std.Io, dir: std.Io.Dir, sesh_name: []const u8) !bool {
+    pub fn run(self: *Daemon, io: std.Io, dir: std.Io.Dir, sesh_name: []const u8) !bool {
         std.log.info("creating session={s}", .{sesh_name});
         const server_sock_fd: lib_posix.socket_t = try socket.createSocket(self.socket_path);
         const log_fd = if (log.log_system.file) |f| f.handle else -1;
