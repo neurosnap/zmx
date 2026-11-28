@@ -13,6 +13,7 @@ const daemonize = @import("daemonize.zig");
 const builtin = @import("builtin");
 const terminal = @import("terminal.zig");
 const ghostty_vt = terminal.ghostty_vt;
+const capabilities = @import("capabilities.zig");
 
 /// clientLoop sends ipc commands to its corresponding daemon.  It uses poll() as its non-blocking
 /// mechanism. It will send stdin to the daemon and receive stdout from the daemon.
@@ -264,8 +265,18 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
     const init_size = ipc.getTerminalSize(pty_fd);
     var term = try initTerminal(gpa, io, init_size, daemon.cfg);
     defer term.deinit(gpa);
-    var vt_stream = term.vtStream();
+
+    // Capabilities live as long as this daemon and keep their data across attachments.
+    var capability_session = capabilities.Session.init(gpa);
+    defer capability_session.deinit();
+
+    // One parser updates the saved screen and lets each capability observe output.
+    var vt_stream = capabilities.initStream(&term, &capability_session, daemon.capabilityReplies());
     defer vt_stream.deinit();
+
+    // Keep the parser available while handling reconnect requests.
+    daemon.capability_stream = &vt_stream;
+    defer daemon.capability_stream = null;
 
     // Carries the tail of the previous PTY read so the task-exit marker
     // search below can see across a read() boundary. Sized to comfortably
@@ -640,6 +651,7 @@ const PendingWrite = struct {
 ///
 /// Conceptually it's also much simpler to reason about.
 pub const Daemon = struct {
+    capability_stream: ?*capabilities.Stream = null,
     cfg: *Cfg,
     session_name: []const u8,
     socket_path: []const u8,
@@ -1029,6 +1041,44 @@ pub const Daemon = struct {
         }
     }
 
+    /// Build the callbacks that connect capability replies to this daemon's program.
+    fn capabilityReplies(self: *Daemon) capabilities.Replies {
+        const Callbacks = struct {
+            fn isAttached(context: *anyopaque) bool {
+                const daemon: *Daemon = @ptrCast(@alignCast(context));
+                return daemon.hasTerminalClient();
+            }
+
+            fn write(context: *anyopaque, alloc: std.mem.Allocator, bytes: []const u8) void {
+                const daemon: *Daemon = @ptrCast(@alignCast(context));
+                daemon.queuePtyInput(alloc, bytes);
+            }
+        };
+        return .{ .context = self, .isAttached = Callbacks.isAttached, .write = Callbacks.write };
+    }
+
+    /// Queue saved capability information and any unfinished terminal command for
+    /// the client that just attached. Existing clients keep receiving live output
+    /// and do not receive this extra restoration.
+    fn restoreCapabilities(self: *Daemon, gpa: std.mem.Allocator, client: *Client) void {
+        const stream = self.capability_stream orelse return;
+
+        // Append restoration messages to this client after its saved screen.
+        const PendingOutput = struct {
+            alloc: std.mem.Allocator,
+            client: *Client,
+
+            fn write(context: *anyopaque, bytes: []const u8) !void {
+                const pending: *@This() = @ptrCast(@alignCast(context));
+                try ipc.appendMessage(pending.alloc, &pending.client.write_buf, .Output, bytes);
+                pending.client.has_pending_output = true;
+            }
+        };
+
+        var pending: PendingOutput = .{ .alloc = gpa, .client = client };
+        capabilities.restore(stream, .{ .context = &pending, .write = PendingOutput.write });
+    }
+
     pub fn handleInit(
         self: *Daemon,
         gpa: std.mem.Allocator,
@@ -1080,6 +1130,12 @@ pub const Daemon = struct {
                 client.has_pending_output = true;
             }
         }
+
+        // Restore capability information after the screen.
+        // This also resumes any unfinished terminal command, so screen output must come
+        // first to avoid becoming part of that command. Do this before the PTY resize
+        // below can trigger fresh program output.
+        self.restoreCapabilities(gpa, client);
 
         // only resize if leader
         if (is_leader) {
@@ -1756,4 +1812,74 @@ test "handleEnvGet returns leader client's environment variables including unset
     try daemon.handleEnvGet(alloc, &client_req);
     const pay3 = client_req.write_buf.items[@sizeOf(ipc.Header)..];
     try std.testing.expectEqualStrings("DISPLAY=:99\n", pay3);
+}
+
+test "capability replies preserve the daemon PTY queue whole message limit" {
+    const alloc = std.testing.allocator;
+    var daemon = testDaemon();
+    defer daemon.pty_write_buf.deinit(alloc);
+
+    const replies = daemon.capabilityReplies();
+    var reply: capabilities.Reply = .{
+        .alloc = alloc,
+        .context = replies.context,
+        .write = replies.write,
+        .claimed = false,
+    };
+
+    try daemon.pty_write_buf.appendNTimes(alloc, 'x', Daemon.PTY_WRITE_BUF_MAX - 1);
+    try std.testing.expect(reply.send("complete-reply"));
+    try std.testing.expectEqual(@as(usize, Daemon.PTY_WRITE_BUF_MAX - 1), daemon.pty_write_buf.items.len);
+    try std.testing.expect(std.mem.allEqual(u8, daemon.pty_write_buf.items, 'x'));
+    daemon.pty_write_buf.clearRetainingCapacity();
+    reply.claimed = false;
+    try std.testing.expect(reply.send("complete-reply"));
+    try std.testing.expectEqualStrings("complete-reply", daemon.pty_write_buf.items);
+}
+
+test "handleInit queues the saved screen before capability restoration and unfinished output" {
+    const alloc = std.testing.allocator;
+    const cfg = Cfg{ .socket_dir = "", .log_dir = "" };
+    var daemon = testDaemon();
+    var term = try initTerminal(alloc, std.testing.io, .{ .cols = 80, .rows = 24 }, &cfg);
+    defer term.deinit(alloc);
+
+    var host = capabilities.Session.init(alloc);
+    defer host.deinit();
+
+    var stream = capabilities.initStream(&term, &host, daemon.capabilityReplies());
+    defer stream.deinit();
+
+    daemon.capability_stream = &stream;
+    stream.nextSlice("screen-survives\x1b]0;unfinished");
+    daemon.has_pty_output = true;
+
+    const pipes = try lib_posix.pipe2(.{});
+    defer lib_posix.close(pipes[1]);
+
+    const client = try testClient(alloc, pipes[0], true);
+    defer {
+        client.deinit(alloc);
+        alloc.destroy(client);
+    }
+
+    // An existing leader avoids resizing the test PTY during attachment.
+    daemon.leader_client_fd = -1;
+    const size = ipc.Resize{ .rows = 24, .cols = 80 };
+    try daemon.handleInit(alloc, client, -1, &term, std.mem.asBytes(&size));
+    try std.testing.expect(client.has_pending_output);
+    var messages = try ipc.SocketBuffer.init(alloc);
+    defer messages.deinit();
+
+    try messages.buf.appendSlice(alloc, client.write_buf.items);
+    const screen = messages.next().?;
+    try std.testing.expectEqual(.Output, screen.header.tag);
+    try std.testing.expect(std.mem.indexOf(u8, screen.payload, "screen-survives") != null);
+    var remaining: std.ArrayList(u8) = .empty;
+    defer remaining.deinit(alloc);
+    while (messages.next()) |message| {
+        try std.testing.expectEqual(.Output, message.header.tag);
+        try remaining.appendSlice(alloc, message.payload);
+    }
+    try std.testing.expect(std.mem.endsWith(u8, remaining.items, "\x1b]0;unfinished"));
 }

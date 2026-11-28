@@ -9,6 +9,7 @@ comptime {
     _ = @import("signal.zig");
     _ = @import("loop.zig");
     _ = @import("terminal.zig");
+    _ = @import("capabilities.zig");
     _ = @import("cfg.zig");
     _ = @import("daemonize.zig");
     _ = @import("client.zig");
