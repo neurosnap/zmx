@@ -43,6 +43,15 @@ How it works:
 
 In this way, `ghostty-vt` doesn't sit in the middle of an active terminal session, it simply receives all the same data the client receives so it can re-hydrate clients that connect to the session. This enables users to pick up where they left off as if they didn't disconnect from the terminal session at all. It also has the added benefit of being very fast, the only thing sitting in-between you and your PTY is a unix socket.
 
+### supported operating system commands (OSC)
+
+zmx supports the following [OSC codes](https://ghostty.org/docs/vt/reference):
+
+- [OSC 2](https://ghostty.org/docs/vt/osc/2): restores the window title on attach.
+- [OSC 7](https://ghostty.org/docs/vt/osc/7): tracks the working directory for `zmx list` and replays it on attach and in `zmx history --vt`.
+- [OSC 10, 11, 12](https://ghostty.org/docs/vt/osc/1x): restore the session’s foreground, background, and cursor colors on attach.
+- [OSC 110, 111, 112](https://ghostty.org/docs/vt/osc/11x): reset colors from OSC 10, 11, and 12 when on session detach/switch.
+
 ## prior art
 
 Below is a list of projects that inspired me to build this project. Architecturally, `zmx` uses aspects of both projects. For example, `shpool` inspired the idea of having libghostty restore the terminal state on reattach. Abduco inspired the idea of one daemon (and unix socket) per session.
